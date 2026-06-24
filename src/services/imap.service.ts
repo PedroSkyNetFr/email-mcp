@@ -43,6 +43,7 @@ import {
   searchFailedStatus,
   timeoutStatus,
 } from './search-status.js';
+import { applyAccountSignature } from './signature-loader.js';
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -2196,6 +2197,7 @@ export default class ImapService {
       html?: boolean;
       inReplyTo?: string;
       attachments?: ResolvedAttachment[];
+      appendSignature?: boolean;
     },
   ): Promise<{ id: number; mailbox: string }> {
     const client = await this.connections.getImapClient(accountName);
@@ -2207,7 +2209,14 @@ export default class ImapService {
     const draftsPath = drafts?.path ?? 'Drafts';
 
     const fromAddr = account.fullName ? `"${account.fullName}" <${account.email}>` : account.email;
-    const hasDraftAttachments = !!options.attachments && options.attachments.length > 0;
+
+    // Signature optionnelle : HTML sous le corps + images inline (cid).
+    const signed = await applyAccountSignature(
+      account,
+      { body: options.body, html: options.html, attachments: options.attachments },
+      options.appendSignature,
+    );
+    const hasDraftAttachments = signed.attachments.length > 0;
 
     const mailOptions = {
       from: fromAddr,
@@ -2217,8 +2226,8 @@ export default class ImapService {
       subject: options.subject,
       inReplyTo: options.inReplyTo,
       date: new Date(),
-      ...(options.html ? { html: options.body } : { text: options.body }),
-      ...(hasDraftAttachments ? { attachments: options.attachments } : {}),
+      ...(signed.html ? { html: signed.body } : { text: signed.body }),
+      ...(hasDraftAttachments ? { attachments: signed.attachments } : {}),
     };
 
     const rawMessage = await new Promise<Buffer>((resolve, reject) => {
@@ -2279,6 +2288,7 @@ export default class ImapService {
       html?: boolean;
       inReplyTo?: string;
       attachments?: AttachmentInput[];
+      appendSignature?: boolean;
     },
   ): Promise<{ id: number; mailbox: string }> {
     let resolved: ResolvedAttachment[] = [];
@@ -2301,6 +2311,7 @@ export default class ImapService {
       html: options.html,
       inReplyTo: options.inReplyTo,
       attachments: resolved,
+      appendSignature: options.appendSignature,
     });
   }
 

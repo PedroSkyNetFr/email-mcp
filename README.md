@@ -1072,6 +1072,36 @@ npx tsx --env-file=.env scripts/draft-canet-signature.ts \
 If `--logo` is omitted, a small placeholder PNG is used so you can validate the
 technical chain before wiring your real logo.
 
+#### Use your existing Outlook signature automatically
+
+Instead of re-pasting HTML or passing a logo every time, point the account at an
+existing **Outlook signature** and let the server embed it (logo included) on
+demand. Outlook stores signatures under
+`%APPDATA%\Microsoft\Signatures\` as a `.htm` file plus a `<name>_fichiers\`
+folder of images. Configure the path:
+
+```toml
+# config.toml — per account
+[[accounts]]
+name = "contact"
+# …
+signature_path = "C:\\Users\\Pierre\\AppData\\Roaming\\Microsoft\\Signatures\\CC (contact@pierrecanet.fr).htm"
+```
+
+(or the `MCP_EMAIL_SIGNATURE_PATH` environment variable). Then set
+`append_signature: true` on `send_email`, `reply_email` or `save_draft`:
+
+```jsonc
+{ "account": "contact", "to": ["x@y.com"], "subject": "Bonjour",
+  "body": "<p>Bonjour,</p>", "append_signature": true }
+```
+
+The server reads the `.htm`, rewrites each local `<img src>` to a `cid:` inline
+image (reading the bytes from the `_fichiers` folder), appends it below the body
+and switches the message to HTML. **Like the password, this is just config — no
+code or HTML to touch.** The MCP server must run on the machine where that
+signature path exists (e.g. your local build on Windows).
+
 ## API
 
 ### Tools (52)

@@ -55,6 +55,10 @@ export const AccountConfigSchema = z
     sent_folder: z.string().optional(),
     save_to_sent: z.boolean().optional(),
     gmail_auto_save: z.boolean().optional(),
+    // Chemin vers la signature HTML Outlook (.htm). Les images locales qu'elle
+    // référence sont embarquées inline (cid) à la composition quand
+    // append_signature est demandé. Voir signature-loader.ts.
+    signature_path: z.string().optional(),
   })
   .refine((data) => data.password ?? data.oauth2, {
     message: 'Either password or oauth2 config is required',

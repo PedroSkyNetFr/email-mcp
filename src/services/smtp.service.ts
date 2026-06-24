@@ -11,6 +11,7 @@ import type RateLimiter from '../safety/rate-limiter.js';
 import type { AccountConfig, SendResult } from '../types/index.js';
 import type { ResolvedAttachment } from './attachment-resolver.js';
 import type ImapService from './imap.service.js';
+import { applyAccountSignature } from './signature-loader.js';
 
 // ---------------------------------------------------------------------------
 // Helpers (must be defined before SmtpService)
@@ -160,6 +161,7 @@ export default class SmtpService {
       bcc?: string[];
       html?: boolean;
       attachments?: ResolvedAttachment[];
+      appendSignature?: boolean;
     },
   ): Promise<SendResult> {
     this.checkRateLimit(accountName);
@@ -171,6 +173,13 @@ export default class SmtpService {
     const ccAddrs = options.cc ?? [];
     const bccAddrs = options.bcc ?? [];
 
+    // Signature optionnelle : ajoute le HTML sous le corps + images inline (cid).
+    const signed = await applyAccountSignature(
+      account,
+      { body: options.body, html: options.html, attachments: options.attachments },
+      options.appendSignature,
+    );
+
     // Compose ONCE → raw bytes (same approach as replyToEmail / sendDraft): the
     // identical bytes are transmitted via SMTP and stored in Sent. Bcc is
     // deliberately NOT placed in mailOptions — we send the raw message, so
@@ -181,8 +190,8 @@ export default class SmtpService {
       to: toAddrs.join(', '),
       cc: ccAddrs.length > 0 ? ccAddrs.join(', ') : undefined,
       subject: options.subject,
-      ...(options.html ? { html: options.body } : { text: options.body }),
-      ...(options.attachments?.length ? { attachments: options.attachments } : {}),
+      ...(signed.html ? { html: signed.body } : { text: signed.body }),
+      ...(signed.attachments.length ? { attachments: signed.attachments } : {}),
     };
 
     const rawMessage = await new Promise<Buffer>((resolve, reject) => {
@@ -232,6 +241,7 @@ export default class SmtpService {
       replyAll?: boolean;
       html?: boolean;
       includeAttachments?: boolean;
+      appendSignature?: boolean;
     },
   ): Promise<SendResult> {
     this.checkRateLimit(accountName);
@@ -302,6 +312,13 @@ export default class SmtpService {
       });
     }
 
+    // Signature optionnelle : HTML sous le corps + images inline (cid).
+    const signed = await applyAccountSignature(
+      account,
+      { body: options.body, html: options.html, attachments },
+      options.appendSignature,
+    );
+
     // Build the raw message once — same bytes sent via SMTP and stored in Sent folder
     const mailOptions = {
       from: fromAddr,
@@ -310,8 +327,8 @@ export default class SmtpService {
       subject,
       inReplyTo: original.messageId,
       references: references.join(' '),
-      ...(options.html ? { html: options.body } : { text: options.body }),
-      ...(attachments.length > 0 ? { attachments } : {}),
+      ...(signed.html ? { html: signed.body } : { text: signed.body }),
+      ...(signed.attachments.length > 0 ? { attachments: signed.attachments } : {}),
     };
 
     const rawMessage = await new Promise<Buffer>((resolve, reject) => {

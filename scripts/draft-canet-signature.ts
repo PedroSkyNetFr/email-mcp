@@ -82,41 +82,57 @@ async function main(): Promise<void> {
   const to = args.to ?? 'contact@pierrecanet.fr';
   const subject = args.subject ?? 'Test signature inline CANET CONSTRUCTION';
   const cid = args.cid ?? 'logoCanet';
-
-  // Logo : chemin fourni, sinon PNG de remplacement écrit dans un dossier temp.
-  let logoPath = args.logo;
-  if (!logoPath) {
-    const tmp = mkdtempSync(path.join(tmpdir(), 'canet-logo-'));
-    logoPath = path.join(tmp, 'logo-placeholder.png');
-    writeFileSync(logoPath, Buffer.from(PLACEHOLDER_PNG_BASE64, 'base64'));
-    // eslint-disable-next-line no-console
-    console.warn(`[i] Aucun --logo fourni : PNG de remplacement utilisé (${logoPath}).`);
-  }
-
   const intro = args.body ?? '<p>Bonjour,</p><p>Ceci est un brouillon de test.</p>';
-  const html = `<!DOCTYPE html><html><body>${intro}<br>${resolveSignatureBody()}</body></html>`;
+
+  // Si le compte a un signature_path configuré, on teste le VRAI flux :
+  // save_draft + append_signature (signature Outlook + logo inline automatique).
+  // Sinon, on retombe sur le template + un logo passé en pièce inline cid.
+  const account = config.accounts.find((a) => a.name === accountName);
+  const useConfiguredSignature = !!account?.signaturePath;
+
+  let draftOptions: Parameters<ImapService['saveDraftWithAttachments']>[1];
+  if (useConfiguredSignature) {
+    // eslint-disable-next-line no-console
+    console.log(`[i] Signature configurée utilisée : ${account?.signaturePath ?? ''}`);
+    draftOptions = {
+      to: [to],
+      subject,
+      body: `<!DOCTYPE html><html><body>${intro}</body></html>`,
+      html: true,
+      appendSignature: true,
+    };
+  } else {
+    // Logo : chemin fourni, sinon PNG de remplacement écrit dans un dossier temp.
+    let logoPath = args.logo;
+    if (!logoPath) {
+      const tmp = mkdtempSync(path.join(tmpdir(), 'canet-logo-'));
+      logoPath = path.join(tmp, 'logo-placeholder.png');
+      writeFileSync(logoPath, Buffer.from(PLACEHOLDER_PNG_BASE64, 'base64'));
+      // eslint-disable-next-line no-console
+      console.warn(`[i] Aucun signature_path ni --logo : PNG de remplacement utilisé (${logoPath}).`);
+    }
+    draftOptions = {
+      to: [to],
+      subject,
+      body: `<!DOCTYPE html><html><body>${intro}<br>${resolveSignatureBody()}</body></html>`,
+      html: true,
+      // Logo embarqué INLINE (cid) + cohabitation possible avec des PJ classiques.
+      attachments: [{ path: logoPath, filename: 'logo.png', cid }],
+    };
+  }
 
   const oauthService = new OAuthService();
   const connections = new ConnectionManager(config.accounts, oauthService);
   const imapService = new ImapService(connections);
 
   try {
-    const result = await imapService.saveDraftWithAttachments(accountName, {
-      to: [to],
-      subject,
-      body: html,
-      html: true,
-      // Logo embarqué INLINE (cid) + cohabitation possible avec des PJ classiques.
-      attachments: [{ path: logoPath, filename: 'logo.png', cid }],
-    });
+    const result = await imapService.saveDraftWithAttachments(accountName, draftOptions);
     // eslint-disable-next-line no-console
     console.log(
       `✅ Brouillon créé : UID ${result.id} dans "${result.mailbox}" (compte ${accountName}).`,
     );
     // eslint-disable-next-line no-console
-    console.log(
-      `   Logo inline cid:${cid} — ouvrez le brouillon dans Outlook pour vérifier le rendu.`,
-    );
+    console.log('   Logo embarqué inline — ouvrez le brouillon dans Outlook pour vérifier le rendu.');
   } finally {
     await connections.closeAll();
   }

@@ -71,6 +71,8 @@ export interface AccountConfig {
   sentFolder?: string;
   saveToSent?: boolean;
   gmailAutoSave?: boolean;
+  /** Chemin vers la signature HTML Outlook (.htm) à embarquer inline. */
+  signaturePath?: string;
 }
 
 export interface WatcherConfig {
