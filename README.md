@@ -74,6 +74,49 @@ npm install -g @codefuturist/email-mcp
 pnpm add -g @codefuturist/email-mcp
 ```
 
+### Run your local build (fork)
+
+To run a locally-built copy of this fork instead of the published npm package:
+
+```bash
+# 1. Install + build (Node ≥ 22)
+pnpm install
+pnpm build              # compiles to dist/main.js (the `email-mcp` bin)
+
+# 2. Run the local binary directly
+node dist/main.js        # MCP server over stdio (default)
+node dist/main.js test   # test IMAP/SMTP connections
+```
+
+Point your MCP client at the local binary by replacing the
+`npx @codefuturist/email-mcp` command with an absolute `node dist/main.js`:
+
+```jsonc
+{
+  "mcpServers": {
+    "email": {
+      "command": "node",
+      "args": ["/abs/path/to/email-mcp/dist/main.js", "stdio"],
+      "env": {
+        "MCP_EMAIL_ACCOUNT_NAME": "work",
+        "MCP_EMAIL_ADDRESS": "you@example.com",
+        "MCP_EMAIL_FULL_NAME": "Your Name",
+        "MCP_EMAIL_PASSWORD": "your-password",
+        "MCP_EMAIL_IMAP_HOST": "imap.example.com",
+        "MCP_EMAIL_SMTP_HOST": "smtp.example.com"
+      }
+    }
+  }
+}
+```
+
+Configuration comes from **either** environment variables (the `env` block
+above, or a `.env` loaded via Node's `--env-file=.env`) **or** a
+`~/.config/email-mcp/config.toml` (`node dist/main.js config init` to scaffold
+one). **No PostgreSQL is required** to send or draft mail — the optional
+`[database]` section is used only by the cross-account routing engine and stays
+inactive when unset.
+
 ### Docker
 
 No Node.js required — just Docker.
@@ -968,6 +1011,70 @@ Run a search and sweep every matching attachment into a dated folder. Great for 
 - `account` — bucketed by originating account name (useful for multi-account sweeps)
 
 Default destination is `~/Downloads/email-attachments-<ISO-ts>/`. Per-email errors are collected in `errors[]` rather than aborting the whole run — you get a summary with `files_saved`, `total_size`, `skipped`, and the error list.
+
+### Inline images (`cid`)
+
+`send_email`, `reply_email`, `save_draft` and `update_draft` can embed an image
+**inline** in an HTML body (e.g. a signature logo shown in the message itself,
+not as a downloadable attachment, and without any remote URL). Any attachment
+that carries a `cid` field is embedded inline (`Content-Disposition: inline`,
+`Content-ID: <cid>`) and the message becomes `multipart/related`. Reference it
+from the HTML with `<img src="cid:...">` using the **same** `cid`.
+
+```jsonc
+{
+  "to": ["recipient@example.com"],
+  "subject": "Hello",
+  "html": true,
+  "body": "<p>Hi!</p><img src=\"cid:companyLogo\">",
+  "attachments": [
+    // Inline logo — embedded in the body (NOT a downloadable attachment).
+    { "path": "/abs/path/logo.png", "filename": "logo.png", "cid": "companyLogo" },
+    // Classic attachment alongside the inline image — both coexist.
+    { "path": "/abs/path/quote.pdf" }
+  ]
+}
+```
+
+Notes:
+
+- The `cid` value must match exactly between `<img src="cid:companyLogo">` and
+  the attachment's `cid` (here `companyLogo`).
+- Without `cid`, an attachment stays a normal downloadable attachment
+  (backward-compatible — nothing changes for existing callers).
+- An inline image works from any attachment source: `path`, `content_base64`,
+  or `source_email_id`.
+- `update_draft` warns only when the HTML references a `cid:` for which **no**
+  matching inline attachment was provided (a genuinely broken image).
+
+#### Use an existing Outlook signature automatically
+
+Instead of re-pasting HTML or passing a logo every time, point the account at an
+existing **Outlook signature** and let the server embed it (logo included) on
+demand. Outlook stores signatures under `%APPDATA%\Microsoft\Signatures\` as a
+`.htm` file plus a `<name>_fichiers\` folder of images. Configure the path:
+
+```toml
+# config.toml — per account
+[[accounts]]
+name = "work"
+# …
+signature_path = "C:\\Users\\You\\AppData\\Roaming\\Microsoft\\Signatures\\My Signature.htm"
+```
+
+(or the `MCP_EMAIL_SIGNATURE_PATH` environment variable). Then set
+`append_signature: true` on `send_email`, `reply_email` or `save_draft`:
+
+```jsonc
+{ "account": "work", "to": ["x@y.com"], "subject": "Hello",
+  "body": "<p>Hello,</p>", "append_signature": true }
+```
+
+The server reads the `.htm`, rewrites each local `<img src>` to a `cid:` inline
+image (reading the bytes from the sibling `_fichiers` folder), appends it below
+the body and switches the message to HTML. **Like the password, this is just
+config — no code or HTML to touch.** The MCP server must run on the machine
+where that signature path exists (e.g. your local build on Windows).
 
 ## API
 

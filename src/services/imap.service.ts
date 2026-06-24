@@ -43,6 +43,7 @@ import {
   searchFailedStatus,
   timeoutStatus,
 } from './search-status.js';
+import { applyAccountSignature } from './signature-loader.js';
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -250,10 +251,11 @@ export function hasAttachments(bodyStructure: unknown): boolean {
 }
 
 /**
- * Extract `cid:` references from an HTML body. Returns unique CIDs in order
- * of first appearance. Used by update_draft to warn callers when an HTML
- * draft references inline images — v1 flattens those to plain attachments,
- * which means the recipient's mail client will show broken image icons.
+ * Extract `cid:` references from an HTML body. Returns the unique CIDs in order
+ * of appearance. Used to match the HTML `<img src="cid:…">` against the inline
+ * attachments actually provided: a message whose every `cid:` has a matching
+ * inline attachment is embedded as multipart/related (no warning), and we only
+ * warn for an orphan `cid:` (a potentially broken image).
  */
 export function extractCidReferences(html: string): string[] {
   const re = /cid:([^"'\s>)]+)/gi;
@@ -269,6 +271,26 @@ export function extractCidReferences(html: string): string[] {
     match = re.exec(html);
   }
   return out;
+}
+
+/**
+ * Compute the `cid:` references in the HTML for which NO matching inline
+ * attachment was provided. Those CIDs would render as a broken image for the
+ * recipient; the others are genuinely embedded (multipart/related).
+ *
+ * The comparison is case-insensitive and tolerates surrounding angle brackets
+ * (`<companyLogo>`), since nodemailer normalizes the Content-ID.
+ */
+export function findMissingInlineCids(
+  html: string,
+  attachments: Pick<ResolvedAttachment, 'cid'>[],
+): string[] {
+  const provided = new Set(
+    attachments
+      .map((a) => a.cid?.replace(/^<|>$/g, '').toLowerCase())
+      .filter((c): c is string => !!c),
+  );
+  return extractCidReferences(html).filter((cid) => !provided.has(cid.toLowerCase()));
 }
 
 /**
@@ -2175,6 +2197,7 @@ export default class ImapService {
       html?: boolean;
       inReplyTo?: string;
       attachments?: ResolvedAttachment[];
+      appendSignature?: boolean;
     },
   ): Promise<{ id: number; mailbox: string }> {
     const client = await this.connections.getImapClient(accountName);
@@ -2186,7 +2209,14 @@ export default class ImapService {
     const draftsPath = drafts?.path ?? 'Drafts';
 
     const fromAddr = account.fullName ? `"${account.fullName}" <${account.email}>` : account.email;
-    const hasDraftAttachments = !!options.attachments && options.attachments.length > 0;
+
+    // Optional signature: HTML appended below the body + inline (cid) images.
+    const signed = await applyAccountSignature(
+      account,
+      { body: options.body, html: options.html, attachments: options.attachments },
+      options.appendSignature,
+    );
+    const hasDraftAttachments = signed.attachments.length > 0;
 
     const mailOptions = {
       from: fromAddr,
@@ -2196,8 +2226,8 @@ export default class ImapService {
       subject: options.subject,
       inReplyTo: options.inReplyTo,
       date: new Date(),
-      ...(options.html ? { html: options.body } : { text: options.body }),
-      ...(hasDraftAttachments ? { attachments: options.attachments } : {}),
+      ...(signed.html ? { html: signed.body } : { text: signed.body }),
+      ...(hasDraftAttachments ? { attachments: signed.attachments } : {}),
     };
 
     const rawMessage = await new Promise<Buffer>((resolve, reject) => {
@@ -2258,6 +2288,7 @@ export default class ImapService {
       html?: boolean;
       inReplyTo?: string;
       attachments?: AttachmentInput[];
+      appendSignature?: boolean;
     },
   ): Promise<{ id: number; mailbox: string }> {
     let resolved: ResolvedAttachment[] = [];
@@ -2280,6 +2311,7 @@ export default class ImapService {
       html: options.html,
       inReplyTo: options.inReplyTo,
       attachments: resolved,
+      appendSignature: options.appendSignature,
     });
   }
 
@@ -2443,13 +2475,17 @@ export default class ImapService {
     const bcc = options.bcc ?? existing.bcc?.map((a) => a.address);
     const inReplyTo = options.inReplyTo ?? existing.inReplyTo;
 
-    // Inline image detection — warn when the body references cid: parts that
-    // won't survive the rebuild (v1 treats them as plain attachments only).
+    // Inline images: attachments carrying a `cid` are genuinely embedded as
+    // multipart/related (see saveDraft → MailComposer). We therefore only warn
+    // for a `cid:` in the HTML WITHOUT a matching inline attachment (broken image).
     if (html && typeof body === 'string') {
-      const cidRefs = extractCidReferences(body);
-      if (cidRefs.length > 0) {
+      const missing = findMissingInlineCids(body, allAttachments);
+      if (missing.length > 0) {
         warnings.push(
-          `Body has ${cidRefs.length} cid: reference(s) (${cidRefs.slice(0, 3).join(', ')}${cidRefs.length > 3 ? ', …' : ''}). Inline images are flattened in v1 — recipient may see broken image icons.`,
+          `The HTML references ${missing.length} inline image(s) with no matching attachment ` +
+            `(${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ', …' : ''}). ` +
+            'Provide them via attachments_add with the corresponding `cid` field, ' +
+            'otherwise the recipient will see a broken image.',
         );
       }
     }

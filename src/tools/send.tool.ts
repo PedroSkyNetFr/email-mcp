@@ -42,6 +42,13 @@ export default function registerSendTools(
             'without round-tripping bytes through this MCP. Strict failure: if any attachment cannot ' +
             'be resolved, the email is NOT sent.',
         ),
+      append_signature: z
+        .boolean()
+        .optional()
+        .describe(
+          "Append the account's configured signature (signature_path) below the body, with its " +
+            'logo/images embedded inline (cid). Forces HTML. Requires signature_path on the account.',
+        ),
     },
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (params) => {
@@ -62,6 +69,7 @@ export default function registerSendTools(
         const result = await smtpService.sendEmail(params.account, {
           ...params,
           attachments: resolvedAttachments,
+          appendSignature: params.append_signature,
         });
         await audit.log(
           'send_email',
@@ -120,6 +128,13 @@ export default function registerSendTools(
         .boolean()
         .default(false)
         .describe('Re-attach attachments from the original email to this reply'),
+      appendSignature: z
+        .boolean()
+        .optional()
+        .describe(
+          "Append the account's configured signature (signature_path) below the reply, with its " +
+            'logo/images embedded inline (cid). Forces HTML. Requires signature_path on the account.',
+        ),
     },
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (params) => {

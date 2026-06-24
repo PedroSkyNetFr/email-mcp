@@ -21,14 +21,23 @@ import type ImapService from './imap.service.js';
 export const REBUILD_ATTACHMENT_CAP_BYTES = 25 * 1024 * 1024;
 
 export type AttachmentInput =
-  | { path: string; filename?: string; mimeType?: string }
-  | { contentBase64: string; filename: string; mimeType?: string }
-  | { sourceEmailId: string; sourceMailbox: string; filename: string };
+  | { path: string; filename?: string; mimeType?: string; cid?: string }
+  | { contentBase64: string; filename: string; mimeType?: string; cid?: string }
+  | { sourceEmailId: string; sourceMailbox: string; filename: string; cid?: string };
 
 export interface ResolvedAttachment {
   filename: string;
   content: Buffer;
   contentType: string;
+  /**
+   * Content-ID of an inline image (without angle brackets), e.g. "companyLogo".
+   * When present, the attachment is embedded as multipart/related and
+   * referenced from the HTML via <img src="cid:companyLogo">. Absent = classic
+   * attachment.
+   */
+  cid?: string;
+  /** 'inline' for an embedded cid image, 'attachment' (or absent) otherwise. */
+  contentDisposition?: 'inline' | 'attachment';
 }
 
 export interface AttachmentFailure {
@@ -72,6 +81,21 @@ function inputLabel(input: AttachmentInput): string {
   return input.filename;
 }
 
+/**
+ * Carries the inline fields (`cid` / `contentDisposition`) from the input onto
+ * the resolved attachment. If the input has a `cid`, the attachment becomes
+ * inline; otherwise it stays a classic attachment (fields left undefined for
+ * backward compat — nodemailer treats the absence of a cid as an ordinary
+ * attachment).
+ */
+function applyInlineFields(
+  resolved: ResolvedAttachment,
+  input: AttachmentInput,
+): ResolvedAttachment {
+  if (!input.cid) return resolved;
+  return { ...resolved, cid: input.cid, contentDisposition: 'inline' };
+}
+
 async function resolveOne(
   imapService: ImapService,
   accountName: string,
@@ -87,11 +111,14 @@ async function resolveOne(
       );
     }
     const filename = input.filename ?? path.basename(absolute);
-    return {
-      filename,
-      content,
-      contentType: input.mimeType ?? guessMimeType(filename),
-    };
+    return applyInlineFields(
+      {
+        filename,
+        content,
+        contentType: input.mimeType ?? guessMimeType(filename),
+      },
+      input,
+    );
   }
 
   if ('contentBase64' in input) {
@@ -101,11 +128,14 @@ async function resolveOne(
         `Attachment "${input.filename}" is ${Math.round(content.length / 1024 / 1024)}MB, exceeds ${Math.round(maxSizeBytes / 1024 / 1024)}MB limit`,
       );
     }
-    return {
-      filename: input.filename,
-      content,
-      contentType: input.mimeType ?? guessMimeType(input.filename),
-    };
+    return applyInlineFields(
+      {
+        filename: input.filename,
+        content,
+        contentType: input.mimeType ?? guessMimeType(input.filename),
+      },
+      input,
+    );
   }
 
   // sourceEmailId — fetch from IMAP without round-tripping through MCP
@@ -116,11 +146,14 @@ async function resolveOne(
     input.filename,
     maxSizeBytes,
   );
-  return {
-    filename: downloaded.filename,
-    content: Buffer.from(downloaded.contentBase64, 'base64'),
-    contentType: downloaded.mimeType,
-  };
+  return applyInlineFields(
+    {
+      filename: downloaded.filename,
+      content: Buffer.from(downloaded.contentBase64, 'base64'),
+      contentType: downloaded.mimeType,
+    },
+    input,
+  );
 }
 
 /**

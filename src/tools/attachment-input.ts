@@ -11,16 +11,31 @@
 import { z } from 'zod';
 import type { AttachmentInput } from '../services/attachment-resolver.js';
 
+// Shared field: marks an attachment as an inline "cid" image. Any attachment
+// carrying a `cid` is treated as inline (Content-Disposition: inline) and
+// referenced from the HTML via <img src="cid:the_cid">. Its presence switches
+// nodemailer to multipart/related. Without `cid`, classic attachment behavior.
+const cidField = z
+  .string()
+  .optional()
+  .describe(
+    'Content-ID for an inline image (e.g. "companyLogo"). Reference it from the HTML via ' +
+      '<img src="cid:companyLogo">. The attachment then becomes inline (multipart/related) ' +
+      'instead of a classic attachment. Omitted = ordinary attachment.',
+  );
+
 const attachmentFromPath = z.object({
   path: z.string().describe('Absolute local filesystem path to the file'),
   filename: z.string().optional().describe('Override filename (defaults to basename of path)'),
   mime_type: z.string().optional().describe('MIME type override (auto-detected if omitted)'),
+  cid: cidField,
 });
 
 const attachmentFromBase64 = z.object({
   content_base64: z.string().describe('Base64-encoded file content'),
   filename: z.string().describe('Filename to use on the message'),
   mime_type: z.string().optional().describe('MIME type override (auto-detected if omitted)'),
+  cid: cidField,
 });
 
 const attachmentFromMessage = z.object({
@@ -29,6 +44,7 @@ const attachmentFromMessage = z.object({
     .string()
     .describe('Mailbox path containing the source message (e.g. "INBOX" or "Drafts")'),
   filename: z.string().describe('Attachment filename on the source message — exact match'),
+  cid: cidField,
 });
 
 export const attachmentInputSchema = z.union([
@@ -45,6 +61,7 @@ export function adaptAttachmentInput(raw: AttachmentInputRaw): AttachmentInput {
       path: raw.path,
       filename: raw.filename,
       mimeType: raw.mime_type,
+      cid: raw.cid,
     };
   }
   if ('content_base64' in raw) {
@@ -52,11 +69,13 @@ export function adaptAttachmentInput(raw: AttachmentInputRaw): AttachmentInput {
       contentBase64: raw.content_base64,
       filename: raw.filename,
       mimeType: raw.mime_type,
+      cid: raw.cid,
     };
   }
   return {
     sourceEmailId: raw.source_email_id,
     sourceMailbox: raw.source_mailbox,
     filename: raw.filename,
+    cid: raw.cid,
   };
 }

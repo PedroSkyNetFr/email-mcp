@@ -9,6 +9,7 @@ import {
   extractAttachmentMeta,
   extractCidReferences,
   findMimePartByFilename,
+  findMissingInlineCids,
   hasAttachments,
 } from './imap.service.js';
 
@@ -648,5 +649,67 @@ describe('resolveAttachments', () => {
     const result = await resolveAttachments(stubImap, 'acct', [{ path: filePath }]);
 
     expect(result.resolved[0].contentType).toBe('application/pdf');
+  });
+
+  it('marks an attachment with `cid` as inline (path)', async () => {
+    const filePath = join(tmp, 'logo.png');
+    writeFileSync(filePath, 'PNGDATA');
+
+    const result = await resolveAttachments(stubImap, 'acct', [
+      { path: filePath, cid: 'companyLogo' },
+    ]);
+
+    expect(result.failures).toEqual([]);
+    expect(result.resolved[0].cid).toBe('companyLogo');
+    expect(result.resolved[0].contentDisposition).toBe('inline');
+  });
+
+  it('marks an attachment with `cid` as inline (base64)', async () => {
+    const result = await resolveAttachments(stubImap, 'acct', [
+      {
+        contentBase64: Buffer.from('PNG').toString('base64'),
+        filename: 'logo.png',
+        cid: 'companyLogo',
+      },
+    ]);
+
+    expect(result.resolved[0].cid).toBe('companyLogo');
+    expect(result.resolved[0].contentDisposition).toBe('inline');
+  });
+
+  it('leaves an attachment without `cid` as a classic attachment (backward compat)', async () => {
+    const filePath = join(tmp, 'quote.pdf');
+    writeFileSync(filePath, '%PDF');
+
+    const result = await resolveAttachments(stubImap, 'acct', [{ path: filePath }]);
+
+    expect(result.resolved[0].cid).toBeUndefined();
+    expect(result.resolved[0].contentDisposition).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findMissingInlineCids — matches the HTML cid: refs against provided inline parts
+// ---------------------------------------------------------------------------
+
+describe('findMissingInlineCids', () => {
+  it('reports nothing when every cid: has an inline attachment', () => {
+    const html = '<img src="cid:companyLogo">';
+    expect(findMissingInlineCids(html, [{ cid: 'companyLogo' }])).toEqual([]);
+  });
+
+  it('reports an orphan cid: (no inline attachment)', () => {
+    const html = '<img src="cid:companyLogo"><img src="cid:missing">';
+    expect(findMissingInlineCids(html, [{ cid: 'companyLogo' }])).toEqual(['missing']);
+  });
+
+  it('compares case-insensitively and tolerates angle brackets', () => {
+    const html = '<img src="cid:CompanyLogo">';
+    expect(findMissingInlineCids(html, [{ cid: '<companylogo>' }])).toEqual([]);
+  });
+
+  it('ignores attachments without a cid (classic attachments)', () => {
+    const html = '<img src="cid:companyLogo">';
+    expect(findMissingInlineCids(html, [{ cid: undefined }])).toEqual(['companyLogo']);
   });
 });

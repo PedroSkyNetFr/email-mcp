@@ -292,6 +292,69 @@ describe('SmtpService', () => {
       expect((appended as Buffer).equals(call.raw as Buffer)).toBe(true);
     });
 
+    it('embeds an inline image (cid) as multipart/related', async () => {
+      const attachments: ResolvedAttachment[] = [
+        {
+          filename: 'logo.png',
+          content: Buffer.from('PNGfakebytes'),
+          contentType: 'image/png',
+          cid: 'companyLogo',
+          contentDisposition: 'inline',
+        },
+      ];
+
+      await service.sendEmail('test', {
+        to: ['recipient@example.com'],
+        subject: 'Inline logo',
+        body: '<p>Hello</p><img src="cid:companyLogo">',
+        html: true,
+        attachments,
+      });
+
+      const call = transport.sendMail.mock.calls[0][0];
+      const rawStr = (call.raw as Buffer).toString('utf-8');
+      // The presence of a cid switches the message to multipart/related.
+      expect(rawStr).toMatch(/Content-Type: multipart\/related/i);
+      // The image is inline with the correct Content-ID.
+      expect(rawStr).toMatch(/Content-Disposition: inline/i);
+      expect(rawStr).toMatch(/Content-ID: <companyLogo>/i);
+      expect(rawStr).toContain('logo.png');
+    });
+
+    it('coexists: inline logo (cid) + classic PDF attachment', async () => {
+      const attachments: ResolvedAttachment[] = [
+        {
+          filename: 'logo.png',
+          content: Buffer.from('PNGfakebytes'),
+          contentType: 'image/png',
+          cid: 'companyLogo',
+          contentDisposition: 'inline',
+        },
+        {
+          filename: 'quote.pdf',
+          content: Buffer.from('%PDF-1.4 fake'),
+          contentType: 'application/pdf',
+        },
+      ];
+
+      await service.sendEmail('test', {
+        to: ['recipient@example.com'],
+        subject: 'Inline logo + PDF',
+        body: '<p>See the quote</p><img src="cid:companyLogo">',
+        html: true,
+        attachments,
+      });
+
+      const rawStr = (transport.sendMail.mock.calls[0][0].raw as Buffer).toString('utf-8');
+      // Nested multipart/related (inline image) plus the PDF as a classic attachment.
+      expect(rawStr).toMatch(/Content-Type: multipart\/related/i);
+      expect(rawStr).toMatch(/Content-ID: <companyLogo>/i);
+      expect(rawStr).toContain('logo.png');
+      // The PDF stays a downloadable attachment (Content-Disposition: attachment).
+      expect(rawStr).toContain('quote.pdf');
+      expect(rawStr).toMatch(/Content-Disposition: attachment/i);
+    });
+
     it('delivers a bcc via the envelope but keeps it out of the raw/Sent message', async () => {
       await service.sendEmail('test', {
         to: ['recipient@example.com'],

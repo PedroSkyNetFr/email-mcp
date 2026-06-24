@@ -51,9 +51,27 @@ export default function registerDraftTools(
             'without round-tripping bytes through this MCP. Strict failure: if any attachment cannot ' +
             'be resolved, no draft is saved.',
         ),
+      append_signature: z
+        .boolean()
+        .optional()
+        .describe(
+          "Append the account's configured signature (signature_path) below the body, with its " +
+            'logo/images embedded inline (cid). Forces HTML. Requires signature_path on the account.',
+        ),
     },
     { readOnlyHint: false, destructiveHint: false },
-    async ({ account, to, subject, body, cc, bcc, html, in_reply_to: inReplyTo, attachments }) => {
+    async ({
+      account,
+      to,
+      subject,
+      body,
+      cc,
+      bcc,
+      html,
+      in_reply_to: inReplyTo,
+      attachments,
+      append_signature: appendSignature,
+    }) => {
       try {
         const result = await imapService.saveDraftWithAttachments(account, {
           to,
@@ -64,6 +82,7 @@ export default function registerDraftTools(
           html,
           inReplyTo,
           attachments: attachments?.map(adaptAttachmentInput),
+          appendSignature,
         });
 
         await audit.log(
