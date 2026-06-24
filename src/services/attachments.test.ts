@@ -9,6 +9,7 @@ import {
   extractAttachmentMeta,
   extractCidReferences,
   findMimePartByFilename,
+  findMissingInlineCids,
   hasAttachments,
 } from './imap.service.js';
 
@@ -648,5 +649,67 @@ describe('resolveAttachments', () => {
     const result = await resolveAttachments(stubImap, 'acct', [{ path: filePath }]);
 
     expect(result.resolved[0].contentType).toBe('application/pdf');
+  });
+
+  it('marque une pièce avec `cid` comme inline (path)', async () => {
+    const filePath = join(tmp, 'logo.png');
+    writeFileSync(filePath, 'PNGDATA');
+
+    const result = await resolveAttachments(stubImap, 'acct', [
+      { path: filePath, cid: 'logoCanet' },
+    ]);
+
+    expect(result.failures).toEqual([]);
+    expect(result.resolved[0].cid).toBe('logoCanet');
+    expect(result.resolved[0].contentDisposition).toBe('inline');
+  });
+
+  it('marque une pièce avec `cid` comme inline (base64)', async () => {
+    const result = await resolveAttachments(stubImap, 'acct', [
+      {
+        contentBase64: Buffer.from('PNG').toString('base64'),
+        filename: 'logo.png',
+        cid: 'logoCanet',
+      },
+    ]);
+
+    expect(result.resolved[0].cid).toBe('logoCanet');
+    expect(result.resolved[0].contentDisposition).toBe('inline');
+  });
+
+  it('laisse une pièce sans `cid` en pièce jointe classique (rétrocompat)', async () => {
+    const filePath = join(tmp, 'devis.pdf');
+    writeFileSync(filePath, '%PDF');
+
+    const result = await resolveAttachments(stubImap, 'acct', [{ path: filePath }]);
+
+    expect(result.resolved[0].cid).toBeUndefined();
+    expect(result.resolved[0].contentDisposition).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findMissingInlineCids — rapproche les cid: du HTML des pièces inline fournies
+// ---------------------------------------------------------------------------
+
+describe('findMissingInlineCids', () => {
+  it('ne signale rien quand chaque cid: a une pièce inline', () => {
+    const html = '<img src="cid:logoCanet">';
+    expect(findMissingInlineCids(html, [{ cid: 'logoCanet' }])).toEqual([]);
+  });
+
+  it('signale un cid: orphelin (sans pièce inline)', () => {
+    const html = '<img src="cid:logoCanet"><img src="cid:absent">';
+    expect(findMissingInlineCids(html, [{ cid: 'logoCanet' }])).toEqual(['absent']);
+  });
+
+  it('compare insensiblement à la casse et tolère les chevrons', () => {
+    const html = '<img src="cid:LogoCanet">';
+    expect(findMissingInlineCids(html, [{ cid: '<logocanet>' }])).toEqual([]);
+  });
+
+  it('ignore les pièces sans cid (PJ classiques)', () => {
+    const html = '<img src="cid:logoCanet">';
+    expect(findMissingInlineCids(html, [{ cid: undefined }])).toEqual(['logoCanet']);
   });
 });

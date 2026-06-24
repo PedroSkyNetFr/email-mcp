@@ -250,10 +250,11 @@ export function hasAttachments(bodyStructure: unknown): boolean {
 }
 
 /**
- * Extract `cid:` references from an HTML body. Returns unique CIDs in order
- * of first appearance. Used by update_draft to warn callers when an HTML
- * draft references inline images — v1 flattens those to plain attachments,
- * which means the recipient's mail client will show broken image icons.
+ * Extrait les références `cid:` d'un corps HTML. Renvoie les CID uniques dans
+ * l'ordre d'apparition. Utilisé pour rapprocher les `<img src="cid:…">` du HTML
+ * des pièces inline réellement fournies : un mail dont chaque `cid:` a une pièce
+ * inline correspondante est embarqué en multipart/related (plus d'avertissement),
+ * et on n'avertit que pour un `cid:` orphelin (image potentiellement cassée).
  */
 export function extractCidReferences(html: string): string[] {
   const re = /cid:([^"'\s>)]+)/gi;
@@ -269,6 +270,26 @@ export function extractCidReferences(html: string): string[] {
     match = re.exec(html);
   }
   return out;
+}
+
+/**
+ * Calcule les `cid:` référencés dans le HTML pour lesquels AUCUNE pièce inline
+ * correspondante n'a été fournie. Ces CID-là produiront une image cassée chez
+ * le destinataire ; les autres sont réellement embarqués (multipart/related).
+ *
+ * La comparaison est insensible à la casse et tolère les chevrons éventuels
+ * (`<logoCanet>`), nodemailer normalisant le Content-ID.
+ */
+export function findMissingInlineCids(
+  html: string,
+  attachments: Pick<ResolvedAttachment, 'cid'>[],
+): string[] {
+  const provided = new Set(
+    attachments
+      .map((a) => a.cid?.replace(/^<|>$/g, '').toLowerCase())
+      .filter((c): c is string => !!c),
+  );
+  return extractCidReferences(html).filter((cid) => !provided.has(cid.toLowerCase()));
 }
 
 /**
@@ -2443,13 +2464,17 @@ export default class ImapService {
     const bcc = options.bcc ?? existing.bcc?.map((a) => a.address);
     const inReplyTo = options.inReplyTo ?? existing.inReplyTo;
 
-    // Inline image detection — warn when the body references cid: parts that
-    // won't survive the rebuild (v1 treats them as plain attachments only).
+    // Images inline : les pièces portant un `cid` sont réellement embarquées en
+    // multipart/related (voir saveDraft → MailComposer). On n'avertit donc que
+    // pour un `cid:` du HTML SANS pièce inline correspondante (image cassée).
     if (html && typeof body === 'string') {
-      const cidRefs = extractCidReferences(body);
-      if (cidRefs.length > 0) {
+      const missing = findMissingInlineCids(body, allAttachments);
+      if (missing.length > 0) {
         warnings.push(
-          `Body has ${cidRefs.length} cid: reference(s) (${cidRefs.slice(0, 3).join(', ')}${cidRefs.length > 3 ? ', …' : ''}). Inline images are flattened in v1 — recipient may see broken image icons.`,
+          `Le HTML référence ${missing.length} image(s) inline sans pièce correspondante ` +
+            `(${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ', …' : ''}). ` +
+            'Fournissez-les via attachments_add avec le champ `cid` correspondant, ' +
+            'sinon le destinataire verra une image cassée.',
         );
       }
     }

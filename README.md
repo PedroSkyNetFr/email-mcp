@@ -74,6 +74,50 @@ npm install -g @codefuturist/email-mcp
 pnpm add -g @codefuturist/email-mcp
 ```
 
+### Run your local build (fork)
+
+To run a locally-built copy of this fork instead of the published npm package:
+
+```bash
+# 1. Install + build (Node ≥ 22)
+pnpm install
+pnpm build              # compiles to dist/main.js (the `email-mcp` bin)
+
+# 2. Run the local binary directly
+node dist/main.js        # MCP server over stdio (default)
+node dist/main.js test   # test IMAP/SMTP connections
+```
+
+Point your MCP client at the local binary by replacing the
+`npx @codefuturist/email-mcp` command with an absolute `node dist/main.js`:
+
+```jsonc
+{
+  "mcpServers": {
+    "email": {
+      "command": "node",
+      "args": ["/abs/path/to/email-mcp/dist/main.js", "stdio"],
+      "env": {
+        "MCP_EMAIL_ACCOUNT_NAME": "contact",
+        "MCP_EMAIL_ADDRESS": "contact@pierrecanet.fr",
+        "MCP_EMAIL_FULL_NAME": "Pierre CANET",
+        "MCP_EMAIL_PASSWORD": "your-password",
+        "MCP_EMAIL_IMAP_HOST": "ssl0.ovh.net",
+        "MCP_EMAIL_SMTP_HOST": "ssl0.ovh.net"
+      }
+    }
+  }
+}
+```
+
+Configuration comes from **either** environment variables (the `env` block
+above, or a `.env` loaded via Node's `--env-file=.env`, see
+[`.env.example`](.env.example)) **or** a `~/.config/email-mcp/config.toml`
+(`node dist/main.js config init` to scaffold one; IMAP `ssl0.ovh.net:993` TLS,
+SMTP `ssl0.ovh.net:465` TLS for OVH). **No PostgreSQL is required** to send or
+draft mail — the optional `[database]` section is used only by the
+cross-account routing engine and stays inactive when unset.
+
 ### Docker
 
 No Node.js required — just Docker.
@@ -968,6 +1012,65 @@ Run a search and sweep every matching attachment into a dated folder. Great for 
 - `account` — bucketed by originating account name (useful for multi-account sweeps)
 
 Default destination is `~/Downloads/email-attachments-<ISO-ts>/`. Per-email errors are collected in `errors[]` rather than aborting the whole run — you get a summary with `files_saved`, `total_size`, `skipped`, and the error list.
+
+### Inline images (`cid`)
+
+`send_email`, `reply_email`, `save_draft` and `update_draft` can embed an image
+**inline** in an HTML body (e.g. a signature logo shown in the message itself,
+not as a downloadable attachment, and without any remote URL). Any attachment
+that carries a `cid` field is embedded inline (`Content-Disposition: inline`,
+`Content-ID: <cid>`) and the message becomes `multipart/related`. Reference it
+from the HTML with `<img src="cid:...">` using the **same** `cid`.
+
+```jsonc
+{
+  "to": ["recipient@example.com"],
+  "subject": "Hello",
+  "html": true,
+  "body": "<p>Hi!</p><img src=\"cid:logoCanet\">",
+  "attachments": [
+    // Inline logo — embedded in the body (NOT a downloadable attachment).
+    { "path": "/abs/path/logo.png", "filename": "logo.png", "cid": "logoCanet" },
+    // Classic attachment alongside the inline image — both coexist.
+    { "path": "/abs/path/quote.pdf" }
+  ]
+}
+```
+
+Notes:
+
+- The `cid` value must match exactly between `<img src="cid:logoCanet">` and the
+  attachment's `cid` (here `logoCanet`).
+- Without `cid`, an attachment stays a normal downloadable attachment
+  (backward-compatible — nothing changes for existing callers).
+- An inline image works from any attachment source: `path`, `content_base64`,
+  or `source_email_id`.
+- `update_draft` warns only when the HTML references a `cid:` for which **no**
+  matching inline attachment was provided (a genuinely broken image).
+
+#### Ready-made CANET CONSTRUCTION signature
+
+A reusable HTML signature with the inline logo lives in
+[`templates/canet-signature.toml`](templates/canet-signature.toml) (brand
+styling, `mailto:` / `http://www.pierrecanet.fr` links, `<img src="cid:logoCanet">`).
+Copy it into `~/.config/email-mcp/templates/` to expose it via `list_templates`
+/ `apply_template`.
+
+To compose a draft (body + signature + inline logo) without re-pasting the HTML,
+use the helper script — it reads the signature template, prepends an optional
+body, and embeds the logo inline:
+
+```bash
+npx tsx --env-file=.env scripts/draft-canet-signature.ts \
+  --account contact \
+  --to contact@pierrecanet.fr \
+  --subject "Test signature inline" \
+  --logo /abs/path/Logo-CC-v2-mail.png \
+  --body "<p>Bonjour,</p><p>Ceci est un test.</p>"
+```
+
+If `--logo` is omitted, a small placeholder PNG is used so you can validate the
+technical chain before wiring your real logo.
 
 ## API
 
