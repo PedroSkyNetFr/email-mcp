@@ -30,12 +30,13 @@ export interface ResolvedAttachment {
   content: Buffer;
   contentType: string;
   /**
-   * Content-ID d'une image inline (sans chevrons), ex. "logoCanet". Quand il est
-   * présent, la pièce est embarquée en multipart/related et référencée dans le
-   * HTML via <img src="cid:logoCanet">. Absent = pièce jointe classique.
+   * Content-ID of an inline image (without angle brackets), e.g. "companyLogo".
+   * When present, the attachment is embedded as multipart/related and
+   * referenced from the HTML via <img src="cid:companyLogo">. Absent = classic
+   * attachment.
    */
   cid?: string;
-  /** 'inline' pour une image cid embarquée, 'attachment' (ou absent) sinon. */
+  /** 'inline' for an embedded cid image, 'attachment' (or absent) otherwise. */
   contentDisposition?: 'inline' | 'attachment';
 }
 
@@ -81,10 +82,11 @@ function inputLabel(input: AttachmentInput): string {
 }
 
 /**
- * Reporte les champs inline (`cid` / `contentDisposition`) de l'entrée sur la
- * pièce résolue. Si l'entrée porte un `cid`, la pièce devient inline ; sinon
- * elle reste une pièce jointe classique (champs laissés indéfinis pour la
- * rétrocompat — nodemailer traite l'absence de cid comme une PJ ordinaire).
+ * Carries the inline fields (`cid` / `contentDisposition`) from the input onto
+ * the resolved attachment. If the input has a `cid`, the attachment becomes
+ * inline; otherwise it stays a classic attachment (fields left undefined for
+ * backward compat — nodemailer treats the absence of a cid as an ordinary
+ * attachment).
  */
 function applyInlineFields(
   resolved: ResolvedAttachment,

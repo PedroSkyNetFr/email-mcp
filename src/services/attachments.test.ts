@@ -651,34 +651,34 @@ describe('resolveAttachments', () => {
     expect(result.resolved[0].contentType).toBe('application/pdf');
   });
 
-  it('marque une pièce avec `cid` comme inline (path)', async () => {
+  it('marks an attachment with `cid` as inline (path)', async () => {
     const filePath = join(tmp, 'logo.png');
     writeFileSync(filePath, 'PNGDATA');
 
     const result = await resolveAttachments(stubImap, 'acct', [
-      { path: filePath, cid: 'logoCanet' },
+      { path: filePath, cid: 'companyLogo' },
     ]);
 
     expect(result.failures).toEqual([]);
-    expect(result.resolved[0].cid).toBe('logoCanet');
+    expect(result.resolved[0].cid).toBe('companyLogo');
     expect(result.resolved[0].contentDisposition).toBe('inline');
   });
 
-  it('marque une pièce avec `cid` comme inline (base64)', async () => {
+  it('marks an attachment with `cid` as inline (base64)', async () => {
     const result = await resolveAttachments(stubImap, 'acct', [
       {
         contentBase64: Buffer.from('PNG').toString('base64'),
         filename: 'logo.png',
-        cid: 'logoCanet',
+        cid: 'companyLogo',
       },
     ]);
 
-    expect(result.resolved[0].cid).toBe('logoCanet');
+    expect(result.resolved[0].cid).toBe('companyLogo');
     expect(result.resolved[0].contentDisposition).toBe('inline');
   });
 
-  it('laisse une pièce sans `cid` en pièce jointe classique (rétrocompat)', async () => {
-    const filePath = join(tmp, 'devis.pdf');
+  it('leaves an attachment without `cid` as a classic attachment (backward compat)', async () => {
+    const filePath = join(tmp, 'quote.pdf');
     writeFileSync(filePath, '%PDF');
 
     const result = await resolveAttachments(stubImap, 'acct', [{ path: filePath }]);
@@ -689,27 +689,27 @@ describe('resolveAttachments', () => {
 });
 
 // ---------------------------------------------------------------------------
-// findMissingInlineCids — rapproche les cid: du HTML des pièces inline fournies
+// findMissingInlineCids — matches the HTML cid: refs against provided inline parts
 // ---------------------------------------------------------------------------
 
 describe('findMissingInlineCids', () => {
-  it('ne signale rien quand chaque cid: a une pièce inline', () => {
-    const html = '<img src="cid:logoCanet">';
-    expect(findMissingInlineCids(html, [{ cid: 'logoCanet' }])).toEqual([]);
+  it('reports nothing when every cid: has an inline attachment', () => {
+    const html = '<img src="cid:companyLogo">';
+    expect(findMissingInlineCids(html, [{ cid: 'companyLogo' }])).toEqual([]);
   });
 
-  it('signale un cid: orphelin (sans pièce inline)', () => {
-    const html = '<img src="cid:logoCanet"><img src="cid:absent">';
-    expect(findMissingInlineCids(html, [{ cid: 'logoCanet' }])).toEqual(['absent']);
+  it('reports an orphan cid: (no inline attachment)', () => {
+    const html = '<img src="cid:companyLogo"><img src="cid:missing">';
+    expect(findMissingInlineCids(html, [{ cid: 'companyLogo' }])).toEqual(['missing']);
   });
 
-  it('compare insensiblement à la casse et tolère les chevrons', () => {
-    const html = '<img src="cid:LogoCanet">';
-    expect(findMissingInlineCids(html, [{ cid: '<logocanet>' }])).toEqual([]);
+  it('compares case-insensitively and tolerates angle brackets', () => {
+    const html = '<img src="cid:CompanyLogo">';
+    expect(findMissingInlineCids(html, [{ cid: '<companylogo>' }])).toEqual([]);
   });
 
-  it('ignore les pièces sans cid (PJ classiques)', () => {
-    const html = '<img src="cid:logoCanet">';
-    expect(findMissingInlineCids(html, [{ cid: undefined }])).toEqual(['logoCanet']);
+  it('ignores attachments without a cid (classic attachments)', () => {
+    const html = '<img src="cid:companyLogo">';
+    expect(findMissingInlineCids(html, [{ cid: undefined }])).toEqual(['companyLogo']);
   });
 });

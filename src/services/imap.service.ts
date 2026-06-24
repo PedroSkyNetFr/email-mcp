@@ -251,11 +251,11 @@ export function hasAttachments(bodyStructure: unknown): boolean {
 }
 
 /**
- * Extrait les références `cid:` d'un corps HTML. Renvoie les CID uniques dans
- * l'ordre d'apparition. Utilisé pour rapprocher les `<img src="cid:…">` du HTML
- * des pièces inline réellement fournies : un mail dont chaque `cid:` a une pièce
- * inline correspondante est embarqué en multipart/related (plus d'avertissement),
- * et on n'avertit que pour un `cid:` orphelin (image potentiellement cassée).
+ * Extract `cid:` references from an HTML body. Returns the unique CIDs in order
+ * of appearance. Used to match the HTML `<img src="cid:…">` against the inline
+ * attachments actually provided: a message whose every `cid:` has a matching
+ * inline attachment is embedded as multipart/related (no warning), and we only
+ * warn for an orphan `cid:` (a potentially broken image).
  */
 export function extractCidReferences(html: string): string[] {
   const re = /cid:([^"'\s>)]+)/gi;
@@ -274,12 +274,12 @@ export function extractCidReferences(html: string): string[] {
 }
 
 /**
- * Calcule les `cid:` référencés dans le HTML pour lesquels AUCUNE pièce inline
- * correspondante n'a été fournie. Ces CID-là produiront une image cassée chez
- * le destinataire ; les autres sont réellement embarqués (multipart/related).
+ * Compute the `cid:` references in the HTML for which NO matching inline
+ * attachment was provided. Those CIDs would render as a broken image for the
+ * recipient; the others are genuinely embedded (multipart/related).
  *
- * La comparaison est insensible à la casse et tolère les chevrons éventuels
- * (`<logoCanet>`), nodemailer normalisant le Content-ID.
+ * The comparison is case-insensitive and tolerates surrounding angle brackets
+ * (`<companyLogo>`), since nodemailer normalizes the Content-ID.
  */
 export function findMissingInlineCids(
   html: string,
@@ -2210,7 +2210,7 @@ export default class ImapService {
 
     const fromAddr = account.fullName ? `"${account.fullName}" <${account.email}>` : account.email;
 
-    // Signature optionnelle : HTML sous le corps + images inline (cid).
+    // Optional signature: HTML appended below the body + inline (cid) images.
     const signed = await applyAccountSignature(
       account,
       { body: options.body, html: options.html, attachments: options.attachments },
@@ -2475,17 +2475,17 @@ export default class ImapService {
     const bcc = options.bcc ?? existing.bcc?.map((a) => a.address);
     const inReplyTo = options.inReplyTo ?? existing.inReplyTo;
 
-    // Images inline : les pièces portant un `cid` sont réellement embarquées en
-    // multipart/related (voir saveDraft → MailComposer). On n'avertit donc que
-    // pour un `cid:` du HTML SANS pièce inline correspondante (image cassée).
+    // Inline images: attachments carrying a `cid` are genuinely embedded as
+    // multipart/related (see saveDraft → MailComposer). We therefore only warn
+    // for a `cid:` in the HTML WITHOUT a matching inline attachment (broken image).
     if (html && typeof body === 'string') {
       const missing = findMissingInlineCids(body, allAttachments);
       if (missing.length > 0) {
         warnings.push(
-          `Le HTML référence ${missing.length} image(s) inline sans pièce correspondante ` +
+          `The HTML references ${missing.length} inline image(s) with no matching attachment ` +
             `(${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ', …' : ''}). ` +
-            'Fournissez-les via attachments_add avec le champ `cid` correspondant, ' +
-            'sinon le destinataire verra une image cassée.',
+            'Provide them via attachments_add with the corresponding `cid` field, ' +
+            'otherwise the recipient will see a broken image.',
         );
       }
     }

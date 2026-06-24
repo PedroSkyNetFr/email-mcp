@@ -292,46 +292,46 @@ describe('SmtpService', () => {
       expect((appended as Buffer).equals(call.raw as Buffer)).toBe(true);
     });
 
-    it('embarque une image inline (cid) en multipart/related', async () => {
+    it('embeds an inline image (cid) as multipart/related', async () => {
       const attachments: ResolvedAttachment[] = [
         {
           filename: 'logo.png',
           content: Buffer.from('PNGfakebytes'),
           contentType: 'image/png',
-          cid: 'logoCanet',
+          cid: 'companyLogo',
           contentDisposition: 'inline',
         },
       ];
 
       await service.sendEmail('test', {
         to: ['recipient@example.com'],
-        subject: 'Logo inline',
-        body: '<p>Bonjour</p><img src="cid:logoCanet">',
+        subject: 'Inline logo',
+        body: '<p>Hello</p><img src="cid:companyLogo">',
         html: true,
         attachments,
       });
 
       const call = transport.sendMail.mock.calls[0][0];
       const rawStr = (call.raw as Buffer).toString('utf-8');
-      // La présence d'un cid fait basculer le message en multipart/related.
+      // The presence of a cid switches the message to multipart/related.
       expect(rawStr).toMatch(/Content-Type: multipart\/related/i);
-      // L'image est inline avec le bon Content-ID.
+      // The image is inline with the correct Content-ID.
       expect(rawStr).toMatch(/Content-Disposition: inline/i);
-      expect(rawStr).toMatch(/Content-ID: <logoCanet>/i);
+      expect(rawStr).toMatch(/Content-ID: <companyLogo>/i);
       expect(rawStr).toContain('logo.png');
     });
 
-    it('cohabite : logo inline (cid) + PDF en pièce jointe classique', async () => {
+    it('coexists: inline logo (cid) + classic PDF attachment', async () => {
       const attachments: ResolvedAttachment[] = [
         {
           filename: 'logo.png',
           content: Buffer.from('PNGfakebytes'),
           contentType: 'image/png',
-          cid: 'logoCanet',
+          cid: 'companyLogo',
           contentDisposition: 'inline',
         },
         {
-          filename: 'devis.pdf',
+          filename: 'quote.pdf',
           content: Buffer.from('%PDF-1.4 fake'),
           contentType: 'application/pdf',
         },
@@ -339,19 +339,19 @@ describe('SmtpService', () => {
 
       await service.sendEmail('test', {
         to: ['recipient@example.com'],
-        subject: 'Logo inline + PDF',
-        body: '<p>Voir le devis</p><img src="cid:logoCanet">',
+        subject: 'Inline logo + PDF',
+        body: '<p>See the quote</p><img src="cid:companyLogo">',
         html: true,
         attachments,
       });
 
       const rawStr = (transport.sendMail.mock.calls[0][0].raw as Buffer).toString('utf-8');
-      // multipart/related (image inline) imbriqué et PDF en pièce jointe classique.
+      // Nested multipart/related (inline image) plus the PDF as a classic attachment.
       expect(rawStr).toMatch(/Content-Type: multipart\/related/i);
-      expect(rawStr).toMatch(/Content-ID: <logoCanet>/i);
+      expect(rawStr).toMatch(/Content-ID: <companyLogo>/i);
       expect(rawStr).toContain('logo.png');
-      // Le PDF reste une pièce jointe (Content-Disposition: attachment) téléchargeable.
-      expect(rawStr).toContain('devis.pdf');
+      // The PDF stays a downloadable attachment (Content-Disposition: attachment).
+      expect(rawStr).toContain('quote.pdf');
       expect(rawStr).toMatch(/Content-Disposition: attachment/i);
     });
 

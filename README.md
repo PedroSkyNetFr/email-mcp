@@ -98,12 +98,12 @@ Point your MCP client at the local binary by replacing the
       "command": "node",
       "args": ["/abs/path/to/email-mcp/dist/main.js", "stdio"],
       "env": {
-        "MCP_EMAIL_ACCOUNT_NAME": "contact",
-        "MCP_EMAIL_ADDRESS": "contact@pierrecanet.fr",
-        "MCP_EMAIL_FULL_NAME": "Pierre CANET",
+        "MCP_EMAIL_ACCOUNT_NAME": "work",
+        "MCP_EMAIL_ADDRESS": "you@example.com",
+        "MCP_EMAIL_FULL_NAME": "Your Name",
         "MCP_EMAIL_PASSWORD": "your-password",
-        "MCP_EMAIL_IMAP_HOST": "ssl0.ovh.net",
-        "MCP_EMAIL_SMTP_HOST": "ssl0.ovh.net"
+        "MCP_EMAIL_IMAP_HOST": "imap.example.com",
+        "MCP_EMAIL_SMTP_HOST": "smtp.example.com"
       }
     }
   }
@@ -111,12 +111,11 @@ Point your MCP client at the local binary by replacing the
 ```
 
 Configuration comes from **either** environment variables (the `env` block
-above, or a `.env` loaded via Node's `--env-file=.env`, see
-[`.env.example`](.env.example)) **or** a `~/.config/email-mcp/config.toml`
-(`node dist/main.js config init` to scaffold one; IMAP `ssl0.ovh.net:993` TLS,
-SMTP `ssl0.ovh.net:465` TLS for OVH). **No PostgreSQL is required** to send or
-draft mail — the optional `[database]` section is used only by the
-cross-account routing engine and stays inactive when unset.
+above, or a `.env` loaded via Node's `--env-file=.env`) **or** a
+`~/.config/email-mcp/config.toml` (`node dist/main.js config init` to scaffold
+one). **No PostgreSQL is required** to send or draft mail — the optional
+`[database]` section is used only by the cross-account routing engine and stays
+inactive when unset.
 
 ### Docker
 
@@ -1027,10 +1026,10 @@ from the HTML with `<img src="cid:...">` using the **same** `cid`.
   "to": ["recipient@example.com"],
   "subject": "Hello",
   "html": true,
-  "body": "<p>Hi!</p><img src=\"cid:logoCanet\">",
+  "body": "<p>Hi!</p><img src=\"cid:companyLogo\">",
   "attachments": [
     // Inline logo — embedded in the body (NOT a downloadable attachment).
-    { "path": "/abs/path/logo.png", "filename": "logo.png", "cid": "logoCanet" },
+    { "path": "/abs/path/logo.png", "filename": "logo.png", "cid": "companyLogo" },
     // Classic attachment alongside the inline image — both coexist.
     { "path": "/abs/path/quote.pdf" }
   ]
@@ -1039,8 +1038,8 @@ from the HTML with `<img src="cid:...">` using the **same** `cid`.
 
 Notes:
 
-- The `cid` value must match exactly between `<img src="cid:logoCanet">` and the
-  attachment's `cid` (here `logoCanet`).
+- The `cid` value must match exactly between `<img src="cid:companyLogo">` and
+  the attachment's `cid` (here `companyLogo`).
 - Without `cid`, an attachment stays a normal downloadable attachment
   (backward-compatible — nothing changes for existing callers).
 - An inline image works from any attachment source: `path`, `content_base64`,
@@ -1048,59 +1047,34 @@ Notes:
 - `update_draft` warns only when the HTML references a `cid:` for which **no**
   matching inline attachment was provided (a genuinely broken image).
 
-#### Ready-made CANET CONSTRUCTION signature
-
-A reusable HTML signature with the inline logo lives in
-[`templates/canet-signature.toml`](templates/canet-signature.toml) (brand
-styling, `mailto:` / `http://www.pierrecanet.fr` links, `<img src="cid:logoCanet">`).
-Copy it into `~/.config/email-mcp/templates/` to expose it via `list_templates`
-/ `apply_template`.
-
-To compose a draft (body + signature + inline logo) without re-pasting the HTML,
-use the helper script — it reads the signature template, prepends an optional
-body, and embeds the logo inline:
-
-```bash
-npx tsx --env-file=.env scripts/draft-canet-signature.ts \
-  --account contact \
-  --to contact@pierrecanet.fr \
-  --subject "Test signature inline" \
-  --logo /abs/path/Logo-CC-v2-mail.png \
-  --body "<p>Bonjour,</p><p>Ceci est un test.</p>"
-```
-
-If `--logo` is omitted, a small placeholder PNG is used so you can validate the
-technical chain before wiring your real logo.
-
-#### Use your existing Outlook signature automatically
+#### Use an existing Outlook signature automatically
 
 Instead of re-pasting HTML or passing a logo every time, point the account at an
 existing **Outlook signature** and let the server embed it (logo included) on
-demand. Outlook stores signatures under
-`%APPDATA%\Microsoft\Signatures\` as a `.htm` file plus a `<name>_fichiers\`
-folder of images. Configure the path:
+demand. Outlook stores signatures under `%APPDATA%\Microsoft\Signatures\` as a
+`.htm` file plus a `<name>_fichiers\` folder of images. Configure the path:
 
 ```toml
 # config.toml — per account
 [[accounts]]
-name = "contact"
+name = "work"
 # …
-signature_path = "C:\\Users\\Pierre\\AppData\\Roaming\\Microsoft\\Signatures\\CC (contact@pierrecanet.fr).htm"
+signature_path = "C:\\Users\\You\\AppData\\Roaming\\Microsoft\\Signatures\\My Signature.htm"
 ```
 
 (or the `MCP_EMAIL_SIGNATURE_PATH` environment variable). Then set
 `append_signature: true` on `send_email`, `reply_email` or `save_draft`:
 
 ```jsonc
-{ "account": "contact", "to": ["x@y.com"], "subject": "Bonjour",
-  "body": "<p>Bonjour,</p>", "append_signature": true }
+{ "account": "work", "to": ["x@y.com"], "subject": "Hello",
+  "body": "<p>Hello,</p>", "append_signature": true }
 ```
 
 The server reads the `.htm`, rewrites each local `<img src>` to a `cid:` inline
-image (reading the bytes from the `_fichiers` folder), appends it below the body
-and switches the message to HTML. **Like the password, this is just config — no
-code or HTML to touch.** The MCP server must run on the machine where that
-signature path exists (e.g. your local build on Windows).
+image (reading the bytes from the sibling `_fichiers` folder), appends it below
+the body and switches the message to HTML. **Like the password, this is just
+config — no code or HTML to touch.** The MCP server must run on the machine
+where that signature path exists (e.g. your local build on Windows).
 
 ## API
 

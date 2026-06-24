@@ -30,10 +30,10 @@ email = "example@sample.com"
 full_name = "Your Name"
 password = "________"
 sent_folder = "INBOX.Sent Messages"
-# Optionnel — signature Outlook (.htm). Avec append_signature:true sur
-# send_email / reply_email / save_draft, le logo qu'elle référence est embarqué
-# automatiquement inline (cid). Le serveur doit avoir accès à ce chemin.
-# signature_path = "C:\\Users\\Pierre\\AppData\\Roaming\\Microsoft\\Signatures\\CC (contact@pierrecanet.fr).htm"
+# Optional — Outlook signature (.htm). With append_signature:true on
+# send_email / reply_email / save_draft, the logo it references is embedded
+# automatically inline (cid). The server must have access to this path.
+# signature_path = "C:\\Users\\You\\AppData\\Roaming\\Microsoft\\Signatures\\My Signature.htm"
 
 [accounts.imap]
 host = "your-cpanel-server.com"

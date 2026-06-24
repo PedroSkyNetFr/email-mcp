@@ -11,17 +11,17 @@
 import { z } from 'zod';
 import type { AttachmentInput } from '../services/attachment-resolver.js';
 
-// Champ partagé : marque une pièce comme image inline « cid ». Toute pièce
-// portant un `cid` est traitée comme inline (Content-Disposition: inline) et
-// référencée dans le HTML via <img src="cid:le_cid">. Sa présence fait basculer
-// nodemailer en multipart/related. Sans `cid`, comportement de PJ classique.
+// Shared field: marks an attachment as an inline "cid" image. Any attachment
+// carrying a `cid` is treated as inline (Content-Disposition: inline) and
+// referenced from the HTML via <img src="cid:the_cid">. Its presence switches
+// nodemailer to multipart/related. Without `cid`, classic attachment behavior.
 const cidField = z
   .string()
   .optional()
   .describe(
-    'Content-ID pour une image inline (ex. "logoCanet"). À référencer dans le HTML via ' +
-      '<img src="cid:logoCanet">. La pièce devient alors inline (multipart/related) au lieu ' +
-      "d'une pièce jointe classique. Omis = pièce jointe ordinaire.",
+    'Content-ID for an inline image (e.g. "companyLogo"). Reference it from the HTML via ' +
+      '<img src="cid:companyLogo">. The attachment then becomes inline (multipart/related) ' +
+      'instead of a classic attachment. Omitted = ordinary attachment.',
   );
 
 const attachmentFromPath = z.object({

@@ -11,14 +11,14 @@ import {
   loadOutlookSignature,
 } from './signature-loader.js';
 
-// PNG 1x1 minimal.
+// Minimal 1x1 PNG.
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
   'base64',
 );
 
-// Signature Word/Outlook minimale : variante VML (o:href cid) + balise <img>
-// pointant la même image locale dans le sous-dossier _fichiers.
+// Minimal Word/Outlook signature: VML variant (o:href cid) + <img> tag, both
+// pointing at the same local image in the _fichiers folder.
 function writeSignature(dir: string, htmName = 'sig.htm'): string {
   const filesDir = join(dir, 'sig_fichiers');
   mkdirSync(filesDir, { recursive: true });
@@ -26,14 +26,14 @@ function writeSignature(dir: string, htmName = 'sig.htm'): string {
 
   const htm = `<html><head><meta http-equiv=Content-Type content="text/html; charset=windows-1252">
 <style><!-- p.MsoNormal {font-family:Calibri;} --></style></head>
-<body lang=FR>
+<body lang=EN>
 <table><tr><td>
 <!--[if gte vml 1]><v:shape><v:imagedata src="sig_fichiers/image001.png" o:href="cid:image001.png@01D9.ABC"></v:shape><![endif]-->
-<![if !vml]><img width=110 height=110 src="sig_fichiers/image001.png" alt="CANET CONSTRUCTION"><![endif]>
+<![if !vml]><img width=110 height=110 src="sig_fichiers/image001.png" alt="Company logo"><![endif]>
 </td><td>
-<p class=MsoNormal>Pierre CANET</p>
-<p><a href="mailto:contact@pierrecanet.fr">contact@pierrecanet.fr</a></p>
-<p><a href="http://www.pierrecanet.fr">www.pierrecanet.fr</a></p>
+<p class=MsoNormal>Jane Doe</p>
+<p><a href="mailto:jane@example.com">jane@example.com</a></p>
+<p><a href="http://www.example.com">www.example.com</a></p>
 </td></tr></table>
 </body></html>`;
   const htmPath = join(dir, htmName);
@@ -51,42 +51,42 @@ describe('loadOutlookSignature', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('réécrit les images locales en cid: et renvoie les pièces inline', async () => {
+  it('rewrites local images to cid: and returns inline attachments', async () => {
     const htmPath = writeSignature(tmp);
     const sig = await loadOutlookSignature(htmPath);
 
-    // Une seule pièce malgré 2 occurrences (VML + <img>).
+    // A single attachment despite 2 occurrences (VML + <img>).
     expect(sig.attachments).toHaveLength(1);
     const att = sig.attachments[0];
     expect(att.filename).toBe('image001.png');
     expect(att.contentType).toBe('image/png');
     expect(att.contentDisposition).toBe('inline');
-    // Le cid VML (commençant par le basename) est réutilisé.
+    // The VML cid (starting with the basename) is reused.
     expect(att.cid).toBe('image001.png@01D9.ABC');
     expect(att.content.equals(PNG)).toBe(true);
 
-    // Plus aucune référence au chemin local ; <img> pointe vers cid:.
+    // No reference to the local path remains; <img> points at cid:.
     expect(sig.html).not.toContain('sig_fichiers/image001.png');
     expect(sig.html).toContain('src="cid:image001.png@01D9.ABC"');
-    // Liens et nom conservés.
-    expect(sig.html).toContain('mailto:contact@pierrecanet.fr');
-    expect(sig.html).toContain('http://www.pierrecanet.fr');
-    expect(sig.html).toContain('Pierre CANET');
+    // Links and name are preserved.
+    expect(sig.html).toContain('mailto:jane@example.com');
+    expect(sig.html).toContain('http://www.example.com');
+    expect(sig.html).toContain('Jane Doe');
   });
 
-  it('ne renvoie que le contenu du <body> (+ styles), pas le doctype/head complet', async () => {
+  it('returns only the <body> content (+ styles), not the full doctype/head', async () => {
     const sig = await loadOutlookSignature(writeSignature(tmp));
     expect(sig.html).not.toMatch(/<body/i);
     expect(sig.html).not.toMatch(/<html/i);
-    // Les styles sont préservés pour la fidélité Outlook.
+    // Styles are preserved for Outlook fidelity.
     expect(sig.html).toContain('Calibri');
   });
 
-  it('lève une erreur explicite si le fichier est introuvable', async () => {
-    await expect(loadOutlookSignature(join(tmp, 'absent.htm'))).rejects.toThrow(/introuvable/i);
+  it('throws an explicit error when the file is missing', async () => {
+    await expect(loadOutlookSignature(join(tmp, 'absent.htm'))).rejects.toThrow(/not found/i);
   });
 
-  it('laisse une image manquante telle quelle (pas de pièce)', async () => {
+  it('leaves a missing image untouched (no attachment)', async () => {
     const htmPath = join(tmp, 'sig.htm');
     writeFileSync(htmPath, '<html><body><img src="sig_fichiers/nope.png"></body></html>', 'latin1');
     const sig = await loadOutlookSignature(htmPath);
@@ -98,11 +98,11 @@ describe('loadOutlookSignature', () => {
 describe('loadAccountSignature / applyAccountSignature', () => {
   let tmp: string;
   const baseAccount: AccountConfig = {
-    name: 'contact',
-    email: 'contact@pierrecanet.fr',
-    username: 'contact@pierrecanet.fr',
-    imap: { host: 'ssl0.ovh.net', port: 993, tls: true, starttls: false, verifySsl: true },
-    smtp: { host: 'ssl0.ovh.net', port: 465, tls: true, starttls: false, verifySsl: true },
+    name: 'work',
+    email: 'jane@example.com',
+    username: 'jane@example.com',
+    imap: { host: 'imap.example.com', port: 993, tls: true, starttls: false, verifySsl: true },
+    smtp: { host: 'smtp.example.com', port: 465, tls: true, starttls: false, verifySsl: true },
   };
 
   beforeEach(() => {
@@ -112,27 +112,27 @@ describe('loadAccountSignature / applyAccountSignature', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('loadAccountSignature lève une erreur sans signature_path', async () => {
+  it('loadAccountSignature throws without signature_path', async () => {
     await expect(loadAccountSignature(baseAccount)).rejects.toThrow(/signature_path/);
   });
 
-  it('applyAccountSignature est un no-op quand append est falsy', async () => {
+  it('applyAccountSignature is a no-op when append is falsy', async () => {
     const out = await applyAccountSignature(
       baseAccount,
-      { body: 'Bonjour', html: false, attachments: [] },
+      { body: 'Hello', html: false, attachments: [] },
       false,
     );
-    expect(out).toEqual({ body: 'Bonjour', html: false, attachments: [] });
+    expect(out).toEqual({ body: 'Hello', html: false, attachments: [] });
   });
 
-  it('applyAccountSignature ajoute la signature et force le HTML', async () => {
+  it('applyAccountSignature appends the signature and forces HTML', async () => {
     const htmPath = writeSignature(tmp);
     const account = { ...baseAccount, signaturePath: htmPath };
-    const out = await applyAccountSignature(account, { body: '<p>Bonjour</p>' }, true);
+    const out = await applyAccountSignature(account, { body: '<p>Hello</p>' }, true);
 
     expect(out.html).toBe(true);
-    expect(out.body).toContain('<p>Bonjour</p>');
-    expect(out.body).toContain('Pierre CANET');
+    expect(out.body).toContain('<p>Hello</p>');
+    expect(out.body).toContain('Jane Doe');
     expect(out.attachments).toHaveLength(1);
     expect(out.attachments[0].cid).toBe('image001.png@01D9.ABC');
   });

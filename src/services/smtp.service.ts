@@ -173,7 +173,7 @@ export default class SmtpService {
     const ccAddrs = options.cc ?? [];
     const bccAddrs = options.bcc ?? [];
 
-    // Signature optionnelle : ajoute le HTML sous le corps + images inline (cid).
+    // Optional signature: append the HTML below the body + inline (cid) images.
     const signed = await applyAccountSignature(
       account,
       { body: options.body, html: options.html, attachments: options.attachments },
@@ -312,7 +312,7 @@ export default class SmtpService {
       });
     }
 
-    // Signature optionnelle : HTML sous le corps + images inline (cid).
+    // Optional signature: append the HTML below the body + inline (cid) images.
     const signed = await applyAccountSignature(
       account,
       { body: options.body, html: options.html, attachments },
