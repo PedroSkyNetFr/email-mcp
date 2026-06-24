@@ -93,6 +93,19 @@ describe('loadOutlookSignature', () => {
     expect(sig.attachments).toHaveLength(0);
     expect(sig.html).toContain('sig_fichiers/nope.png');
   });
+
+  it('decodes windows-1252 high-range characters (œ, ’, é)', async () => {
+    const htmPath = join(tmp, 'sig.htm');
+    // Raw windows-1252 bytes: 0x92 = ’, 0x9c = œ, 0xe9 = é.
+    const raw = Buffer.from(
+      '<html><head><meta content="text/html; charset=windows-1252"></head>' +
+        '<body><p>Ma\xeetre d\x92\x9cuvre \xe9</p></body></html>',
+      'latin1',
+    );
+    writeFileSync(htmPath, raw);
+    const sig = await loadOutlookSignature(htmPath);
+    expect(sig.html).toContain('Maître d’œuvre é');
+  });
 });
 
 describe('loadAccountSignature / applyAccountSignature', () => {

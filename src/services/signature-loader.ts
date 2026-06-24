@@ -47,15 +47,39 @@ function guessImageMime(filename: string): string {
   return IMAGE_MIME[path.extname(filename).toLowerCase()] ?? 'application/octet-stream';
 }
 
+// windows-1252 high range 0x80–0x9F → Unicode, indexed by (byte - 0x80).
+// Outside this range cp1252 matches latin1 byte-for-byte. A 0 entry means the
+// byte is undefined in cp1252 and falls through to its raw value.
+const CP1252_HIGH = [
+  0x20ac, 0, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, // 0x80–0x87
+  0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017d, 0, // 0x88–0x8F
+  0, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, // 0x90–0x97
+  0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0, 0x017e, 0x0178, // 0x98–0x9F
+];
+
+/** Manual windows-1252 decoder. Reliable regardless of the Node ICU build. */
+function decodeWindows1252(bytes: Buffer): string {
+  return Array.from(bytes, (byte) => {
+    const mapped = byte >= 0x80 && byte <= 0x9f ? CP1252_HIGH[byte - 0x80] : 0;
+    return String.fromCodePoint(mapped || byte);
+  }).join('');
+}
+
 /** Decode raw bytes to a string, honoring the declared charset (default windows-1252). */
 function decodeHtml(bytes: Buffer): string {
   const head = bytes.subarray(0, 1024).toString('latin1');
   const charset = /charset=["']?([\w-]+)/i.exec(head)?.[1]?.toLowerCase() ?? 'windows-1252';
+  // Word/Outlook signatures default to windows-1252; the WHATWG standard also
+  // decodes iso-8859-1/latin1 as windows-1252. Map these ourselves —
+  // TextDecoder('windows-1252') is unreliable under a small-ICU Node build and
+  // can silently fall back to latin1, dropping characters like "œ" / "’".
+  if (/^(windows-1252|cp1252|iso-8859-1|latin1)$/.test(charset)) {
+    return decodeWindows1252(bytes);
+  }
   try {
     return new TextDecoder(charset).decode(bytes);
   } catch {
-    // Charset unknown to this environment → fall back to latin1 (≈ windows-1252).
-    return bytes.toString('latin1');
+    return decodeWindows1252(bytes);
   }
 }
 
