@@ -9,6 +9,7 @@ import {
   applyAccountSignature,
   loadAccountSignature,
   loadOutlookSignature,
+  shouldAppendSignature,
 } from './signature-loader.js';
 
 // Minimal 1x1 PNG.
@@ -148,5 +149,47 @@ describe('loadAccountSignature / applyAccountSignature', () => {
     expect(out.body).toContain('Jane Doe');
     expect(out.attachments).toHaveLength(1);
     expect(out.attachments[0].cid).toBe('image001.png@01D9.ABC');
+  });
+
+  it('applies the signature by default when signature_default is set (append omitted)', async () => {
+    const htmPath = writeSignature(tmp);
+    const account = { ...baseAccount, signaturePath: htmPath, signatureDefault: true };
+    const out = await applyAccountSignature(account, { body: '<p>Hi</p>' }, undefined);
+
+    expect(out.html).toBe(true);
+    expect(out.body).toContain('Jane Doe');
+    expect(out.attachments).toHaveLength(1);
+  });
+
+  it('append:false overrides signature_default (no signature)', async () => {
+    const htmPath = writeSignature(tmp);
+    const account = { ...baseAccount, signaturePath: htmPath, signatureDefault: true };
+    const out = await applyAccountSignature(account, { body: 'Hi', html: false }, false);
+
+    expect(out).toEqual({ body: 'Hi', html: false, attachments: [] });
+  });
+});
+
+describe('shouldAppendSignature (three-state resolution)', () => {
+  const account: AccountConfig = {
+    name: 'work',
+    email: 'jane@example.com',
+    username: 'jane@example.com',
+    imap: { host: 'imap.example.com', port: 993, tls: true, starttls: false, verifySsl: true },
+    smtp: { host: 'smtp.example.com', port: 465, tls: true, starttls: false, verifySsl: true },
+  };
+
+  it('explicit true/false always wins over the account default', () => {
+    expect(shouldAppendSignature({ ...account, signatureDefault: false }, true)).toBe(true);
+    expect(shouldAppendSignature({ ...account, signatureDefault: true }, false)).toBe(false);
+  });
+
+  it('falls back to signature_default when the per-call value is omitted', () => {
+    expect(shouldAppendSignature({ ...account, signatureDefault: true }, undefined)).toBe(true);
+    expect(shouldAppendSignature({ ...account, signatureDefault: false }, undefined)).toBe(false);
+  });
+
+  it('defaults to false when neither is set', () => {
+    expect(shouldAppendSignature(account, undefined)).toBe(false);
   });
 });

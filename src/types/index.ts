@@ -73,6 +73,8 @@ export interface AccountConfig {
   gmailAutoSave?: boolean;
   /** Path to an Outlook HTML signature (.htm) to embed inline. */
   signaturePath?: string;
+  /** Append the signature by default on every composed message (unless overridden per call). */
+  signatureDefault?: boolean;
 }
 
 export interface WatcherConfig {

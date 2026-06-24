@@ -8,10 +8,11 @@ import { randomUUID } from 'node:crypto';
 import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import type { IConnectionManager } from '../connections/types.js';
 import type RateLimiter from '../safety/rate-limiter.js';
+import { sanitizeTemplateVariable } from '../safety/validation.js';
 import type { AccountConfig, SendResult } from '../types/index.js';
 import type { ResolvedAttachment } from './attachment-resolver.js';
 import type ImapService from './imap.service.js';
-import { applyAccountSignature } from './signature-loader.js';
+import { applyAccountSignature, shouldAppendSignature } from './signature-loader.js';
 
 // ---------------------------------------------------------------------------
 // Helpers (must be defined before SmtpService)
@@ -367,6 +368,7 @@ export default class SmtpService {
       to: string[];
       body?: string;
       cc?: string[];
+      appendSignature?: boolean;
     },
   ): Promise<SendResult> {
     this.checkRateLimit(accountName);
@@ -395,6 +397,40 @@ export default class SmtpService {
     const transport = await this.connections.getSmtpTransport(accountName);
 
     const fromAddr = account.fullName ? `"${account.fullName}" <${account.email}>` : account.email;
+
+    // With a signature, switch to an HTML message: HTML-escape the plain-text
+    // forward (so its `<`/`&` and line breaks render correctly) and append the
+    // signature with its inline (cid) images. Composed once → raw bytes are both
+    // transmitted and stored in Sent (mirrors sendEmail).
+    if (shouldAppendSignature(account, options.appendSignature)) {
+      const htmlForward = `<div>${sanitizeTemplateVariable(fullBody, true).replace(/\r?\n/g, '<br>')}</div>`;
+      const signed = await applyAccountSignature(
+        account,
+        { body: htmlForward, html: true, attachments: [] },
+        true,
+      );
+      const ccAddrs = options.cc ?? [];
+      const mailOptions = {
+        from: fromAddr,
+        to: options.to.join(', '),
+        cc: ccAddrs.length > 0 ? ccAddrs.join(', ') : undefined,
+        subject,
+        html: signed.body,
+        ...(signed.attachments.length > 0 ? { attachments: signed.attachments } : {}),
+      };
+      const rawMessage = await new Promise<Buffer>((resolve, reject) => {
+        new MailComposer(mailOptions).compile().build((err: Error | null, buf: Buffer) => {
+          if (err) reject(err);
+          else resolve(buf);
+        });
+      });
+      const signedResult = await transport.sendMail({
+        envelope: { from: account.email, to: [...options.to, ...ccAddrs] },
+        raw: rawMessage,
+      });
+      await this.appendToSentFolder(accountName, rawMessage);
+      return { messageId: signedResult.messageId ?? '', status: 'sent' };
+    }
 
     const result = await transport.sendMail({
       from: fromAddr,

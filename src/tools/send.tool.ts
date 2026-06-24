@@ -47,7 +47,7 @@ export default function registerSendTools(
         .optional()
         .describe(
           "Append the account's configured signature (signature_path) below the body, with its " +
-            'logo/images embedded inline (cid). Forces HTML. Requires signature_path on the account.',
+            'logo/images embedded inline (cid). Forces HTML. Defaults to the account signature_default; pass false to disable.',
         ),
     },
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
@@ -133,7 +133,7 @@ export default function registerSendTools(
         .optional()
         .describe(
           "Append the account's configured signature (signature_path) below the reply, with its " +
-            'logo/images embedded inline (cid). Forces HTML. Requires signature_path on the account.',
+            'logo/images embedded inline (cid). Forces HTML. Defaults to the account signature_default; pass false to disable.',
         ),
     },
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
@@ -189,6 +189,13 @@ export default function registerSendTools(
       to: z.array(z.string().email()).min(1).describe('Forward to these recipients'),
       body: z.string().optional().describe('Additional message above the forwarded content'),
       cc: z.array(z.string().email()).optional().describe('CC recipients'),
+      appendSignature: z
+        .boolean()
+        .optional()
+        .describe(
+          "Append the account's configured signature (signature_path) with its logo/images " +
+            'embedded inline (cid). Forces HTML. Defaults to the account signature_default.',
+        ),
     },
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (params) => {

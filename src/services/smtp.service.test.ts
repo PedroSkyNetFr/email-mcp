@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { IConnectionManager } from '../connections/types.js';
 import type RateLimiter from '../safety/rate-limiter.js';
 import type { ResolvedAttachment } from './attachment-resolver.js';
@@ -445,6 +448,33 @@ describe('SmtpService', () => {
         'test',
         expect.stringContaining('Subject: Fwd: Original Subject'),
       );
+    });
+
+    it('forwards as HTML with the signature appended when signature_default is set', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'fwd-sig-'));
+      const htmPath = join(dir, 'sig.htm');
+      await writeFile(htmPath, '<html><body><p>Jane Doe</p></body></html>', 'latin1');
+      try {
+        const conn = createMockConnectionManager(transport, {
+          signaturePath: htmPath,
+          signatureDefault: true,
+        });
+        const svc = new SmtpService(conn, rateLimiter, imapService as unknown as ImapService);
+
+        await svc.forwardEmail('test', { emailId: '42', to: ['fwd@example.com'], body: 'FYI' });
+
+        const call = transport.sendMail.mock.calls[0][0];
+        // Signature → compose-once raw bytes (not the plain { text } shape), and
+        // the message is HTML (the plain forward path emits text/plain instead).
+        expect(call.raw).toBeInstanceOf(Buffer);
+        expect((call.raw as Buffer).toString('utf-8')).toMatch(/Content-Type: text\/html/i);
+        expect(call.envelope.to).toEqual(['fwd@example.com']);
+        // appendToSent stores the same raw bytes that were transmitted.
+        const [[, appended]] = vi.mocked(imapService.appendToSent).mock.calls;
+        expect((appended as Buffer).equals(call.raw as Buffer)).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     });
   });
 

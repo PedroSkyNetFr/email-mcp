@@ -59,6 +59,10 @@ export const AccountConfigSchema = z
     // are embedded inline (cid) at compose time when append_signature is
     // requested. See signature-loader.ts.
     signature_path: z.string().optional(),
+    // When true, the signature is appended by default to every composed message
+    // (send/reply/forward/draft) for this account, unless a call passes
+    // append_signature:false. Requires signature_path. Defaults to false.
+    signature_default: z.boolean().optional(),
   })
   .refine((data) => data.password ?? data.oauth2, {
     message: 'Either password or oauth2 config is required',

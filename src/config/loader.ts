@@ -105,6 +105,7 @@ function loadFromEnv(): RawAppConfig | null {
         password,
         oauth2,
         signature_path: process.env.MCP_EMAIL_SIGNATURE_PATH,
+        signature_default: process.env.MCP_EMAIL_SIGNATURE_DEFAULT === 'true' ? true : undefined,
         imap: {
           host: imapHost,
           port: parseInt(process.env.MCP_EMAIL_IMAP_PORT ?? '993', 10),
@@ -191,6 +192,7 @@ function normalizeAccount(raw: RawAccountConfig): AccountConfig {
     saveToSent: raw.save_to_sent,
     gmailAutoSave: raw.gmail_auto_save,
     signaturePath: raw.signature_path,
+    signatureDefault: raw.signature_default,
   };
 }
 

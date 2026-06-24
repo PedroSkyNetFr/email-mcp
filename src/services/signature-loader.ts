@@ -183,9 +183,19 @@ export async function loadAccountSignature(account: AccountConfig): Promise<Load
 }
 
 /**
+ * Decide whether to append the signature, with three-state semantics:
+ *   - explicit per-call value wins (`true` always, `false` never);
+ *   - when omitted (`undefined`), fall back to the account's `signature_default`;
+ *   - otherwise off.
+ */
+export function shouldAppendSignature(account: AccountConfig, append: boolean | undefined): boolean {
+  return append ?? account.signatureDefault ?? false;
+}
+
+/**
  * Apply an account's signature to a message being composed: append the HTML
  * below the body (forcing HTML mode) and merge the inline images. Transparent
- * no-op when `append` is falsy.
+ * no-op when the signature must not be appended (see {@link shouldAppendSignature}).
  */
 export async function applyAccountSignature(
   account: AccountConfig,
@@ -193,7 +203,7 @@ export async function applyAccountSignature(
   append: boolean | undefined,
 ): Promise<{ body: string; html: boolean; attachments: ResolvedAttachment[] }> {
   const attachments = message.attachments ?? [];
-  if (!append) {
+  if (!shouldAppendSignature(account, append)) {
     return { body: message.body, html: message.html ?? false, attachments };
   }
   const signature = await loadAccountSignature(account);

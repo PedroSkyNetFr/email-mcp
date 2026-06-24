@@ -56,7 +56,7 @@ export default function registerDraftTools(
         .optional()
         .describe(
           "Append the account's configured signature (signature_path) below the body, with its " +
-            'logo/images embedded inline (cid). Forces HTML. Requires signature_path on the account.',
+            'logo/images embedded inline (cid). Forces HTML. Defaults to the account signature_default; pass false to disable.',
         ),
     },
     { readOnlyHint: false, destructiveHint: false },

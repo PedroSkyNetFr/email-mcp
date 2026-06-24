@@ -1060,12 +1060,24 @@ demand. Outlook stores signatures under `%APPDATA%\Microsoft\Signatures\` as a
 name = "work"
 # …
 signature_path = "C:\\Users\\You\\AppData\\Roaming\\Microsoft\\Signatures\\My Signature.htm"
+signature_default = true   # optional — append the signature on every message
 ```
 
-(or the `MCP_EMAIL_SIGNATURE_PATH` environment variable). Then set
-`append_signature: true` on `send_email`, `reply_email` or `save_draft`:
+(`signature_path` / `signature_default` also map to the `MCP_EMAIL_SIGNATURE_PATH`
+and `MCP_EMAIL_SIGNATURE_DEFAULT` environment variables.)
+
+`append_signature` is available on `send_email`, `reply_email`, `forward_email`
+and `save_draft`, and resolves with three-state semantics:
+
+- `append_signature: true` → always append;
+- `append_signature: false` → never (overrides the default — e.g. a short reply);
+- omitted → use the account's `signature_default` (so `signature_default = true`
+  appends the signature on **every** message, sent, replied, forwarded or drafted).
 
 ```jsonc
+// signature_default = true → no flag needed
+{ "account": "work", "to": ["x@y.com"], "subject": "Hello", "body": "<p>Hello,</p>" }
+// opt in explicitly (when signature_default is off)
 { "account": "work", "to": ["x@y.com"], "subject": "Hello",
   "body": "<p>Hello,</p>", "append_signature": true }
 ```
