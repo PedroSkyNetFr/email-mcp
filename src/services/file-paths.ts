@@ -4,14 +4,17 @@
  * - `sanitizeFilename` — strip path separators and reserved characters so we
  *   never let an attacker's filename break out of the destination directory.
  * - `assertSafeDestination` — guard-rail that rejects any destination outside
- *   the user's home directory (or `/tmp`). Normalizes `..` traversal.
+ *   the allowed root directories (home, tmp, plus any added through the
+ *   `MAIL_ALLOWED_SAVE_DIRS` env var), or accepts any absolute path when
+ *   `MAIL_ALLOW_ANY_SAVE_DIR=true`. Normalizes `..` traversal and is
+ *   cross-platform (Windows/macOS/Linux).
  * - `resolveUniquePath` — auto-suffix `name.ext` → `name-1.ext`, `name-2.ext`
  *   when the caller doesn't want to overwrite.
  */
 
 import { access } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 
 /** Async existence check — uses `fs.access`; throws become "does not exist". */
 async function pathExists(p: string): Promise<boolean> {
@@ -43,40 +46,77 @@ export function sanitizeFilename(name: string): string {
   return trimmed.length > 0 ? trimmed : 'unnamed';
 }
 
+/** Env var holding extra allowed save roots, separated by ";". */
+export const ALLOWED_SAVE_DIRS_ENV = 'MAIL_ALLOWED_SAVE_DIRS';
+
 /**
- * Validate that a target path lies under the user's home directory OR under
- * the OS tmp dir. Throws an Error describing the violation otherwise.
+ * Env var that, when set to "true", disables the directory allow-list entirely
+ * (any absolute destination is accepted). An explicit opt-out for trusted,
+ * single-user setups — leave it unset to keep the safe default.
+ */
+export const ALLOW_ANY_SAVE_DIR_ENV = 'MAIL_ALLOW_ANY_SAVE_DIR';
+
+/**
+ * Build the whitelist of allowed root directories for direct-to-disk writes:
+ * the user's home dir, the OS tmp dir, and any extra paths supplied via the
+ * `MAIL_ALLOWED_SAVE_DIRS` environment variable (";"-separated). Every entry is
+ * resolved to an absolute, canonical path so containment checks are reliable.
+ */
+export function allowedSaveRoots(): string[] {
+  const extra = (process.env[ALLOWED_SAVE_DIRS_ENV] ?? '')
+    .split(';')
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  return [homedir(), tmpdir(), ...extra].map((p) => resolve(p));
+}
+
+/**
+ * true when `child` is the same as, or nested under, `parent`.
  *
- * The checks use `path.resolve` to canonicalize, so `..` traversal
- * (`~/Downloads/../../etc/passwd`) is caught. `startsWith` is compared with
- * the platform separator appended so `/tmp-evil/` isn't treated as inside
- * `/tmp`.
+ * Uses `path.relative` so the comparison respects the platform separator and
+ * (on Windows) case-insensitivity. A relative path that escapes `parent` starts
+ * with `..`, and a path on a different Windows drive comes back absolute — both
+ * are rejected, so sibling prefixes like `/tmp-evil` vs `/tmp` never match.
+ */
+function isWithin(child: string, parent: string): boolean {
+  const rel = relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+/**
+ * Validate that a target path lies under one of the allowed root directories
+ * (see {@link allowedSaveRoots}). Throws an Error describing the violation
+ * otherwise.
+ *
+ * `path.resolve` canonicalizes the input, and any literal `..` segment is
+ * rejected up front, so `~/Downloads/../../etc/passwd` is caught.
  */
 export function assertSafeDestination(absolutePath: string): void {
   if (!isAbsolute(absolutePath)) {
     throw new Error(`Destination must be an absolute path, got: ${absolutePath}`);
   }
 
-  const resolved = resolve(absolutePath);
+  // Full opt-out: the operator has explicitly disabled the allow-list. We still
+  // require an absolute path above (downstream writes need one), but skip the
+  // containment and `..` checks.
+  if (process.env[ALLOW_ANY_SAVE_DIR_ENV] === 'true') {
+    return;
+  }
 
-  // Reject any path that contains `..` as a literal segment after resolve —
-  // resolve() collapses most cases, but catching the raw `..` in the input
-  // gives a clearer error than the home-check failing further down.
+  // Reject any literal `..` segment in the input — `resolve` would silently
+  // collapse it, and this yields a clearer error than the containment check.
   if (absolutePath.split(/[\\/]/).includes('..')) {
     throw new Error(`Destination path must not contain ".." traversal segments: ${absolutePath}`);
   }
 
-  const home = resolve(homedir());
-  const tmp = resolve(tmpdir());
+  const resolved = resolve(absolutePath);
+  const roots = allowedSaveRoots();
 
-  // Append path separator so `/tmp-evil` isn't accepted as inside `/tmp`. The
-  // exact equality case (path === home / tmp) is also valid.
-  const underHome = resolved === home || resolved.startsWith(`${home}/`);
-  const underTmp = resolved === tmp || resolved.startsWith(`${tmp}/`);
-
-  if (!underHome && !underTmp) {
+  if (!roots.some((root) => isWithin(resolved, root))) {
     throw new Error(
-      `Destination "${resolved}" is outside the user's home directory and tmp dir — refusing to write.`,
+      `Destination "${resolved}" is not under an allowed directory. ` +
+        `Allowed roots: ${roots.join(', ')}. ` +
+        `Add directories via the ${ALLOWED_SAVE_DIRS_ENV} environment variable (";"-separated).`,
     );
   }
 }

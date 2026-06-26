@@ -1,9 +1,16 @@
 /* eslint-disable n/no-sync -- tests use sync fs helpers for setup/teardown */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
 import { resolveAttachments } from './attachment-resolver.js';
-import { resolveUniquePath, sanitizeFilename } from './file-paths.js';
+import {
+  ALLOW_ANY_SAVE_DIR_ENV,
+  ALLOWED_SAVE_DIRS_ENV,
+  allowedSaveRoots,
+  assertSafeDestination,
+  resolveUniquePath,
+  sanitizeFilename,
+} from './file-paths.js';
 import type ImapService from './imap.service.js';
 import {
   extractAttachmentMeta,
@@ -532,6 +539,86 @@ describe('resolveUniquePath', () => {
     await expect(resolveUniquePath(join(tmp, 'README'), false)).resolves.toBe(
       join(tmp, 'README-1'),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// assertSafeDestination / allowedSaveRoots — whitelist + cross-platform check
+// ---------------------------------------------------------------------------
+
+describe('assertSafeDestination', () => {
+  const savedDirs = process.env[ALLOWED_SAVE_DIRS_ENV];
+  const savedAny = process.env[ALLOW_ANY_SAVE_DIR_ENV];
+
+  afterEach(() => {
+    if (savedDirs === undefined) delete process.env[ALLOWED_SAVE_DIRS_ENV];
+    else process.env[ALLOWED_SAVE_DIRS_ENV] = savedDirs;
+    if (savedAny === undefined) delete process.env[ALLOW_ANY_SAVE_DIR_ENV];
+    else process.env[ALLOW_ANY_SAVE_DIR_ENV] = savedAny;
+  });
+
+  it('accepts a sub-directory of the home dir (regression: separator bug)', () => {
+    delete process.env[ALLOWED_SAVE_DIRS_ENV];
+    // Used to fail on Windows because the check hard-coded "/" as separator.
+    expect(() => assertSafeDestination(join(homedir(), 'Downloads', 'invoice.pdf'))).not.toThrow();
+  });
+
+  it('accepts a path inside the OS tmp dir', () => {
+    delete process.env[ALLOWED_SAVE_DIRS_ENV];
+    expect(() => assertSafeDestination(join(tmpdir(), 'export', 'file.csv'))).not.toThrow();
+  });
+
+  it('rejects a destination outside every allowed root', () => {
+    delete process.env[ALLOWED_SAVE_DIRS_ENV];
+    // A sibling of the home dir that merely shares its prefix must NOT pass.
+    const sibling = `${resolve(homedir())}-evil${sep}leak.pdf`;
+    expect(() => assertSafeDestination(sibling)).toThrow(/not under an allowed directory/);
+  });
+
+  it('rejects literal ".." traversal segments', () => {
+    // Build the string with the platform separator so the `..` survive
+    // (path.join would collapse them).
+    const traversal = `${homedir()}${sep}..${sep}..${sep}etc${sep}evil`;
+    expect(() => assertSafeDestination(traversal)).toThrow(
+      /must not contain "\.\." traversal segments/,
+    );
+  });
+
+  it('rejects non-absolute paths', () => {
+    expect(() => assertSafeDestination(join('relative', 'path.pdf'))).toThrow(/absolute path/);
+  });
+
+  it('allows a directory added via MAIL_ALLOWED_SAVE_DIRS', () => {
+    const root = mkdtempSync(join(tmpdir(), 'allow-root-'));
+    try {
+      // Point the whitelist at `root` (";"-separated; surrounding blanks ignored).
+      process.env[ALLOWED_SAVE_DIRS_ENV] = `${root} ; `;
+      expect(allowedSaveRoots()).toContain(resolve(root));
+      expect(() => assertSafeDestination(join(root, 'sub', 'file.pdf'))).not.toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('still rejects a sibling of an allowed root (prefix is not containment)', () => {
+    // A directory next to home that merely shares its name prefix is NOT inside
+    // any allowed root (home, tmp, or MAIL_ALLOWED_SAVE_DIRS).
+    delete process.env[ALLOWED_SAVE_DIRS_ENV];
+    delete process.env[ALLOW_ANY_SAVE_DIR_ENV];
+    const outside = `${resolve(homedir())}-not-allowed${sep}file.pdf`;
+    expect(() => assertSafeDestination(outside)).toThrow(/not under an allowed directory/);
+  });
+
+  it('MAIL_ALLOW_ANY_SAVE_DIR=true accepts any absolute path (opt-out)', () => {
+    delete process.env[ALLOWED_SAVE_DIRS_ENV];
+    process.env[ALLOW_ANY_SAVE_DIR_ENV] = 'true';
+    const outside = `${resolve(homedir())}-not-allowed${sep}file.pdf`;
+    expect(() => assertSafeDestination(outside)).not.toThrow();
+  });
+
+  it('the opt-out still requires an absolute path', () => {
+    process.env[ALLOW_ANY_SAVE_DIR_ENV] = 'true';
+    expect(() => assertSafeDestination(join('relative', 'path.pdf'))).toThrow(/absolute path/);
   });
 });
 

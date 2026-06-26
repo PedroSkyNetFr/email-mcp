@@ -227,7 +227,8 @@ export default function registerExportTools(
         const defaultPath = join(homedir(), 'Downloads', `email-export-${tsSlug}.${params.format}`);
         const destination = params.destination ?? defaultPath;
 
-        // Path safety — reject anything outside $HOME or /tmp.
+        // Path safety — reject anything outside the allowed roots
+        // (home, tmp, MAIL_ALLOWED_SAVE_DIRS).
         assertSafeDestination(destination);
 
         // Resolve account mode

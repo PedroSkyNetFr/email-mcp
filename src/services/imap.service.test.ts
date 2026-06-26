@@ -1280,11 +1280,11 @@ describe('ImapService', () => {
       }
     });
 
-    it('rejects /etc/passwd-style destinations outside $HOME and /tmp', async () => {
+    it('rejects /etc/passwd-style destinations outside the allowed roots', async () => {
       primeClientForDownload(client);
       await expect(
         service.saveAttachmentToDisk('test', '42', 'INBOX', 'lease.pdf', '/etc/passwd'),
-      ).rejects.toThrow(/outside the user's home directory/);
+      ).rejects.toThrow(/not under an allowed directory/);
     });
 
     it('rejects destinations containing `..` traversal', async () => {

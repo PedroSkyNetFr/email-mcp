@@ -484,6 +484,38 @@ For single-account setups (overrides config file):
 | `MCP_EMAIL_SMTP_POOL_MAX_CONNECTIONS` | `1` | Max pooled SMTP connections |
 | `MCP_EMAIL_SMTP_POOL_MAX_MESSAGES` | `100` | Max messages per pooled connection |
 | `MCP_EMAIL_RATE_LIMIT` | `10` | Max sends per minute |
+| `MCP_EMAIL_SIGNATURE_PATH` | — | Path to an Outlook `.htm` signature for `append_signature` |
+| `MAIL_ALLOWED_SAVE_DIRS` | — | Extra directories where attachments/exports may be written (see below) |
+| `MAIL_ALLOW_ANY_SAVE_DIR` | `false` | `true` disables the allow-list entirely (any absolute path) |
+
+#### Where attachments can be saved (`MAIL_ALLOWED_SAVE_DIRS`)
+
+`save_attachment`, `save_all_attachments_from_search` and the CSV/NDJSON export
+tool refuse to write outside an allow‑list of root directories, as a guard‑rail
+against path‑traversal. By default the allow‑list is:
+
+- the user's home directory, and
+- the OS temp directory.
+
+To save into other locations (e.g. a project folder on `D:\`), add them via the
+`MAIL_ALLOWED_SAVE_DIRS` environment variable — an absolute‑path list separated
+by `;`:
+
+```jsonc
+// claude_desktop_config.json → mcpServers.email.env
+"MAIL_ALLOWED_SAVE_DIRS": "D:\\CC_Dossiers\\Affaires;D:\\Exports"
+```
+
+A destination is accepted only if its resolved path is the same as, or nested
+under, one of the allowed roots. Literal `..` traversal segments are always
+rejected, and the comparison is OS‑aware (correct path separator, and
+case‑insensitive on Windows), so a sibling like `D:\Exports-evil` is **not**
+treated as inside `D:\Exports`.
+
+To disable the allow‑list entirely (any absolute path accepted), set
+`MAIL_ALLOW_ANY_SAVE_DIR=true`. This is a deliberate opt‑out for trusted,
+single‑user setups; the default keeps the allow‑list because the server is
+driven by an LLM that reads untrusted email content (prompt‑injection surface).
 
 ### Database & Routing Migrations
 
