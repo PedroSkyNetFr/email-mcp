@@ -7,9 +7,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 
-export default function registerAnalyticsTools(server: McpServer, imapService: ImapService): void {
+export default function registerAnalyticsTools(server: McpServer, imapService: IMailService): void {
   server.tool(
     'get_email_stats',
     'Get email statistics and analytics for a mailbox. Shows volume, top senders, daily trends, and read/flagged counts.',

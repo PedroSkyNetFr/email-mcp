@@ -8,12 +8,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import type ConnectionManager from '../connections/manager.js';
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 
 export default function registerMailboxesResource(
   server: McpServer,
   connections: ConnectionManager,
-  imapService: ImapService,
+  imapService: IMailService,
 ): void {
   const names = connections.getAccountNames();
   const accounts = names.map((name) => connections.getAccount(name));

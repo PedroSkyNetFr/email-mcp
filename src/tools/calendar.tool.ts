@@ -18,7 +18,7 @@ import { z } from 'zod';
 
 import { CALENDAR_ATTACHMENTS_DIR } from '../config/xdg.js';
 import type CalendarService from '../services/calendar.service.js';
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 import type LocalCalendarService from '../services/local-calendar.service.js';
 import type RemindersService from '../services/reminders.service.js';
 import { buildCalendarNotes } from '../utils/calendar-notes.js';
@@ -31,7 +31,7 @@ const REMINDER_KEYWORDS =
 
 export default function registerCalendarTools(
   server: McpServer,
-  imapService: ImapService,
+  imapService: IMailService,
   calendarService: CalendarService,
   localCalendarService: LocalCalendarService,
   remindersService: RemindersService,

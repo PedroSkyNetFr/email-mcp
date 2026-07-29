@@ -7,9 +7,9 @@ import { z } from 'zod';
 import audit from '../safety/audit.js';
 import { sanitizeMailboxName } from '../safety/validation.js';
 
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 
-export default function registerManageTools(server: McpServer, imapService: ImapService): void {
+export default function registerManageTools(server: McpServer, imapService: IMailService): void {
   // ---------------------------------------------------------------------------
   // move_email
   // ---------------------------------------------------------------------------

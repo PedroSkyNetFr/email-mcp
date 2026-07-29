@@ -5,9 +5,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 
-export default function registerMailboxesTools(server: McpServer, imapService: ImapService): void {
+export default function registerMailboxesTools(server: McpServer, imapService: IMailService): void {
   server.tool(
     'list_mailboxes',
     'List all mailbox folders for an account with unread counts and special-use flags. Use list_accounts first to get the account name.',

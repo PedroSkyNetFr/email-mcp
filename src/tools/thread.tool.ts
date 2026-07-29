@@ -8,11 +8,11 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 import type { BodyFormat } from '../utils/body-format.js';
 import { applyBodyFormat } from '../utils/body-format.js';
 
-export default function registerThreadTools(server: McpServer, imapService: ImapService): void {
+export default function registerThreadTools(server: McpServer, imapService: IMailService): void {
   server.tool(
     'get_thread',
     'Reconstruct a full email conversation thread by following References and In-Reply-To headers. ' +

@@ -17,7 +17,7 @@ import { z } from 'zod';
 import type ConnectionManager from '../connections/manager.js';
 import { toCsvRow } from '../services/csv.js';
 import { assertSafeDestination } from '../services/file-paths.js';
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 import type { EmailMeta } from '../types/index.js';
 
 /** Column names understood for CSV output. */
@@ -152,7 +152,7 @@ export async function writeExport(params: {
 
 export default function registerExportTools(
   server: McpServer,
-  imapService: ImapService,
+  imapService: IMailService,
   connections: ConnectionManager,
 ): void {
   server.tool(

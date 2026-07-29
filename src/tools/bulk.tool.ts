@@ -6,10 +6,10 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import audit from '../safety/audit.js';
 
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 import type { BulkResult } from '../types/index.js';
 
-export default function registerBulkTools(server: McpServer, imapService: ImapService): void {
+export default function registerBulkTools(server: McpServer, imapService: IMailService): void {
   server.tool(
     'bulk_action',
     'Batch operation on multiple emails by UID list. Supports mark_read, mark_unread, flag, unflag, move, and delete. Max 100 IDs per call. Returns success/failure counts.',

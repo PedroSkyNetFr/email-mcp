@@ -6,9 +6,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import audit from '../safety/audit.js';
 
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 
-export default function registerFolderTools(server: McpServer, imapService: ImapService): void {
+export default function registerFolderTools(server: McpServer, imapService: IMailService): void {
   // ---------------------------------------------------------------------------
   // create_mailbox
   // ---------------------------------------------------------------------------

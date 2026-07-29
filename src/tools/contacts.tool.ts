@@ -5,9 +5,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 
-export default function registerContactsTools(server: McpServer, imapService: ImapService): void {
+export default function registerContactsTools(server: McpServer, imapService: IMailService): void {
   server.tool(
     'extract_contacts',
     'Extract unique contacts from recent email headers. Returns contacts sorted by frequency (most frequent first). Useful for finding frequent correspondents or building an address book.',

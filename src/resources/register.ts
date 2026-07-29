@@ -6,7 +6,7 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type ConnectionManager from '../connections/manager.js';
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 import type SchedulerService from '../services/scheduler.service.js';
 import type TemplateService from '../services/template.service.js';
 import registerAccountsResource from './accounts.resource.js';
@@ -19,7 +19,7 @@ import registerUnreadResource from './unread.resource.js';
 export default function registerAllResources(
   server: McpServer,
   connections: ConnectionManager,
-  imapService: ImapService,
+  imapService: IMailService,
   templateService: TemplateService,
   schedulerService: SchedulerService,
 ): void {

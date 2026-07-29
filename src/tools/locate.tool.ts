@@ -9,9 +9,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 
-export default function registerLocateTools(server: McpServer, imapService: ImapService): void {
+export default function registerLocateTools(server: McpServer, imapService: IMailService): void {
   server.tool(
     'find_email_folder',
     'Find which real mailbox folder(s) an email belongs to. ' +

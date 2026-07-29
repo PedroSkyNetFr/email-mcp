@@ -7,14 +7,14 @@ import { z } from 'zod';
 import audit from '../safety/audit.js';
 import { validateInputLength } from '../safety/validation.js';
 
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 import type SmtpService from '../services/smtp.service.js';
 import { adaptAttachmentInput, attachmentInputSchema } from './attachment-input.js';
 
 export default function registerSendTools(
   server: McpServer,
   smtpService: SmtpService,
-  imapService: ImapService,
+  imapService: IMailService,
 ): void {
   // ---------------------------------------------------------------------------
   // send_email

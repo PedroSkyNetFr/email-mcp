@@ -11,9 +11,9 @@ import { z } from 'zod';
 import audit from '../safety/audit.js';
 import { validateLabelName } from '../safety/validation.js';
 
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 
-export default function registerLabelTools(server: McpServer, imapService: ImapService): void {
+export default function registerLabelTools(server: McpServer, imapService: IMailService): void {
   // ---------------------------------------------------------------------------
   // list_labels
   // ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import audit from '../safety/audit.js';
 
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 import type SmtpService from '../services/smtp.service.js';
 import type TemplateService from '../services/template.service.js';
 
@@ -68,7 +68,7 @@ export function registerTemplateReadTools(
 export function registerTemplateWriteTools(
   server: McpServer,
   templateService: TemplateService,
-  imapService: ImapService,
+  imapService: IMailService,
   smtpService: SmtpService,
 ): void {
   server.tool(

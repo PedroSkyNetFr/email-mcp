@@ -9,7 +9,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 import type { SearchOptions } from '../services/imap.service.js';
 import type { SearchPresetRegistry } from '../services/search-presets.js';
 import type { SearchPreset } from '../types/index.js';
@@ -57,7 +57,7 @@ function presetToSearchOptions(
 
 export default function registerSavedSearchesTools(
   server: McpServer,
-  imapService: ImapService,
+  imapService: IMailService,
   connections: ConnectionManager,
   registry: SearchPresetRegistry,
 ): void {

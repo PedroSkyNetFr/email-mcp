@@ -9,7 +9,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type ConnectionManager from '../connections/manager.js';
 import type CalendarService from '../services/calendar.service.js';
 import type HooksService from '../services/hooks.service.js';
-import type ImapService from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 import type LocalCalendarService from '../services/local-calendar.service.js';
 import type RemindersService from '../services/reminders.service.js';
 import type SchedulerService from '../services/scheduler.service.js';
@@ -44,7 +44,7 @@ import registerWatcherTools from './watcher.tool.js';
 export default function registerAllTools(
   server: McpServer,
   connections: ConnectionManager,
-  imapService: ImapService,
+  imapService: IMailService,
   smtpService: SmtpService,
   config: AppConfig,
   templateService: TemplateService,
