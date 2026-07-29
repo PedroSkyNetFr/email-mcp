@@ -23,8 +23,14 @@
  * Anything omitted is asked for interactively, so the script can also be run with
  * no arguments at all — or, on Windows, by double-clicking scripts/oauth-setup.cmd.
  *
+ * Profiles (--provider, or pick from the interactive menu):
+ *   microsoft         IMAP + SMTP scopes — the token email-mcp authenticates with
+ *   microsoft-graph   Graph Mail.Read — diagnostics only, must NOT go in the config
+ *   google            Gmail IMAP + SMTP
+ *   custom            supply --auth-url, --token-url and --scopes yourself
+ *
  * Options:
- *   --provider <name>     microsoft | google | custom            (default: microsoft)
+ *   --provider <name>     profile from the list above               (default: menu)
  *   --client-id <id>      OAuth2 client/application ID           (or OAUTH_CLIENT_ID)
  *   --client-secret <s>   OAuth2 client secret                   (or OAUTH_CLIENT_SECRET)
  *   --port <n>            Local callback port                    (default: 3000)
@@ -240,6 +246,61 @@ async function waitForCode(port: number, timeoutMs: number): Promise<string> {
   });
 }
 
+/**
+ * Ready-made provider profiles. They spare the caller from typing endpoint URLs
+ * and scope lists: picking a name is enough. Every field can still be overridden
+ * with --auth-url / --token-url / --scopes.
+ */
+const PRESETS: Record<
+  string,
+  { label: string; mailToken: boolean; config: Partial<OAuth2Config> }
+> = {
+  microsoft: {
+    label: 'Microsoft — IMAP + SMTP (the token email-mcp needs)',
+    mailToken: true,
+    config: { provider: 'microsoft' },
+  },
+  'microsoft-graph': {
+    label: 'Microsoft Graph — Mail.Read (diagnostics only, NOT for the config)',
+    mailToken: false,
+    config: {
+      provider: 'custom',
+      authUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+      tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+      scopes: ['https://graph.microsoft.com/Mail.Read', 'offline_access'],
+    },
+  },
+  google: {
+    label: 'Google — Gmail IMAP + SMTP',
+    mailToken: true,
+    config: { provider: 'google' },
+  },
+  custom: {
+    label: 'Custom — supply your own endpoints and scopes',
+    mailToken: true,
+    config: { provider: 'custom' },
+  },
+};
+
+/** Numbered menu so the profile can be picked without typing its full name. */
+async function askPreset(): Promise<string> {
+  const keys = Object.keys(PRESETS);
+  // eslint-disable-next-line no-console
+  console.log('What do you need a token for?\n');
+  keys.forEach((key, index) => {
+    // eslint-disable-next-line no-console
+    console.log(`  ${index + 1}) ${key.padEnd(16)} ${PRESETS[key].label}`);
+  });
+  // eslint-disable-next-line no-console
+  console.log('');
+
+  const answer = await ask('Choice [1]: ');
+  if (!answer) return keys[0];
+  const index = Number.parseInt(answer, 10);
+  if (!Number.isNaN(index) && index >= 1 && index <= keys.length) return keys[index - 1];
+  return answer; // also accept the profile name typed out
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
@@ -248,12 +309,14 @@ async function main(): Promise<void> {
 
   // Anything not supplied on the command line (or in the environment) is asked
   // for interactively, so the script can simply be double-clicked.
-  const provider = (args.provider ||
-    (await ask('Provider [microsoft]: ')) ||
-    'microsoft') as OAuth2Config['provider'];
-  if (!['microsoft', 'google', 'custom'].includes(provider)) {
-    throw new Error(`Unknown provider "${provider}" (expected microsoft, google or custom)`);
+  const presetName = args.provider || (await askPreset());
+  const preset = PRESETS[presetName];
+  if (!preset) {
+    throw new Error(
+      `Unknown provider "${presetName}" (expected ${Object.keys(PRESETS).join(', ')})`,
+    );
   }
+  const provider = preset.config.provider ?? 'custom';
 
   const clientId =
     args['client-id'] ?? process.env.OAUTH_CLIENT_ID ?? (await ask('Client / application ID: '));
@@ -282,11 +345,15 @@ async function main(): Promise<void> {
   const redirectUri = `http://localhost:${port}/callback`;
 
   // refreshToken is filled in by the exchange below; empty here by construction.
+  // Precedence: explicit options override the profile, which overrides nothing.
   const config: OAuth2Config = {
     provider,
     clientId,
     clientSecret,
     refreshToken: '',
+    ...(preset.config.tokenUrl ? { tokenUrl: preset.config.tokenUrl } : {}),
+    ...(preset.config.authUrl ? { authUrl: preset.config.authUrl } : {}),
+    ...(preset.config.scopes ? { scopes: preset.config.scopes } : {}),
     ...(args['token-url'] ? { tokenUrl: args['token-url'] } : {}),
     ...(args['auth-url'] ? { authUrl: args['auth-url'] } : {}),
     ...(args.scopes ? { scopes: args.scopes.split(' ').filter(Boolean) } : {}),
@@ -294,7 +361,8 @@ async function main(): Promise<void> {
 
   const authUrl = OAuthService.generateAuthUrl(config, redirectUri);
 
-  console.log(`\nProvider     : ${provider}`);
+  console.log(`\nProfile      : ${presetName}`);
+  console.log(`Scopes       : ${OAuthService.getProviderEndpoints(config).scopes.join(' ')}`);
   console.log(`Redirect URI : ${redirectUri}`);
   console.log('   (this must match the redirect URI registered with the provider)\n');
   console.log('Opening the consent page in your browser. If it does not open, visit:\n');
@@ -311,6 +379,17 @@ async function main(): Promise<void> {
       'The provider returned no refresh token. Re-run after revoking the previous consent, ' +
         'and make sure offline access is granted.',
     );
+  }
+
+  // A profile whose token is not the mail token must not end up in the config:
+  // it would replace the credential the server authenticates IMAP/SMTP with.
+  if (!preset.mailToken) {
+    console.log('Success. Refresh token for this profile:\n');
+    console.log(`  ${tokens.refreshToken}\n`);
+    console.log('This token is for diagnostics only — do NOT put it in your MCP config, which');
+    console.log('must keep the IMAP/SMTP token the server uses. Pass it explicitly instead:\n');
+    console.log('  pnpm probe:graph --server <name> --refresh-token <the token above>\n');
+    return;
   }
 
   // Emit JSON rather than KEY=value: MCP clients are configured through a JSON
@@ -331,6 +410,7 @@ async function main(): Promise<void> {
   console.log('\nReplace the client secret placeholder with its real value.');
   console.log('Then remove MCP_EMAIL_PASSWORD from that account and restart the MCP client.');
   console.log('The access token is refreshed automatically from now on.\n');
+  /* eslint-enable no-console */
   /* eslint-enable no-console */
 }
 

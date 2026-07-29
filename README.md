@@ -475,9 +475,26 @@ exchanges the code, and prints the token plus a ready-to-paste env block. Pass
 credentials out of your shell history.
 
 Any option you omit is prompted for interactively (the client secret is masked),
-so `pnpm oauth:setup` on its own works too. On Windows you can simply
-double-click **`scripts/oauth-setup.cmd`**, which opens a console, asks for the
-values and keeps the window open so you can copy the token.
+so `pnpm oauth:setup` on its own works too — it opens a menu of profiles:
+
+| Profile | Scopes | Use |
+|---------|--------|-----|
+| `microsoft` | IMAP + SMTP | the token email-mcp authenticates with |
+| `microsoft-graph` | `Mail.Read` | diagnostics only — **never** put it in the config |
+| `google` | Gmail IMAP + SMTP | Gmail accounts |
+| `custom` | your own | supply `--auth-url`, `--token-url`, `--scopes` |
+
+On Windows you can simply double-click **`scripts/oauth-setup.cmd`**, which opens
+a console, shows that menu, asks for the values and keeps the window open so you
+can copy the token.
+
+**Exchange and Outlook.com caveat.** Their IMAP endpoint only exposes a legacy
+subset of the mailbox — custom folders can be missing from `LIST` entirely, so
+`list_mailboxes` will not show them. That is a server-side limitation, not a
+filter applied here: `pnpm diagnose:mailboxes --server <name>` compares the raw
+`LIST` and `LSUB` responses to prove it, and `pnpm probe:graph` checks whether
+Microsoft Graph exposes the missing folders (using the `microsoft-graph` profile
+above).
 
 The same values map to environment variables — `MCP_EMAIL_OAUTH2_PROVIDER`,
 `MCP_EMAIL_OAUTH2_CLIENT_ID`, `MCP_EMAIL_OAUTH2_CLIENT_SECRET` and
