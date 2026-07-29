@@ -11,6 +11,7 @@ vi.mock('./contacts.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./cross-account-move.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./drafts.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./emails.tool.js', () => ({ default: vi.fn() }));
+vi.mock('./exchange.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./export.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./folders.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./health.tool.js', () => ({ default: vi.fn() }));
@@ -30,6 +31,7 @@ vi.mock('./watcher.tool.js', () => ({ default: vi.fn() }));
 
 import registerAccountsTools from './accounts.tool.js';
 import registerBulkTools from './bulk.tool.js';
+import registerExchangeTools from './exchange.tool.js';
 import registerCrossAccountMoveTool from './cross-account-move.tool.js';
 import registerDraftTools from './drafts.tool.js';
 import registerEmailsTools from './emails.tool.js';
@@ -87,6 +89,7 @@ describe('registerAllTools', () => {
       {} as never,
       {} as never,
       {} as never,
+      {} as never,
     );
     // Read tools should always be registered
     expect(registerAccountsTools).toHaveBeenCalled();
@@ -98,6 +101,9 @@ describe('registerAllTools', () => {
     expect(registerBulkTools).toHaveBeenCalled();
     expect(registerDraftTools).toHaveBeenCalled();
     expect(registerCrossAccountMoveTool).toHaveBeenCalled();
+    // Exchange-only tools (server rules, automatic reply) change mailbox state,
+    // so they belong with the write tools.
+    expect(registerExchangeTools).toHaveBeenCalled();
     expect(registerFolderTools).toHaveBeenCalled();
     expect(registerTemplateWriteTools).toHaveBeenCalled();
     expect(registerSchedulerTools).toHaveBeenCalled();
@@ -110,6 +116,7 @@ describe('registerAllTools', () => {
       {} as never,
       {} as never,
       createConfig(true),
+      {} as never,
       {} as never,
       {} as never,
       {} as never,

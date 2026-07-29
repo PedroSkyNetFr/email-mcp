@@ -831,6 +831,149 @@ export default class GraphService {
   }
 
   // -------------------------------------------------------------------------
+  // Server-side rules — no IMAP equivalent exists
+  // -------------------------------------------------------------------------
+
+  /**
+   * Inbox rules run on the server, so they keep sorting mail when nothing of
+   * ours is running. IMAP has no equivalent at all: this is Graph-only.
+   */
+  async listMessageRules(accountName: string): Promise<
+    {
+      id: string;
+      displayName: string;
+      sequence: number;
+      isEnabled: boolean;
+      conditions: Record<string, unknown>;
+      actions: Record<string, unknown>;
+    }[]
+  > {
+    return this.client(accountName).collect(
+      '/me/mailFolders/inbox/messageRules',
+    );
+  }
+
+  /**
+   * Create an inbox rule. Conditions and actions follow the Graph shapes; the
+   * destination folder is given as a path and translated to its id here, since
+   * a caller should not have to know Graph's opaque identifiers.
+   */
+  async createMessageRule(
+    accountName: string,
+    input: {
+      displayName: string;
+      sequence?: number;
+      isEnabled?: boolean;
+      fromAddresses?: string[];
+      subjectContains?: string[];
+      bodyContains?: string[];
+      moveToMailbox?: string;
+      markAsRead?: boolean;
+      markImportance?: 'low' | 'normal' | 'high';
+      delete?: boolean;
+      stopProcessingRules?: boolean;
+    },
+  ): Promise<{ id: string; displayName: string }> {
+    const conditions: Record<string, unknown> = {};
+    if (input.fromAddresses?.length) {
+      conditions.senderContains = input.fromAddresses;
+    }
+    if (input.subjectContains?.length) conditions.subjectContains = input.subjectContains;
+    if (input.bodyContains?.length) conditions.bodyContains = input.bodyContains;
+
+    const actions: Record<string, unknown> = {};
+    if (input.moveToMailbox) {
+      actions.moveToFolder = await this.resolveFolderId(accountName, input.moveToMailbox);
+    }
+    if (input.markAsRead) actions.markAsRead = true;
+    if (input.markImportance) actions.markImportance = input.markImportance;
+    if (input.delete) actions.delete = true;
+    actions.stopProcessingRules = input.stopProcessingRules ?? false;
+
+    if (Object.keys(conditions).length === 0) {
+      throw new Error('A rule needs at least one condition (from, subject or body).');
+    }
+    if (Object.keys(actions).length <= 1) {
+      throw new Error('A rule needs at least one action (move, mark read, importance or delete).');
+    }
+
+    return this.client(accountName).request('POST', '/me/mailFolders/inbox/messageRules', {
+      displayName: input.displayName,
+      sequence: input.sequence ?? 1,
+      isEnabled: input.isEnabled ?? true,
+      conditions,
+      actions,
+    });
+  }
+
+  async deleteMessageRule(accountName: string, ruleId: string): Promise<void> {
+    await this.client(accountName).request(
+      'DELETE',
+      `/me/mailFolders/inbox/messageRules/${ruleId}`,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Automatic replies (out of office)
+  // -------------------------------------------------------------------------
+
+  async getAutomaticReplies(accountName: string): Promise<{
+    status: string;
+    scheduledStartDateTime?: { dateTime: string; timeZone: string };
+    scheduledEndDateTime?: { dateTime: string; timeZone: string };
+    internalReplyMessage?: string;
+    externalReplyMessage?: string;
+    externalAudience?: string;
+  }> {
+    // The sub-resource returns the setting object itself (plus @odata.context),
+    // not a wrapper, so it maps straight onto the result.
+    return this.client(accountName).request(
+      'GET',
+      '/me/mailboxSettings/automaticRepliesSetting',
+    );
+  }
+
+  /**
+   * Turn the out-of-office reply on or off. `scheduled` requires both dates;
+   * `alwaysEnabled` ignores them. Times are ISO strings with an explicit zone,
+   * because Graph rejects a naive local time.
+   */
+  async setAutomaticReplies(
+    accountName: string,
+    input: {
+      status: 'disabled' | 'alwaysEnabled' | 'scheduled';
+      internalReplyMessage?: string;
+      externalReplyMessage?: string;
+      externalAudience?: 'none' | 'contactsOnly' | 'all';
+      startDateTime?: string;
+      endDateTime?: string;
+      timeZone?: string;
+    },
+  ): Promise<void> {
+    if (input.status === 'scheduled' && !(input.startDateTime && input.endDateTime)) {
+      throw new Error('A scheduled automatic reply needs both startDateTime and endDateTime.');
+    }
+
+    const timeZone = input.timeZone ?? 'UTC';
+    const setting: Record<string, unknown> = {
+      status: input.status,
+      externalAudience: input.externalAudience ?? 'all',
+      ...(input.internalReplyMessage ? { internalReplyMessage: input.internalReplyMessage } : {}),
+      ...(input.externalReplyMessage ? { externalReplyMessage: input.externalReplyMessage } : {}),
+      ...(input.status === 'scheduled'
+        ? {
+            scheduledStartDateTime: { dateTime: input.startDateTime, timeZone },
+            scheduledEndDateTime: { dateTime: input.endDateTime, timeZone },
+          }
+        : {}),
+    };
+
+    await this.client(accountName).request('PATCH', '/me/mailboxSettings', {
+      automaticRepliesSetting: setting,
+    });
+  }
+
+  // -------------------------------------------------------------------------
   // Export
   // -------------------------------------------------------------------------
 

@@ -19,6 +19,14 @@ interface GraphRecipient {
   emailAddress: { address: string; name?: string };
 }
 
+/**
+ * Largest attachment Graph accepts inside a message payload. Past this, the
+ * bytes must go through an upload session against an existing message. Graph
+ * documents the limit as "about 3 MB"; staying under it avoids a rejection whose
+ * error message does not name the offending attachment.
+ */
+const INLINE_ATTACHMENT_LIMIT = 3 * 1024 * 1024;
+
 /** Graph file attachment, inline ones carrying their content id. */
 function toGraphAttachment(attachment: ResolvedAttachment): Record<string, unknown> {
   return {
@@ -71,20 +79,47 @@ export default class GraphSendService {
       options.appendSignature,
     );
 
-    await this.client(accountName).request('POST', '/me/sendMail', {
-      message: {
-        subject: options.subject,
-        body: { contentType: signed.html ? 'HTML' : 'Text', content: signed.body },
-        toRecipients: toRecipients(options.to),
-        ccRecipients: toRecipients(options.cc),
-        bccRecipients: toRecipients(options.bcc),
-        ...(signed.attachments.length
-          ? { attachments: signed.attachments.map(toGraphAttachment) }
-          : {}),
-      },
-      // Graph files the copy itself — no equivalent of the IMAP APPEND to Sent.
-      saveToSentItems: true,
+    const client = this.client(accountName);
+    const message = {
+      subject: options.subject,
+      body: { contentType: signed.html ? 'HTML' : 'Text', content: signed.body },
+      toRecipients: toRecipients(options.to),
+      ccRecipients: toRecipients(options.cc),
+      bccRecipients: toRecipients(options.bcc),
+    };
+
+    const small = signed.attachments.filter((a) => a.content.length <= INLINE_ATTACHMENT_LIMIT);
+    const large = signed.attachments.filter((a) => a.content.length > INLINE_ATTACHMENT_LIMIT);
+
+    // sendMail carries attachments inside the request, which Graph caps at about
+    // 3 MB. Anything larger needs an upload session, and a session needs a
+    // message that already exists — so the send becomes create-draft, upload,
+    // send. The simple path is kept when everything fits, to avoid the extra
+    // round trips.
+    if (large.length === 0) {
+      await client.request('POST', '/me/sendMail', {
+        message: {
+          ...message,
+          ...(small.length ? { attachments: small.map(toGraphAttachment) } : {}),
+        },
+        // Graph files the copy itself — no equivalent of the IMAP APPEND to Sent.
+        saveToSentItems: true,
+      });
+      return { messageId: '', status: 'sent' };
+    }
+
+    const draft = await client.request<{ id: string }>('POST', '/me/messages', {
+      ...message,
+      ...(small.length ? { attachments: small.map(toGraphAttachment) } : {}),
     });
+
+    /* eslint-disable no-await-in-loop -- uploads are sequential by design */
+    for (let i = 0; i < large.length; i += 1) {
+      await client.uploadLargeAttachment(draft.id, large[i]);
+    }
+    /* eslint-enable no-await-in-loop */
+
+    await client.request('POST', `/me/messages/${draft.id}/send`);
 
     // sendMail returns 202 Accepted with no body, so no server-side id exists to
     // report. Reporting an empty id is honest; inventing one would not be.

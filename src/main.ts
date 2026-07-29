@@ -130,6 +130,7 @@ async function runServer(): Promise<void> {
     watcherService,
     hooksService,
     searchPresetRegistry,
+    graphService,
   );
   registerAllResources(server, connections, imapService, templateService, schedulerService);
   registerAllPrompts(server);

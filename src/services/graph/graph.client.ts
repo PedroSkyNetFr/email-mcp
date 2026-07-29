@@ -118,6 +118,58 @@ export default class GraphClient {
     return Number.isFinite(limit) ? out.slice(0, limit) : out;
   }
 
+  /**
+   * Attach a file too large to ride inside the message body.
+   *
+   * Graph refuses an inline `contentBytes` beyond about 3 MB, so anything bigger
+   * has to go through an upload session: the message must already exist, and the
+   * bytes are PUT in ranged chunks. Chunks must be a multiple of 320 KiB.
+   */
+  async uploadLargeAttachment(
+    messageId: string,
+    attachment: { filename: string; contentType: string; content: Buffer; cid?: string },
+  ): Promise<void> {
+    const session = await this.request<{ uploadUrl: string }>(
+      'POST',
+      `/me/messages/${messageId}/attachments/createUploadSession`,
+      {
+        AttachmentItem: {
+          attachmentType: 'file',
+          name: attachment.filename,
+          size: attachment.content.length,
+          contentType: attachment.contentType,
+          ...(attachment.cid ? { isInline: true, contentId: attachment.cid } : {}),
+        },
+      },
+    );
+
+    const CHUNK = 5 * 320 * 1024; // 1.6 MiB — a multiple of the required 320 KiB
+    const total = attachment.content.length;
+
+    /* eslint-disable no-await-in-loop -- ranged upload is inherently sequential */
+    for (let start = 0; start < total; start += CHUNK) {
+      const end = Math.min(start + CHUNK, total) - 1;
+      const slice = attachment.content.subarray(start, end + 1);
+      const response = await fetch(session.uploadUrl, {
+        method: 'PUT',
+        headers: {
+          'Content-Length': String(slice.length),
+          'Content-Range': `bytes ${start}-${end}/${total}`,
+        },
+        body: new Uint8Array(slice),
+      });
+      // 200/201 close the session, 202 asks for the next range.
+      if (!response.ok) {
+        throw new GraphError(
+          `Upload of "${attachment.filename}" failed at bytes ${start}-${end} (${response.status})`,
+          response.status,
+          await response.text(),
+        );
+      }
+    }
+    /* eslint-enable no-await-in-loop */
+  }
+
   /** GET raw bytes (attachment content, MIME source). */
   async getBinary(path: string): Promise<Buffer> {
     const accessToken = await this.token();

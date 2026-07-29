@@ -8,6 +8,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type ConnectionManager from '../connections/manager.js';
 import type CalendarService from '../services/calendar.service.js';
+import type GraphService from '../services/graph/graph.service.js';
 import type HooksService from '../services/hooks.service.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import type LocalCalendarService from '../services/local-calendar.service.js';
@@ -27,6 +28,7 @@ import registerContactsTools from './contacts.tool.js';
 import registerCrossAccountMoveTool from './cross-account-move.tool.js';
 import registerDraftTools from './drafts.tool.js';
 import registerEmailsTools from './emails.tool.js';
+import registerExchangeTools from './exchange.tool.js';
 import registerExportTools from './export.tool.js';
 import registerFolderTools from './folders.tool.js';
 import registerHealthTools from './health.tool.js';
@@ -55,6 +57,7 @@ export default function registerAllTools(
   watcherService: WatcherService,
   hooksService: HooksService,
   searchPresetRegistry: SearchPresetRegistry,
+  graphService: GraphService,
 ): void {
   const { readOnly } = config.settings;
 
@@ -88,6 +91,9 @@ export default function registerAllTools(
     registerBulkTools(server, imapService);
     registerDraftTools(server, imapService, smtpService);
     registerCrossAccountMoveTool(server, connections, config);
+    // Server-side rules and the automatic reply change mailbox state, so they
+    // belong with the write tools; each refuses a non-Graph account itself.
+    registerExchangeTools(server, graphService, config);
     registerFolderTools(server, imapService);
     registerTemplateWriteTools(server, templateService, imapService, smtpService);
     registerSchedulerTools(server, schedulerService);

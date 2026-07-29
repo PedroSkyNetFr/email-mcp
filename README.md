@@ -1225,6 +1225,21 @@ where that signature path exists (e.g. your local build on Windows).
 | `list_scheduled` | List scheduled emails by status |
 | `cancel_scheduled` | Cancel a pending scheduled email |
 
+#### Exchange / Outlook.com only (5)
+
+Server-side rules and the automatic reply live in the mailbox itself, so they
+keep working when nothing is connected. IMAP cannot express either, so these
+tools require an account configured with `backend = "graph"` and say so plainly
+on any other.
+
+| Tool | Description |
+|------|-------------|
+| `list_mail_rules` | List the server-side inbox rules |
+| `create_mail_rule` | Create a rule (conditions: sender/subject/body; actions: move, mark read, importance, delete) |
+| `delete_mail_rule` | Delete a rule by id |
+| `get_auto_reply` | Read the automatic reply (out of office) setting |
+| `set_auto_reply` | Turn the automatic reply on (always or scheduled) or off |
+
 #### Manage (7)
 
 | Tool | Description |
