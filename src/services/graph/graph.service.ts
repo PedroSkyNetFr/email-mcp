@@ -29,6 +29,7 @@ import type {
 } from '../../types/index.js';
 import type { AttachmentInput, ResolvedAttachment } from '../attachment-resolver.js';
 import { resolveAttachments } from '../attachment-resolver.js';
+import { assertSafeDestination, resolveUniquePath, sanitizeFilename } from '../file-paths.js';
 import type ImapService from '../imap.service.js';
 import { applyAccountSignature } from '../signature-loader.js';
 import type GraphClient from './graph.client.js';
@@ -733,8 +734,250 @@ export default class GraphService {
     });
   }
 
+  /**
+   * Update a draft in place.
+   *
+   * Graph PATCHes the existing message, so — unlike the IMAP path, which must
+   * append a rebuilt copy and delete the original — no new id appears and
+   * nothing is deleted. The result keeps the IMAP shape so callers do not have
+   * to branch, with `id` equal to `oldId` and a note saying so.
+   */
+  async updateDraft(
+    accountName: string,
+    draftId: number | string,
+    options: {
+      mailbox?: string;
+      subject?: string;
+      body?: string;
+      html?: boolean;
+      to?: string[];
+      cc?: string[];
+      bcc?: string[];
+      attachmentsAdd?: AttachmentInput[];
+      attachmentsRemove?: string[];
+    },
+  ): Promise<{
+    id: number | string;
+    mailbox: string;
+    oldId: number | string;
+    oldDraftDeleted: boolean;
+    warnings: string[];
+  }> {
+    const client = this.client(accountName);
+    const id = String(draftId);
+    const warnings: string[] = [];
+
+    const recipients = (addresses?: string[]) =>
+      addresses
+        ?.map((address) => address.trim())
+        .filter(Boolean)
+        .map((address) => ({ emailAddress: { address } }));
+
+    const patch: Record<string, unknown> = {};
+    if (options.subject !== undefined) patch.subject = options.subject;
+    if (options.body !== undefined) {
+      patch.body = { contentType: options.html ? 'HTML' : 'Text', content: options.body };
+    }
+    if (options.to) patch.toRecipients = recipients(options.to);
+    if (options.cc) patch.ccRecipients = recipients(options.cc);
+    if (options.bcc) patch.bccRecipients = recipients(options.bcc);
+
+    if (Object.keys(patch).length > 0) {
+      await client.request('PATCH', `/me/messages/${id}`, patch);
+    }
+
+    // Attachments are separate resources on Graph: removals and additions are
+    // applied to the existing message rather than rebuilt wholesale, so
+    // untouched ones simply stay.
+    if (options.attachmentsRemove?.length) {
+      const existing = await client.collect<GraphAttachment>(
+        `/me/messages/${id}/attachments?$select=id,name`,
+      );
+      const doomed = existing.filter((a) => options.attachmentsRemove?.includes(a.name ?? ''));
+      options.attachmentsRemove.forEach((name) => {
+        if (!existing.some((a) => a.name === name)) {
+          warnings.push(`attachments_remove named "${name}" but the draft has no such attachment`);
+        }
+      });
+      /* eslint-disable no-await-in-loop -- sequential: Graph throttles bursts */
+      for (let i = 0; i < doomed.length; i += 1) {
+        await client.request('DELETE', `/me/messages/${id}/attachments/${doomed[i].id}`);
+      }
+      /* eslint-enable no-await-in-loop */
+    }
+
+    if (options.attachmentsAdd?.length) {
+      const resolved = await this.resolveAttachmentsForSend(accountName, options.attachmentsAdd);
+      /* eslint-disable no-await-in-loop -- sequential: Graph throttles bursts */
+      for (let i = 0; i < resolved.length; i += 1) {
+        const attachment = resolved[i];
+        await client.request('POST', `/me/messages/${id}/attachments`, {
+          '@odata.type': '#microsoft.graph.fileAttachment',
+          name: attachment.filename,
+          contentType: attachment.contentType,
+          contentBytes: attachment.content.toString('base64'),
+          ...(attachment.cid ? { isInline: true, contentId: attachment.cid } : {}),
+        });
+      }
+      /* eslint-enable no-await-in-loop */
+    }
+
+    warnings.push('Draft updated in place (Graph); its id is unchanged and no copy was left behind.');
+    return { id, mailbox: options.mailbox ?? 'Drafts', oldId: id, oldDraftDeleted: false, warnings };
+  }
+
   async deleteDraft(accountName: string, draftId: number | string): Promise<void> {
     await this.client(accountName).request('DELETE', `/me/messages/${String(draftId)}`);
+  }
+
+  // -------------------------------------------------------------------------
+  // Export
+  // -------------------------------------------------------------------------
+
+  /**
+   * Flat result set for the export tool. Only the single-account shape is
+   * served here — the router refuses a call spanning both backends, so
+   * `accountNames` never arrives with a Graph account mixed in.
+   */
+  async searchForExport(
+    accountNames: string[] | null,
+    accountName: string | null,
+    query: string,
+    options: { maxRows: number; mailbox?: string; [key: string]: unknown },
+  ): Promise<{ items: EmailMeta[]; truncated: boolean }> {
+    const names = accountNames ?? (accountName ? [accountName] : []);
+    if (names.length === 0) {
+      throw new Error('searchForExport requires at least one account name');
+    }
+
+    const { maxRows } = options;
+    const collected: EmailMeta[] = [];
+    let truncated = false;
+
+    /* eslint-disable no-await-in-loop -- one account at a time, Graph throttles */
+    for (let i = 0; i < names.length; i += 1) {
+      let page = 1;
+      // Graph caps a page at 1000; walk pages until the row budget is reached.
+      while (collected.length < maxRows) {
+        const pageSize = Math.min(100, maxRows - collected.length);
+        const result = await this.searchEmails(names[i], query, {
+          ...options,
+          page,
+          pageSize,
+        });
+        collected.push(...result.items.map((item) => ({ ...item, account: names[i] })));
+        if (!result.hasMore || result.items.length === 0) break;
+        page += 1;
+      }
+      if (collected.length >= maxRows) {
+        truncated = true;
+        break;
+      }
+    }
+    /* eslint-enable no-await-in-loop */
+
+    return { items: collected.slice(0, maxRows), truncated };
+  }
+
+  // -------------------------------------------------------------------------
+  // Attachments to disk
+  // -------------------------------------------------------------------------
+
+  /** Write one resolved attachment, honouring the destination allow-list. */
+  private static async writeToDisk(
+    payload: { filename: string; mimeType: string; contentBase64: string },
+    destination: string,
+    overwrite: boolean,
+  ): Promise<{ filename: string; localPath: string; fileUrl: string; mimeType: string; size: number }> {
+    const { mkdir, stat, writeFile } = await import('node:fs/promises');
+    const { dirname, join } = await import('node:path');
+    const { pathToFileURL } = await import('node:url');
+
+    assertSafeDestination(destination);
+
+    let targetPath: string;
+    try {
+      const info = await stat(destination);
+      targetPath = info.isDirectory()
+        ? join(destination, sanitizeFilename(payload.filename))
+        : destination;
+    } catch {
+      targetPath = destination;
+    }
+    // Re-check the resolved path: the filename component is caller-supplied.
+    assertSafeDestination(targetPath);
+
+    const finalPath = await resolveUniquePath(targetPath, overwrite);
+    await mkdir(dirname(finalPath), { recursive: true });
+    const bytes = Buffer.from(payload.contentBase64, 'base64');
+    await writeFile(finalPath, bytes);
+
+    return {
+      filename: payload.filename,
+      localPath: finalPath,
+      fileUrl: pathToFileURL(finalPath).href,
+      mimeType: payload.mimeType,
+      size: bytes.length,
+    };
+  }
+
+  async saveAttachmentToDisk(
+    accountName: string,
+    emailId: string,
+    mailbox: string,
+    filename: string,
+    destination: string,
+    overwrite = false,
+  ): Promise<{ filename: string; localPath: string; fileUrl: string; mimeType: string; size: number }> {
+    const payload = await this.downloadAttachment(accountName, emailId, mailbox, filename);
+    return GraphService.writeToDisk(payload, destination, overwrite);
+  }
+
+  async saveEmailAttachments(
+    accountName: string,
+    emailId: string,
+    _mailbox: string,
+    destDir: string,
+    maxSizeBytes = 25 * 1024 * 1024,
+  ): Promise<
+    { filename: string; localPath: string; fileUrl: string; mimeType: string; size: number }[]
+  > {
+    const attachments = await this.client(accountName).collect<GraphAttachment>(
+      `/me/messages/${emailId}/attachments?$select=id,name,contentType,size`,
+    );
+
+    const saved: {
+      filename: string;
+      localPath: string;
+      fileUrl: string;
+      mimeType: string;
+      size: number;
+    }[] = [];
+
+    /* eslint-disable no-await-in-loop -- sequential: Graph throttles bursts */
+    for (let i = 0; i < attachments.length; i += 1) {
+      const meta = attachments[i];
+      // Oversized attachments are skipped, matching the IMAP path.
+      if ((meta.size ?? 0) > maxSizeBytes) continue;
+      const full = await this.client(accountName).request<GraphAttachment>(
+        'GET',
+        `/me/messages/${emailId}/attachments/${meta.id}`,
+      );
+      saved.push(
+        await GraphService.writeToDisk(
+          {
+            filename: full.name ?? 'unnamed',
+            mimeType: full.contentType ?? 'application/octet-stream',
+            contentBase64: full.contentBytes ?? '',
+          },
+          destDir,
+          false,
+        ),
+      );
+    }
+    /* eslint-enable no-await-in-loop */
+
+    return saved;
   }
 
   // -------------------------------------------------------------------------

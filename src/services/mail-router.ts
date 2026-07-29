@@ -24,21 +24,34 @@ import type { IMailService } from './mail-service.types.js';
 import type { ISendService } from './send-service.types.js';
 import type SmtpService from './smtp.service.js';
 
-/** Both contracts take the account name as their first argument. */
-function accountOf(args: unknown[]): string | undefined {
-  return typeof args[0] === 'string' ? args[0] : undefined;
+function asNames(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === 'string');
+  return [];
 }
 
 /**
- * Cross-account methods (searchAcrossAccounts) take a LIST of account names
- * instead, so the single-account dispatch above cannot classify them and would
- * quietly send the whole call to IMAP — including for Graph accounts, whose
- * credentials are consented for Graph and would simply fail to authenticate.
- * Returns the Graph-backed names among them, so the caller can refuse loudly.
+ * Which accounts a call concerns.
+ *
+ * Most methods take the account name first, but three do not, and assuming they
+ * did sent them to IMAP no matter the backend — silently, which is the failure
+ * mode this router exists to prevent. Their shapes are declared explicitly.
  */
-function graphAccountsIn(args: unknown[], isGraphAccount: (n: string | undefined) => boolean) {
-  if (!Array.isArray(args[0])) return [];
-  return args[0].filter((entry): entry is string => typeof entry === 'string' && isGraphAccount(entry));
+const ACCOUNTS_IN_ARGS: Record<string, (args: unknown[]) => string[]> = {
+  // (accountNames: string[], …)
+  searchAcrossAccounts: (args) => asNames(args[0]),
+  // (accountNames: string[] | null, accountName: string | null, …)
+  searchForExport: (args) => [...asNames(args[0]), ...asNames(args[1])],
+  // ({ accountNames, accountName, … })
+  saveAllAttachmentsFromSearch: (args) => {
+    const input = args[0] as { accountNames?: unknown; accountName?: unknown } | undefined;
+    return [...asNames(input?.accountNames), ...asNames(input?.accountName)];
+  },
+};
+
+function accountsOf(property: string | symbol, args: unknown[]): string[] {
+  const extractor = typeof property === 'string' ? ACCOUNTS_IN_ARGS[property] : undefined;
+  return extractor ? extractor(args) : asNames(args[0]);
 }
 
 /**
@@ -59,26 +72,36 @@ function routeByAccount<T extends object>(
       const graphMember = (graphImpl as Record<string | symbol, unknown>)[property];
 
       return (...args: unknown[]) => {
-        const account = accountOf(args);
-        if (!isGraphAccount(account)) {
-          // A cross-account call naming Graph accounts cannot be served by the
-          // IMAP implementation — refuse rather than return a partial answer
-          // that looks complete.
-          const graphNames = graphAccountsIn(args, isGraphAccount);
-          if (graphNames.length > 0) {
-            throw new Error(
-              `"${String(property)}" cannot span Graph-backed accounts yet ` +
-                `(${graphNames.join(', ')}). Query them one account at a time.`,
-            );
-          }
+        const accounts = accountsOf(property, args);
+        const graphNames = accounts.filter((name) => isGraphAccount(name));
+
+        // No Graph account involved — the default backend serves it.
+        if (graphNames.length === 0) {
           return (fallback as (...a: unknown[]) => unknown).apply(target, args);
         }
 
+        // Every routed method is Promise-returning, so refusals are surfaced as
+        // rejections rather than synchronous throws: a caller attaching .catch()
+        // without a try block would otherwise crash.
+        //
+        // A single call spanning both backends cannot be served by either one;
+        // answering from just one would look complete while missing half.
+        if (graphNames.length !== accounts.length) {
+          return Promise.reject(
+            new Error(
+              `"${String(property)}" cannot span both backends in one call ` +
+                `(Graph: ${graphNames.join(', ')}). Query each account separately.`,
+            ),
+          );
+        }
+
         if (typeof graphMember !== 'function') {
-          throw new Error(
-            `"${String(property)}" is not supported yet on Graph-backed account "${account}". ` +
-              'Its mailbox is served by Microsoft Graph because Exchange hides folders over IMAP; ' +
-              'this operation still needs a Graph implementation.',
+          return Promise.reject(
+            new Error(
+              `"${String(property)}" is not supported yet on Graph-backed account ` +
+                `"${graphNames.join(', ')}". Its mailbox is served by Microsoft Graph because ` +
+                'Exchange hides folders over IMAP; this operation still needs a Graph implementation.',
+            ),
           );
         }
         return (graphMember as (...a: unknown[]) => unknown).apply(graphImpl, args);
