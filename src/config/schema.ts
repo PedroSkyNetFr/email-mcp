@@ -59,6 +59,11 @@ export const AccountConfigSchema = z
     // are embedded inline (cid) at compose time when append_signature is
     // requested. See signature-loader.ts.
     signature_path: z.string().optional(),
+    // Which API serves this account. "graph" targets Microsoft Graph and is the
+    // only way to reach an Exchange or Outlook.com mailbox in full: their IMAP
+    // endpoint hides custom folders. Requires an oauth2 block whose refresh
+    // token was consented for Graph scopes. Defaults to "imap".
+    backend: z.enum(['imap', 'graph']).optional(),
     // When true, the signature is appended by default to every composed message
     // (send/reply/forward/draft) for this account, unless a call passes
     // append_signature:false. Requires signature_path. Defaults to false.

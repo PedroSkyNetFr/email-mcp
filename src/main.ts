@@ -20,8 +20,11 @@ import registerAllResources from './resources/register.js';
 import RateLimiter from './safety/rate-limiter.js';
 import createServer, { PKG_VERSION } from './server.js';
 import CalendarService from './services/calendar.service.js';
+import GraphClient from './services/graph/graph.client.js';
+import GraphService from './services/graph/graph.service.js';
 import HooksService from './services/hooks.service.js';
 import ImapService from './services/imap.service.js';
+import { createMailRouter } from './services/mail-router.js';
 import LocalCalendarService from './services/local-calendar.service.js';
 import OAuthService from './services/oauth.service.js';
 import RemindersService from './services/reminders.service.js';
@@ -78,6 +81,20 @@ async function runServer(): Promise<void> {
   const connections = new ConnectionManager(config.accounts, oauthService);
   const rateLimiter = new RateLimiter(config.settings.rateLimit);
   const imapService = new ImapService(connections);
+
+  // Accounts declared with backend = "graph" are served by Microsoft Graph
+  // instead of IMAP; the router dispatches per account so the tool layer sees a
+  // single IMailService either way.
+  const graphClients = new Map(
+    config.accounts
+      .filter((account) => account.backend === 'graph')
+      .map((account) => [account.name, new GraphClient(account, oauthService)]),
+  );
+  const graphService = new GraphService(graphClients);
+  const mailService = createMailRouter(imapService, graphService, (name) =>
+    config.accounts.find((account) => account.name === name),
+  );
+
   const smtpService = new SmtpService(connections, rateLimiter, imapService);
   const templateService = new TemplateService();
   const calendarService = new CalendarService();
@@ -94,7 +111,7 @@ async function runServer(): Promise<void> {
   registerAllTools(
     server,
     connections,
-    imapService,
+    mailService,
     smtpService,
     config,
     templateService,

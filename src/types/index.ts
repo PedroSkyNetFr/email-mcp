@@ -73,6 +73,8 @@ export interface AccountConfig {
   gmailAutoSave?: boolean;
   /** Path to an Outlook HTML signature (.htm) to embed inline. */
   signaturePath?: string;
+  /** Which API serves this account; "graph" for Exchange / Outlook.com. */
+  backend?: 'imap' | 'graph';
   /** Append the signature by default on every composed message (unless overridden per call). */
   signatureDefault?: boolean;
 }
