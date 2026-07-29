@@ -30,6 +30,18 @@ function accountOf(args: unknown[]): string | undefined {
 }
 
 /**
+ * Cross-account methods (searchAcrossAccounts) take a LIST of account names
+ * instead, so the single-account dispatch above cannot classify them and would
+ * quietly send the whole call to IMAP — including for Graph accounts, whose
+ * credentials are consented for Graph and would simply fail to authenticate.
+ * Returns the Graph-backed names among them, so the caller can refuse loudly.
+ */
+function graphAccountsIn(args: unknown[], isGraphAccount: (n: string | undefined) => boolean) {
+  if (!Array.isArray(args[0])) return [];
+  return args[0].filter((entry): entry is string => typeof entry === 'string' && isGraphAccount(entry));
+}
+
+/**
  * Build a proxy over `defaultImpl` that hands calls for Graph-backed accounts to
  * `graphImpl` instead. Shared by the mail and send contracts, which differ only
  * in the pair of services involved.
@@ -49,6 +61,16 @@ function routeByAccount<T extends object>(
       return (...args: unknown[]) => {
         const account = accountOf(args);
         if (!isGraphAccount(account)) {
+          // A cross-account call naming Graph accounts cannot be served by the
+          // IMAP implementation — refuse rather than return a partial answer
+          // that looks complete.
+          const graphNames = graphAccountsIn(args, isGraphAccount);
+          if (graphNames.length > 0) {
+            throw new Error(
+              `"${String(property)}" cannot span Graph-backed accounts yet ` +
+                `(${graphNames.join(', ')}). Query them one account at a time.`,
+            );
+          }
           return (fallback as (...a: unknown[]) => unknown).apply(target, args);
         }
 

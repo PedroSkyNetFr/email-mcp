@@ -660,6 +660,28 @@ export default class GraphService {
   }
 
   /**
+   * Resolve polymorphic attachment inputs into in-memory bytes for an outbound
+   * send. Same strict contract as the IMAP service: one failure aborts the whole
+   * operation rather than sending a message missing what the caller attached.
+   */
+  async resolveAttachmentsForSend(
+    accountName: string,
+    attachments: AttachmentInput[],
+  ): Promise<ResolvedAttachment[]> {
+    if (attachments.length === 0) return [];
+    const result = await resolveAttachments(
+      this as unknown as ImapService,
+      accountName,
+      attachments,
+    );
+    if (result.failures.length > 0) {
+      const summary = result.failures.map((f) => `${f.label}: ${f.reason}`).join('; ');
+      throw new Error(`Failed to resolve ${result.failures.length} attachment(s): ${summary}`);
+    }
+    return result.resolved;
+  }
+
+  /**
    * Entry point used by the save_draft tool: resolves the polymorphic attachment
    * inputs, then creates the draft.
    *
