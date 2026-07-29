@@ -87,8 +87,12 @@ export default class GraphClient {
 
     if (!response.ok) {
       const text = await response.text();
+      // Graph explains the failure in the body — surface it in the message, or
+      // the caller only ever sees a bare status code.
+      const detail = text.slice(0, 300).replace(/\s+/g, ' ').trim();
       throw new GraphError(
-        `Graph ${method} ${url.replace(GRAPH_ROOT, '')} failed (${response.status})`,
+        `Graph ${method} ${url.replace(GRAPH_ROOT, '')} failed (${response.status})` +
+          (detail ? `: ${detail}` : ''),
         response.status,
         text,
       );

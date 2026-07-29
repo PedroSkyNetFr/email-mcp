@@ -384,23 +384,29 @@ export default class GraphService {
     const pageSize = options.pageSize ?? 25;
     const folderId = await this.resolveFolderId(accountName, options.mailbox ?? 'INBOX');
 
+    // $search rejects $skip (Graph answers 400), so paging is done by taking the
+    // first page*pageSize matches and keeping the last slice. $top is capped at
+    // 250 for a search, which bounds how deep paging can go.
+    const wanted = Math.min(page * pageSize, 250);
     const response = await this.client(accountName).request<{
       value: GraphMessage[];
     }>(
       'GET',
       `/me/mailFolders/${folderId}/messages?$select=${META_SELECT}` +
         `&$search=${encodeURIComponent(`"${text}"`)}` +
-        `&$top=${pageSize}&$skip=${(page - 1) * pageSize}`,
+        `&$top=${wanted}`,
     );
 
-    const items = response.value.map(toEmailMeta);
+    const all = response.value.map(toEmailMeta);
+    const items = all.slice((page - 1) * pageSize, page * pageSize);
     return {
       items,
-      total: items.length,
+      total: all.length,
       page,
       pageSize,
-      hasMore: items.length === pageSize,
-      // Graph does not report a match count alongside $search results.
+      hasMore: all.length >= wanted && wanted < 250,
+      // Graph reports no match count alongside $search, and the 250 cap means a
+      // deeper result set is invisible — the total is a floor, not a count.
       totalApprox: true,
     };
   }
