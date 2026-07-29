@@ -127,7 +127,12 @@ export default function registerDraftTools(
     'Send an existing draft email and remove it from Drafts. The draft is fetched, sent via SMTP, then deleted. Use list_emails with the Drafts mailbox to find draft IDs.',
     {
       account: z.string().describe('Account name from list_accounts'),
-      id: z.number().int().describe('Draft email UID (from list_emails on Drafts mailbox)'),
+      id: z
+        .union([z.number().int(), z.string()])
+        .describe(
+          'Draft id from list_emails on the Drafts mailbox: a numeric UID on IMAP accounts, an ' +
+            'opaque string id on Graph-backed (Exchange) accounts.',
+        ),
       mailbox: z.string().optional().describe('Drafts folder path (auto-detected if omitted)'),
     },
     { readOnlyHint: false, destructiveHint: true },
@@ -175,7 +180,12 @@ export default function registerDraftTools(
       'attachments_keep defaults to ALL existing attachments; pass [] to drop them all.',
     {
       account: z.string().describe('Account name from list_accounts'),
-      draft_id: z.number().int().describe('UID of the existing draft to replace'),
+      draft_id: z
+        .union([z.number().int(), z.string()])
+        .describe(
+          'Id of the existing draft: a numeric UID on IMAP accounts, an opaque string id on ' +
+            'Graph-backed (Exchange) accounts.',
+        ),
       mailbox: z.string().optional().describe('Drafts folder path (auto-detected if omitted)'),
       subject: z.string().optional().describe('New subject (omit to keep existing)'),
       body: z.string().optional().describe('New body content (omit to keep existing)'),
@@ -256,17 +266,22 @@ export default function registerDraftTools(
 
         const warningBlock =
           result.warnings.length > 0 ? `\n\nWarnings:\n  - ${result.warnings.join('\n  - ')}` : '';
-        const deletedNote = result.oldDraftDeleted
-          ? `old draft UID ${result.oldId} removed`
-          : `old draft UID ${result.oldId} NOT deleted (see warnings)`;
+
+        // IMAP replaces a draft by appending a rebuilt copy and deleting the
+        // original, so the id changes and a leftover is worth flagging. Graph
+        // patches in place: reporting a "new id" and an undeleted old one there
+        // reads like a failure when nothing went wrong.
+        const summary =
+          String(result.id) === String(result.oldId)
+            ? `✏️ Draft updated in place (id unchanged, folder: ${result.mailbox}).`
+            : `✏️ Draft updated. New UID: ${result.id} (folder: ${result.mailbox}); ${
+                result.oldDraftDeleted
+                  ? `old draft UID ${result.oldId} removed`
+                  : `old draft UID ${result.oldId} NOT deleted (see warnings)`
+              }.`;
 
         return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `✏️ Draft updated. New UID: ${result.id} (folder: ${result.mailbox}); ${deletedNote}.${warningBlock}`,
-            },
-          ],
+          content: [{ type: 'text' as const, text: `${summary}${warningBlock}` }],
         };
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);

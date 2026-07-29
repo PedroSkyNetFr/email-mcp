@@ -2396,7 +2396,10 @@ export default class ImapService {
    */
   async updateDraft(
     accountName: string,
-    draftId: number,
+    // Accepts the wire shape, which is opaque: a UID on IMAP, a string id on a
+    // Graph-backed account. Only IMAP ids reach here — the router sends Graph
+    // accounts to the Graph service — so it is narrowed to a UID below.
+    draftIdInput: number | string,
     options: {
       mailbox?: string;
       subject?: string;
@@ -2418,6 +2421,7 @@ export default class ImapService {
     warnings: string[];
   }> {
     const warnings: string[] = [];
+    const draftId = ImapService.toUid(draftIdInput, 'draft');
 
     // Fetch the existing draft so we know its current state.
     const { email: existing, mailbox: draftsPath } = await this.fetchDraft(
@@ -2555,6 +2559,25 @@ export default class ImapService {
   // -------------------------------------------------------------------------
   // Mailbox (folder) CRUD
   // -------------------------------------------------------------------------
+
+  /**
+   * Narrow an id coming off the MCP wire to an IMAP UID.
+   *
+   * Tool schemas accept both shapes so a Graph account can pass its opaque
+   * string id, but only IMAP ids reach this service — the router sends Graph
+   * accounts elsewhere. A non-numeric id here means the two were crossed, which
+   * is worth an explicit error rather than a NaN flowing into a fetch.
+   */
+  private static toUid(value: number | string, what: string): number {
+    const uid = typeof value === 'number' ? value : Number.parseInt(value, 10);
+    if (!Number.isFinite(uid)) {
+      throw new Error(
+        `Invalid ${what} id "${String(value)}" for an IMAP account: expected a numeric UID. ` +
+          'Opaque string ids belong to Graph-backed accounts.',
+      );
+    }
+    return uid;
+  }
 
   async createMailbox(accountName: string, folderPath: string): Promise<void> {
     const client = await this.connections.getImapClient(accountName);

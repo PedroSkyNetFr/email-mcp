@@ -500,7 +500,23 @@ export default class SmtpService {
   // Send draft
   // -------------------------------------------------------------------------
 
-  async sendDraft(accountName: string, draftId: number, mailbox?: string): Promise<SendResult> {
+  /**
+   * Send an existing draft. The id arrives in its wire shape — a UID on IMAP, an
+   * opaque string on a Graph account — but only IMAP ids reach here, the router
+   * sending Graph accounts to the Graph send service.
+   */
+  async sendDraft(
+    accountName: string,
+    draftIdInput: number | string,
+    mailbox?: string,
+  ): Promise<SendResult> {
+    const draftId =
+      typeof draftIdInput === 'number' ? draftIdInput : Number.parseInt(draftIdInput, 10);
+    if (!Number.isFinite(draftId)) {
+      throw new Error(
+        `Invalid draft id "${String(draftIdInput)}" for an IMAP account: expected a numeric UID.`,
+      );
+    }
     this.checkRateLimit(accountName);
 
     // Fetch the parsed draft for its recipient addresses (and the resolved

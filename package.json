@@ -31,6 +31,7 @@
     "diagnose:mailboxes": "tsx scripts/diagnose-mailboxes.ts",
     "probe:graph": "tsx scripts/probe-graph-folders.ts",
     "verify:graph": "tsx scripts/verify-graph-backend.ts",
+    "mcp:call": "node scripts/mcp-call.mjs",
     "db:migrate": "tsx bin/migrate.ts",
     "check": "biome check src/ && eslint src/",
     "report": "mkdir -p reports && biome check src/ --reporter=json > reports/biome.json 2>&1; eslint src/ -f json -o reports/eslint.json; actionlint -format '{{json .}}' > reports/actionlint.json 2>&1; pnpm test",
