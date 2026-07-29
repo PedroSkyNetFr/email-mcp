@@ -251,22 +251,42 @@ async function waitForCode(port: number, timeoutMs: number): Promise<string> {
  * and scope lists: picking a name is enough. Every field can still be overridden
  * with --auth-url / --token-url / --scopes.
  */
+const MS_AUTH_URL = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize';
+const MS_TOKEN_URL = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
+
 const PRESETS: Record<
   string,
-  { label: string; mailToken: boolean; config: Partial<OAuth2Config> }
+  { label: string; mailToken: boolean; backend?: 'graph'; config: Partial<OAuth2Config> }
 > = {
   microsoft: {
-    label: 'Microsoft — IMAP + SMTP (the token email-mcp needs)',
+    label: 'Microsoft — IMAP + SMTP (legacy; Exchange hides folders over IMAP)',
     mailToken: true,
     config: { provider: 'microsoft' },
   },
   'microsoft-graph': {
-    label: 'Microsoft Graph — Mail.Read (diagnostics only, NOT for the config)',
+    label: 'Microsoft Graph — full mailbox access for Exchange / Outlook.com accounts',
+    mailToken: true,
+    backend: 'graph',
+    config: {
+      provider: 'custom',
+      authUrl: MS_AUTH_URL,
+      tokenUrl: MS_TOKEN_URL,
+      // Read alone is not enough for the backend: flags, moves, drafts and
+      // folder changes need ReadWrite, and sending needs Mail.Send.
+      scopes: [
+        'https://graph.microsoft.com/Mail.ReadWrite',
+        'https://graph.microsoft.com/Mail.Send',
+        'offline_access',
+      ],
+    },
+  },
+  'microsoft-graph-readonly': {
+    label: 'Microsoft Graph — Mail.Read only (diagnostics, NOT for the config)',
     mailToken: false,
     config: {
       provider: 'custom',
-      authUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
-      tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+      authUrl: MS_AUTH_URL,
+      tokenUrl: MS_TOKEN_URL,
       scopes: ['https://graph.microsoft.com/Mail.Read', 'offline_access'],
     },
   },
@@ -289,7 +309,7 @@ async function askPreset(): Promise<string> {
   console.log('What do you need a token for?\n');
   keys.forEach((key, index) => {
     // eslint-disable-next-line no-console
-    console.log(`  ${index + 1}) ${key.padEnd(16)} ${PRESETS[key].label}`);
+    console.log(`  ${index + 1}) ${key.padEnd(26)} ${PRESETS[key].label}`);
   });
   // eslint-disable-next-line no-console
   console.log('');
@@ -396,6 +416,9 @@ async function main(): Promise<void> {
   // file, so the block below can be pasted straight into the server's "env"
   // object. The secret stays a placeholder so it is never echoed to the screen.
   const entries: [string, string][] = [
+    // A Graph profile also selects the backend: without it the account would
+    // still be served over IMAP, which is what hides folders in the first place.
+    ...(preset.backend ? ([['MCP_EMAIL_BACKEND', preset.backend]] as [string, string][]) : []),
     ['MCP_EMAIL_OAUTH2_PROVIDER', provider],
     ['MCP_EMAIL_OAUTH2_CLIENT_ID', clientId],
     ['MCP_EMAIL_OAUTH2_CLIENT_SECRET', '<paste the client secret you just used>'],
@@ -409,6 +432,11 @@ async function main(): Promise<void> {
   });
   console.log('\nReplace the client secret placeholder with its real value.');
   console.log('Then remove MCP_EMAIL_PASSWORD from that account and restart the MCP client.');
+  if (preset.backend === 'graph') {
+    console.log(
+      'The IMAP and SMTP host settings become unused: this account now talks to Graph only.',
+    );
+  }
   console.log('The access token is refreshed automatically from now on.\n');
   /* eslint-enable no-console */
   /* eslint-enable no-console */
