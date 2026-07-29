@@ -33,6 +33,32 @@ export default function registerHealthTools(
             auth_type: cfg.oauth2 ? 'oauth2' : 'password',
           };
 
+          // A Graph-backed account does not use IMAP or SMTP at all: probing
+          // them reported 535 auth failures for a mailbox that was working
+          // perfectly over Graph. Check the path the account actually uses.
+          if (cfg.backend === 'graph') {
+            result.backend = 'graph';
+            try {
+              const start = Date.now();
+              const mailboxes = await imapService.listMailboxes(name);
+              result.graph = {
+                connected: true,
+                latency_ms: Date.now() - start,
+                folders: mailboxes.length,
+              };
+            } catch (err) {
+              result.graph = {
+                connected: false,
+                error: err instanceof Error ? err.message : String(err),
+              };
+            }
+            result.imap = { skipped: 'account is served by Microsoft Graph' };
+            result.smtp = { skipped: 'account sends through Microsoft Graph' };
+            return result;
+          }
+
+          result.backend = 'imap';
+
           // IMAP health
           try {
             const start = Date.now();

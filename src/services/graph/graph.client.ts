@@ -94,9 +94,12 @@ export default class GraphClient {
       );
     }
 
-    // 204 No Content — nothing to parse.
-    if (response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    // Several Graph writes answer with an empty body — 202 Accepted for
+    // sendMail, 204 No Content for deletes — so parsing unconditionally turned
+    // a success into "Unexpected end of JSON input". Read the body first and
+    // only parse when there is something to parse.
+    const text = await response.text();
+    return (text.length > 0 ? JSON.parse(text) : undefined) as T;
   }
 
   /** GET a collection, following `@odata.nextLink` until exhausted or `limit`. */
