@@ -461,6 +461,37 @@ max_connections = 1
 max_messages = 100
 ```
 
+**Getting the refresh token.** The server refreshes the access token on its own,
+but the initial refresh token has to be obtained once, interactively:
+
+```bash
+pnpm oauth:setup --provider microsoft --client-id <id> --client-secret <secret>
+```
+
+It opens the provider's consent page, captures the redirect on
+`http://localhost:3000/callback` (register that exact URI with your provider),
+exchanges the code, and prints the token plus a ready-to-paste env block. Pass
+`--port` to use another port, or `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` to keep
+credentials out of your shell history.
+
+Any option you omit is prompted for interactively (the client secret is masked),
+so `pnpm oauth:setup` on its own works too. On Windows you can simply
+double-click **`scripts/oauth-setup.cmd`**, which opens a console, asks for the
+values and keeps the window open so you can copy the token.
+
+The same values map to environment variables — `MCP_EMAIL_OAUTH2_PROVIDER`,
+`MCP_EMAIL_OAUTH2_CLIENT_ID`, `MCP_EMAIL_OAUTH2_CLIENT_SECRET` and
+`MCP_EMAIL_OAUTH2_REFRESH_TOKEN` — in which case `MCP_EMAIL_PASSWORD` is omitted.
+
+**Microsoft / Outlook.** Basic (password) authentication is disabled on personal
+Outlook.com accounts, so OAuth2 is the supported path. Register an app in Entra ID
+(Azure) whose *supported account types* include personal Microsoft accounts, add a
+**Web** platform with the redirect URI above (the token exchange sends a client
+secret, so a confidential client is required), and grant the delegated Office 365
+Exchange Online permissions `IMAP.AccessAsUser.All` and `SMTP.Send`. Use
+`outlook.office365.com:993` (TLS) for IMAP and `smtp-mail.outlook.com:587` with
+STARTTLS for SMTP — on port 587 set `tls = false` and `starttls = true`.
+
 #### Environment Variables
 
 For single-account setups (overrides config file):
