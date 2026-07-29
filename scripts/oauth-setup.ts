@@ -273,9 +273,15 @@ const PRESETS: Record<
       tokenUrl: MS_TOKEN_URL,
       // Read alone is not enough for the backend: flags, moves, drafts and
       // folder changes need ReadWrite, and sending needs Mail.Send.
+      // MailboxSettings covers the master category list behind list_labels,
+      // create_label and delete_label — those live outside the Mail scope even
+      // though applying a category to a message does not.
+      // Only scopes the code actually calls are requested; capabilities such as
+      // calendar or contacts would each add their own when implemented.
       scopes: [
         'https://graph.microsoft.com/Mail.ReadWrite',
         'https://graph.microsoft.com/Mail.Send',
+        'https://graph.microsoft.com/MailboxSettings.ReadWrite',
         'offline_access',
       ],
     },

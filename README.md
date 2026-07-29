@@ -480,16 +480,24 @@ so `pnpm oauth:setup` on its own works too — it opens a menu of profiles:
 | Profile | Scopes | Use |
 |---------|--------|-----|
 | `microsoft` | IMAP + SMTP | legacy path; Exchange hides folders over IMAP |
-| `microsoft-graph` | `Mail.ReadWrite`, `Mail.Send` | **Exchange / Outlook.com accounts** — full mailbox |
+| `microsoft-graph` | `Mail.ReadWrite`, `Mail.Send`, `MailboxSettings.ReadWrite` | **Exchange / Outlook.com accounts** — full mailbox |
 | `microsoft-graph-readonly` | `Mail.Read` | diagnostics only — **never** put it in the config |
 | `google` | Gmail IMAP + SMTP | Gmail accounts |
 | `custom` | your own | supply `--auth-url`, `--token-url`, `--scopes` |
 
 `Mail.Read` alone is not enough to run an account: changing flags, moving,
-deleting, drafts and folder edits need `Mail.ReadWrite`, and sending needs
-`Mail.Send`. The `microsoft-graph` profile requests all three and its output
+deleting, drafts and folder edits need `Mail.ReadWrite`, sending needs
+`Mail.Send`, and the master category list behind `list_labels` / `create_label`
+/ `delete_label` sits outside the Mail scope entirely, under
+`MailboxSettings.ReadWrite`. The `microsoft-graph` profile requests exactly
+those — nothing is asked for that the code does not call — and its output
 includes `MCP_EMAIL_BACKEND=graph`, without which the account would still be
 served over IMAP.
+
+Capabilities that Graph could add but this backend does not implement yet
+(calendar, contacts, server-side rules, automatic replies) each need their own
+scope — `Calendars.ReadWrite`, `Contacts.ReadWrite` — and would require a fresh
+consent when added.
 
 On Windows you can simply double-click **`scripts/oauth-setup.cmd`**, which opens
 a console, shows that menu, asks for the values and keeps the window open so you
