@@ -28,6 +28,7 @@
     "test:all": "vitest run && vitest run --config vitest.config.integration.ts",
     "spike:uid-expunge": "tsx scripts/spike-uid-expunge.ts",
     "oauth:setup": "tsx scripts/oauth-setup.ts",
+    "diagnose:mailboxes": "tsx scripts/diagnose-mailboxes.ts",
     "db:migrate": "tsx bin/migrate.ts",
     "check": "biome check src/ && eslint src/",
     "report": "mkdir -p reports && biome check src/ --reporter=json > reports/biome.json 2>&1; eslint src/ -f json -o reports/eslint.json; actionlint -format '{{json .}}' > reports/actionlint.json 2>&1; pnpm test",
