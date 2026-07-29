@@ -8,12 +8,12 @@ import audit from '../safety/audit.js';
 import { validateInputLength } from '../safety/validation.js';
 
 import type { IMailService } from '../services/mail-service.types.js';
-import type SmtpService from '../services/smtp.service.js';
+import type { ISendService } from '../services/send-service.types.js';
 import { adaptAttachmentInput, attachmentInputSchema } from './attachment-input.js';
 
 export default function registerSendTools(
   server: McpServer,
-  smtpService: SmtpService,
+  smtpService: ISendService,
   imapService: IMailService,
 ): void {
   // ---------------------------------------------------------------------------

@@ -20,11 +20,12 @@ import registerAllResources from './resources/register.js';
 import RateLimiter from './safety/rate-limiter.js';
 import createServer, { PKG_VERSION } from './server.js';
 import CalendarService from './services/calendar.service.js';
+import GraphSendService from './services/graph/graph-send.service.js';
 import GraphClient from './services/graph/graph.client.js';
 import GraphService from './services/graph/graph.service.js';
 import HooksService from './services/hooks.service.js';
 import ImapService from './services/imap.service.js';
-import { createMailRouter } from './services/mail-router.js';
+import { createMailRouter, createSendRouter } from './services/mail-router.js';
 import LocalCalendarService from './services/local-calendar.service.js';
 import OAuthService from './services/oauth.service.js';
 import RemindersService from './services/reminders.service.js';
@@ -90,12 +91,17 @@ async function runServer(): Promise<void> {
       .filter((account) => account.backend === 'graph')
       .map((account) => [account.name, new GraphClient(account, oauthService)]),
   );
+  const findAccount = (name: string) => config.accounts.find((account) => account.name === name);
   const graphService = new GraphService(graphClients);
-  const mailService = createMailRouter(imapService, graphService, (name) =>
-    config.accounts.find((account) => account.name === name),
-  );
+  const mailService = createMailRouter(imapService, graphService, findAccount);
 
   const smtpService = new SmtpService(connections, rateLimiter, imapService);
+  const graphSendService = new GraphSendService(graphClients, (name) => {
+    const account = findAccount(name);
+    if (!account) throw new Error(`Unknown account "${name}"`);
+    return account;
+  });
+  const sendService = createSendRouter(smtpService, graphSendService, findAccount);
   const templateService = new TemplateService();
   const calendarService = new CalendarService();
   const localCalendarService = new LocalCalendarService();
@@ -112,7 +118,7 @@ async function runServer(): Promise<void> {
     server,
     connections,
     mailService,
-    smtpService,
+    sendService,
     config,
     templateService,
     calendarService,

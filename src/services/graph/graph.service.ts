@@ -304,6 +304,104 @@ export default class GraphService {
     };
   }
 
+  // -------------------------------------------------------------------------
+  // Message state
+  // -------------------------------------------------------------------------
+
+  async setFlags(
+    accountName: string,
+    emailId: string,
+    _mailbox: string,
+    action: 'read' | 'unread' | 'flag' | 'unflag',
+  ): Promise<void> {
+    const patch: Record<string, unknown> = {
+      read: { isRead: true },
+      unread: { isRead: false },
+      flag: { flag: { flagStatus: 'flagged' } },
+      unflag: { flag: { flagStatus: 'notFlagged' } },
+    }[action];
+
+    await this.client(accountName).request('PATCH', `/me/messages/${emailId}`, patch);
+  }
+
+  async moveEmail(
+    accountName: string,
+    emailId: string,
+    _sourceMailbox: string,
+    destinationMailbox: string,
+  ): Promise<void> {
+    const destinationId = await this.resolveFolderId(accountName, destinationMailbox);
+    await this.client(accountName).request('POST', `/me/messages/${emailId}/move`, {
+      destinationId,
+    });
+  }
+
+  /**
+   * Delete a message. The default moves it to Deleted Items, mirroring the IMAP
+   * path; `permanent` issues a real DELETE, which Graph does not undo.
+   */
+  async deleteEmail(
+    accountName: string,
+    emailId: string,
+    _mailbox = 'INBOX',
+    permanent = false,
+  ): Promise<void> {
+    const client = this.client(accountName);
+    if (permanent) {
+      await client.request('DELETE', `/me/messages/${emailId}`);
+      return;
+    }
+    await client.request('POST', `/me/messages/${emailId}/move`, {
+      destinationId: 'deleteditems',
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Folder management
+  // -------------------------------------------------------------------------
+
+  /** Split "Parent/Child" into its parent path and leaf name. */
+  private static splitPath(folderPath: string): { parent?: string; leaf: string } {
+    const clean = folderPath.replace(/^\/+|\/+$/g, '');
+    const index = clean.lastIndexOf('/');
+    if (index < 0) return { leaf: clean };
+    return { parent: clean.slice(0, index), leaf: clean.slice(index + 1) };
+  }
+
+  async createMailbox(accountName: string, folderPath: string): Promise<void> {
+    const { parent, leaf } = GraphService.splitPath(folderPath);
+    const base = parent
+      ? `/me/mailFolders/${await this.resolveFolderId(accountName, parent)}/childFolders`
+      : '/me/mailFolders';
+    await this.client(accountName).request('POST', base, { displayName: leaf });
+    this.folderCache.clear(); // the tree changed
+  }
+
+  async renameMailbox(accountName: string, folderPath: string, newPath: string): Promise<void> {
+    const id = await this.resolveFolderId(accountName, folderPath);
+    // Graph renames by display name; it cannot reparent through this call, so a
+    // path change that moves the folder elsewhere is rejected rather than
+    // silently renaming it in place.
+    const from = GraphService.splitPath(folderPath);
+    const to = GraphService.splitPath(newPath);
+    if ((from.parent ?? '') !== (to.parent ?? '')) {
+      throw new Error(
+        `Graph can rename a folder but not move it: "${folderPath}" and "${newPath}" have ` +
+          'different parents.',
+      );
+    }
+    await this.client(accountName).request('PATCH', `/me/mailFolders/${id}`, {
+      displayName: to.leaf,
+    });
+    this.folderCache.clear();
+  }
+
+  async deleteMailbox(accountName: string, folderPath: string): Promise<void> {
+    const id = await this.resolveFolderId(accountName, folderPath);
+    await this.client(accountName).request('DELETE', `/me/mailFolders/${id}`);
+    this.folderCache.clear();
+  }
+
   async downloadAttachment(
     accountName: string,
     emailId: string,

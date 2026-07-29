@@ -17,34 +17,39 @@
  */
 
 import type { AccountConfig } from '../types/index.js';
+import type GraphSendService from './graph/graph-send.service.js';
 import type GraphService from './graph/graph.service.js';
 import type ImapService from './imap.service.js';
 import type { IMailService } from './mail-service.types.js';
+import type { ISendService } from './send-service.types.js';
+import type SmtpService from './smtp.service.js';
 
-/** Every IMailService method takes the account name as its first argument. */
+/** Both contracts take the account name as their first argument. */
 function accountOf(args: unknown[]): string | undefined {
   return typeof args[0] === 'string' ? args[0] : undefined;
 }
 
-export function createMailRouter(
-  imapService: ImapService,
-  graphService: GraphService,
-  getAccount: (name: string) => AccountConfig | undefined,
-): IMailService {
-  const isGraphAccount = (name: string | undefined): boolean =>
-    !!name && getAccount(name)?.backend === 'graph';
-
-  return new Proxy(imapService, {
+/**
+ * Build a proxy over `defaultImpl` that hands calls for Graph-backed accounts to
+ * `graphImpl` instead. Shared by the mail and send contracts, which differ only
+ * in the pair of services involved.
+ */
+function routeByAccount<T extends object>(
+  defaultImpl: T,
+  graphImpl: object,
+  isGraphAccount: (name: string | undefined) => boolean,
+): T {
+  return new Proxy(defaultImpl, {
     get(target, property, receiver) {
-      const imapMember = Reflect.get(target, property, receiver) as unknown;
-      if (typeof imapMember !== 'function') return imapMember;
+      const fallback = Reflect.get(target, property, receiver) as unknown;
+      if (typeof fallback !== 'function') return fallback;
 
-      const graphMember = (graphService as unknown as Record<string | symbol, unknown>)[property];
+      const graphMember = (graphImpl as Record<string | symbol, unknown>)[property];
 
       return (...args: unknown[]) => {
         const account = accountOf(args);
         if (!isGraphAccount(account)) {
-          return (imapMember as (...a: unknown[]) => unknown).apply(target, args);
+          return (fallback as (...a: unknown[]) => unknown).apply(target, args);
         }
 
         if (typeof graphMember !== 'function') {
@@ -54,8 +59,33 @@ export function createMailRouter(
               'this operation still needs a Graph implementation.',
           );
         }
-        return (graphMember as (...a: unknown[]) => unknown).apply(graphService, args);
+        return (graphMember as (...a: unknown[]) => unknown).apply(graphImpl, args);
       };
     },
-  }) as unknown as IMailService;
+  });
+}
+
+export function createMailRouter(
+  imapService: ImapService,
+  graphService: GraphService,
+  getAccount: (name: string) => AccountConfig | undefined,
+): IMailService {
+  const isGraphAccount = (name: string | undefined): boolean =>
+    !!name && getAccount(name)?.backend === 'graph';
+  return routeByAccount(imapService, graphService, isGraphAccount) as unknown as IMailService;
+}
+
+/**
+ * Same dispatch for the send path. A Graph account cannot fall back to SMTP:
+ * its credentials are consented for Graph, and Microsoft will not redeem them
+ * for the scopes SMTP authentication requires.
+ */
+export function createSendRouter(
+  smtpService: SmtpService,
+  graphSendService: GraphSendService,
+  getAccount: (name: string) => AccountConfig | undefined,
+): ISendService {
+  const isGraphAccount = (name: string | undefined): boolean =>
+    !!name && getAccount(name)?.backend === 'graph';
+  return routeByAccount(smtpService, graphSendService, isGraphAccount) as unknown as ISendService;
 }

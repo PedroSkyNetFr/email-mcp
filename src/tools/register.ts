@@ -14,7 +14,7 @@ import type LocalCalendarService from '../services/local-calendar.service.js';
 import type RemindersService from '../services/reminders.service.js';
 import type SchedulerService from '../services/scheduler.service.js';
 import type { SearchPresetRegistry } from '../services/search-presets.js';
-import type SmtpService from '../services/smtp.service.js';
+import type { ISendService } from '../services/send-service.types.js';
 import type TemplateService from '../services/template.service.js';
 import type WatcherService from '../services/watcher.service.js';
 import type { AppConfig } from '../types/index.js';
@@ -45,7 +45,7 @@ export default function registerAllTools(
   server: McpServer,
   connections: ConnectionManager,
   imapService: IMailService,
-  smtpService: SmtpService,
+  smtpService: ISendService,
   config: AppConfig,
   templateService: TemplateService,
   calendarService: CalendarService,

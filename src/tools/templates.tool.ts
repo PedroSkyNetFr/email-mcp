@@ -9,7 +9,7 @@ import { z } from 'zod';
 import audit from '../safety/audit.js';
 
 import type { IMailService } from '../services/mail-service.types.js';
-import type SmtpService from '../services/smtp.service.js';
+import type { ISendService } from '../services/send-service.types.js';
 import type TemplateService from '../services/template.service.js';
 
 export function registerTemplateReadTools(
@@ -69,7 +69,7 @@ export function registerTemplateWriteTools(
   server: McpServer,
   templateService: TemplateService,
   imapService: IMailService,
-  smtpService: SmtpService,
+  smtpService: ISendService,
 ): void {
   server.tool(
     'apply_template',

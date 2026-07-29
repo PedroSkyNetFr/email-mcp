@@ -7,7 +7,7 @@ import { z } from 'zod';
 import audit from '../safety/audit.js';
 
 import type { IMailService } from '../services/mail-service.types.js';
-import type SmtpService from '../services/smtp.service.js';
+import type { ISendService } from '../services/send-service.types.js';
 import { adaptAttachmentInput, attachmentInputSchema } from './attachment-input.js';
 
 // ---------------------------------------------------------------------------
@@ -17,7 +17,7 @@ import { adaptAttachmentInput, attachmentInputSchema } from './attachment-input.
 export default function registerDraftTools(
   server: McpServer,
   imapService: IMailService,
-  smtpService: SmtpService,
+  smtpService: ISendService,
 ): void {
   // ---------------------------------------------------------------------------
   // save_draft
