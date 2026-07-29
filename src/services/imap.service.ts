@@ -1957,7 +1957,9 @@ export default class ImapService {
 
   async bulkSetFlags(
     accountName: string,
-    ids: number[],
+    // Ids stay opaque: IMAP joins them into a UID set, and a Graph-backed
+    // account addresses messages by string id.
+    ids: (number | string)[],
     mailbox: string,
     action: 'mark_read' | 'mark_unread' | 'flag' | 'unflag',
   ): Promise<BulkResult> {
@@ -2002,7 +2004,7 @@ export default class ImapService {
 
   async bulkMove(
     accountName: string,
-    ids: number[],
+    ids: (number | string)[],
     mailbox: string,
     destination: string,
   ): Promise<BulkResult> {
@@ -2036,7 +2038,7 @@ export default class ImapService {
 
   async bulkDelete(
     accountName: string,
-    ids: number[],
+    ids: (number | string)[],
     mailbox: string,
     permanent = false,
   ): Promise<BulkResult> {

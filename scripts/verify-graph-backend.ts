@@ -79,6 +79,7 @@ async function main(): Promise<void> {
 
   const service = new GraphService(
     new Map([[account.name, new GraphClient(account, new OAuthService())]]),
+    () => account,
   );
 
   /* eslint-disable no-console -- this script's output IS its interface */

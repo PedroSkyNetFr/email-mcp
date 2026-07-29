@@ -20,10 +20,13 @@ export default function registerBulkTools(server: McpServer, imapService: IMailS
         .enum(['mark_read', 'mark_unread', 'flag', 'unflag', 'move', 'delete'])
         .describe('Bulk action to perform'),
       ids: z
-        .array(z.number().int())
+        .array(z.union([z.number().int(), z.string()]))
         .min(1)
         .max(100)
-        .describe('Array of email UIDs (max 100). Get UIDs from list_emails or search_emails.'),
+        .describe(
+          'Array of email ids (max 100), from list_emails or search_emails. Numeric UIDs on ' +
+            'IMAP accounts; opaque string ids on Graph-backed (Exchange) accounts.',
+        ),
       destination: z
         .string()
         .optional()

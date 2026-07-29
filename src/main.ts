@@ -92,15 +92,17 @@ async function runServer(): Promise<void> {
       .map((account) => [account.name, new GraphClient(account, oauthService)]),
   );
   const findAccount = (name: string) => config.accounts.find((account) => account.name === name);
-  const graphService = new GraphService(graphClients);
-  const mailService = createMailRouter(imapService, graphService, findAccount);
-
-  const smtpService = new SmtpService(connections, rateLimiter, imapService);
-  const graphSendService = new GraphSendService(graphClients, (name) => {
+  const requireAccount = (name: string) => {
     const account = findAccount(name);
     if (!account) throw new Error(`Unknown account "${name}"`);
     return account;
-  });
+  };
+
+  const graphService = new GraphService(graphClients, requireAccount);
+  const mailService = createMailRouter(imapService, graphService, findAccount);
+
+  const smtpService = new SmtpService(connections, rateLimiter, imapService);
+  const graphSendService = new GraphSendService(graphClients, requireAccount);
   const sendService = createSendRouter(smtpService, graphSendService, findAccount);
   const templateService = new TemplateService();
   const calendarService = new CalendarService();

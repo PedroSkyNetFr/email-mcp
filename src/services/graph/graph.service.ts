@@ -17,7 +17,20 @@
  *     translate between the two.
  */
 
-import type { Email, EmailAddress, EmailMeta, Mailbox, PaginatedResult } from '../../types/index.js';
+import type {
+  AccountConfig,
+  BulkResult,
+  Email,
+  EmailAddress,
+  EmailMeta,
+  LabelInfo,
+  Mailbox,
+  PaginatedResult,
+} from '../../types/index.js';
+import type { AttachmentInput, ResolvedAttachment } from '../attachment-resolver.js';
+import { resolveAttachments } from '../attachment-resolver.js';
+import type ImapService from '../imap.service.js';
+import { applyAccountSignature } from '../signature-loader.js';
 import type GraphClient from './graph.client.js';
 
 /** Graph mailFolder subset we rely on. */
@@ -112,7 +125,10 @@ export default class GraphService {
   /** path -> folder, rebuilt on demand. */
   private folderCache = new Map<string, GraphFolder>();
 
-  constructor(private readonly clients: Map<string, GraphClient>) {}
+  constructor(
+    private readonly clients: Map<string, GraphClient>,
+    private readonly getAccount: (name: string) => AccountConfig,
+  ) {}
 
   private client(accountName: string): GraphClient {
     const client = this.clients.get(accountName);
@@ -304,6 +320,158 @@ export default class GraphService {
     };
   }
 
+  async getEmailFlags(
+    accountName: string,
+    emailId: string,
+    _mailbox = 'INBOX',
+  ): Promise<{
+    seen: boolean;
+    flagged: boolean;
+    answered: boolean;
+    labels: string[];
+    subject: string;
+    from: string;
+    date: string;
+  }> {
+    const message = await this.client(accountName).request<GraphMessage>(
+      'GET',
+      `/me/messages/${emailId}?$select=id,subject,from,receivedDateTime,isRead,flag,categories`,
+    );
+    const meta = toEmailMeta(message);
+    return {
+      seen: meta.seen,
+      flagged: meta.flagged,
+      answered: meta.answered,
+      labels: meta.labels,
+      subject: meta.subject,
+      from: meta.from.address,
+      date: meta.date,
+    };
+  }
+
+  /**
+   * Full-text search. Graph's `$search` covers the whole message (subject, body,
+   * participants) and, unlike IMAP SEARCH, cannot be combined with `$filter` or
+   * with `$orderby` — so a free-text query is served by `$search` alone, and the
+   * structured filters are applied only when no query text is given. Mixing them
+   * silently would drop half the criteria.
+   */
+  async searchEmails(
+    accountName: string,
+    query: string,
+    options: {
+      mailbox?: string;
+      page?: number;
+      pageSize?: number;
+      from?: string;
+      to?: string;
+      subject?: string;
+      since?: string;
+      before?: string;
+      seen?: boolean;
+      flagged?: boolean;
+      hasAttachment?: boolean;
+    } = {},
+  ): Promise<PaginatedResult<EmailMeta>> {
+    const text = [query, options.subject, options.from, options.to].filter(Boolean).join(' ').trim();
+
+    if (!text) {
+      return this.listEmails(accountName, options);
+    }
+
+    const page = options.page ?? 1;
+    const pageSize = options.pageSize ?? 25;
+    const folderId = await this.resolveFolderId(accountName, options.mailbox ?? 'INBOX');
+
+    const response = await this.client(accountName).request<{
+      value: GraphMessage[];
+    }>(
+      'GET',
+      `/me/mailFolders/${folderId}/messages?$select=${META_SELECT}` +
+        `&$search=${encodeURIComponent(`"${text}"`)}` +
+        `&$top=${pageSize}&$skip=${(page - 1) * pageSize}`,
+    );
+
+    const items = response.value.map(toEmailMeta);
+    return {
+      items,
+      total: items.length,
+      page,
+      pageSize,
+      hasMore: items.length === pageSize,
+      // Graph does not report a match count alongside $search results.
+      totalApprox: true,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Categories — the Graph equivalent of IMAP keywords / labels
+  // -------------------------------------------------------------------------
+
+  async listLabels(accountName: string): Promise<LabelInfo[]> {
+    const categories = await this.client(accountName).collect<{ displayName: string }>(
+      '/me/outlook/masterCategories',
+    );
+    return categories.map((category) => ({
+      name: category.displayName,
+      strategy: 'keyword' as LabelInfo['strategy'],
+    }));
+  }
+
+  /** Categories live on the message as a whole array, so it is read then rewritten. */
+  private async setCategories(
+    accountName: string,
+    emailId: string,
+    update: (current: string[]) => string[],
+  ): Promise<void> {
+    const client = this.client(accountName);
+    const message = await client.request<GraphMessage>(
+      'GET',
+      `/me/messages/${emailId}?$select=categories`,
+    );
+    const next = update(message.categories ?? []);
+    await client.request('PATCH', `/me/messages/${emailId}`, { categories: next });
+  }
+
+  async addLabel(
+    accountName: string,
+    emailId: string,
+    _mailbox: string,
+    label: string,
+  ): Promise<void> {
+    await this.setCategories(accountName, emailId, (current) =>
+      current.includes(label) ? current : [...current, label],
+    );
+  }
+
+  async removeLabel(
+    accountName: string,
+    emailId: string,
+    _mailbox: string,
+    label: string,
+  ): Promise<void> {
+    await this.setCategories(accountName, emailId, (current) =>
+      current.filter((entry) => entry !== label),
+    );
+  }
+
+  async createLabel(accountName: string, name: string): Promise<void> {
+    await this.client(accountName).request('POST', '/me/outlook/masterCategories', {
+      displayName: name,
+      color: 'preset0',
+    });
+  }
+
+  async deleteLabel(accountName: string, name: string): Promise<void> {
+    const categories = await this.client(accountName).collect<{
+      id: string;
+      displayName: string;
+    }>('/me/outlook/masterCategories');
+    const match = categories.find((category) => category.displayName === name);
+    if (!match) throw new Error(`Category "${name}" not found`);
+    await this.client(accountName).request('DELETE', `/me/outlook/masterCategories/${match.id}`);
+  }
+
   // -------------------------------------------------------------------------
   // Message state
   // -------------------------------------------------------------------------
@@ -354,6 +522,197 @@ export default class GraphService {
     await client.request('POST', `/me/messages/${emailId}/move`, {
       destinationId: 'deleteditems',
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Bulk operations
+  // -------------------------------------------------------------------------
+
+  /**
+   * Apply a per-message operation across ids, collecting failures instead of
+   * aborting. Graph has no multi-message verb, so this is genuinely one request
+   * per id; they are issued sequentially because Graph throttles parallel bursts
+   * hard enough that a batch would end up slower.
+   */
+  private async runBulk(
+    ids: (number | string)[],
+    operation: (id: string) => Promise<void>,
+  ): Promise<BulkResult> {
+    const result: BulkResult = { total: ids.length, succeeded: 0, failed: 0, errors: [] };
+
+    /* eslint-disable no-await-in-loop -- sequential on purpose, see above */
+    for (let i = 0; i < ids.length; i += 1) {
+      try {
+        await operation(String(ids[i]));
+        result.succeeded += 1;
+      } catch (err) {
+        result.failed += 1;
+        result.errors?.push(
+          `${String(ids[i])}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    /* eslint-enable no-await-in-loop */
+
+    return result;
+  }
+
+  async bulkSetFlags(
+    accountName: string,
+    ids: (number | string)[],
+    mailbox: string,
+    action: 'mark_read' | 'mark_unread' | 'flag' | 'unflag',
+  ): Promise<BulkResult> {
+    const single = { mark_read: 'read', mark_unread: 'unread', flag: 'flag', unflag: 'unflag' }[
+      action
+    ] as 'read' | 'unread' | 'flag' | 'unflag';
+    return this.runBulk(ids, async (id) => this.setFlags(accountName, id, mailbox, single));
+  }
+
+  async bulkMove(
+    accountName: string,
+    ids: (number | string)[],
+    mailbox: string,
+    destination: string,
+  ): Promise<BulkResult> {
+    return this.runBulk(ids, async (id) => this.moveEmail(accountName, id, mailbox, destination));
+  }
+
+  async bulkDelete(
+    accountName: string,
+    ids: (number | string)[],
+    mailbox: string,
+    permanent = false,
+  ): Promise<BulkResult> {
+    return this.runBulk(ids, async (id) => this.deleteEmail(accountName, id, mailbox, permanent));
+  }
+
+  // -------------------------------------------------------------------------
+  // Threads
+  // -------------------------------------------------------------------------
+
+  /**
+   * Every message sharing the conversation. Graph tracks `conversationId`
+   * natively, so no References/In-Reply-To reconstruction is needed.
+   */
+  async getThread(accountName: string, emailId: string, _mailbox = 'INBOX'): Promise<EmailMeta[]> {
+    const client = this.client(accountName);
+    const message = await client.request<GraphMessage & { conversationId?: string }>(
+      'GET',
+      `/me/messages/${emailId}?$select=conversationId`,
+    );
+    if (!message.conversationId) return [];
+
+    const filter = encodeURIComponent(`conversationId eq '${message.conversationId}'`);
+    const messages = await client.collect<GraphMessage>(
+      `/me/messages?$select=${META_SELECT}&$filter=${filter}&$orderby=receivedDateTime asc&$top=100`,
+    );
+    return messages.map(toEmailMeta);
+  }
+
+  // -------------------------------------------------------------------------
+  // Drafts
+  // -------------------------------------------------------------------------
+
+  async saveDraft(
+    accountName: string,
+    options: {
+      to: string[];
+      subject: string;
+      body: string;
+      cc?: string[];
+      bcc?: string[];
+      html?: boolean;
+      attachments?: { filename: string; content: Buffer; contentType: string; cid?: string }[];
+    },
+  ): Promise<{ id: number | string; mailbox: string }> {
+    const recipients = (addresses?: string[]) =>
+      (addresses ?? [])
+        .map((address) => address.trim())
+        .filter(Boolean)
+        .map((address) => ({ emailAddress: { address } }));
+
+    const created = await this.client(accountName).request<{ id: string }>(
+      'POST',
+      '/me/messages',
+      {
+        subject: options.subject,
+        body: { contentType: options.html ? 'HTML' : 'Text', content: options.body },
+        toRecipients: recipients(options.to),
+        ccRecipients: recipients(options.cc),
+        bccRecipients: recipients(options.bcc),
+        ...(options.attachments?.length
+          ? {
+              attachments: options.attachments.map((attachment) => ({
+                '@odata.type': '#microsoft.graph.fileAttachment',
+                name: attachment.filename,
+                contentType: attachment.contentType,
+                contentBytes: attachment.content.toString('base64'),
+                ...(attachment.cid ? { isInline: true, contentId: attachment.cid } : {}),
+              })),
+            }
+          : {}),
+      },
+    );
+
+    // Graph files new messages in Drafts itself; the id is opaque, not a UID.
+    return { id: created.id, mailbox: 'Drafts' };
+  }
+
+  /**
+   * Entry point used by the save_draft tool: resolves the polymorphic attachment
+   * inputs, then creates the draft.
+   *
+   * The resolver only needs a `downloadAttachment` to carry an attachment over
+   * from another message, and this service provides exactly that — so it stands
+   * in for the IMAP service rather than reimplementing the resolution.
+   */
+  async saveDraftWithAttachments(
+    accountName: string,
+    options: {
+      to: string[];
+      subject: string;
+      body: string;
+      cc?: string[];
+      bcc?: string[];
+      html?: boolean;
+      attachments?: AttachmentInput[];
+      appendSignature?: boolean;
+    },
+  ): Promise<{ id: number | string; mailbox: string }> {
+    let resolved: ResolvedAttachment[] = [];
+    if (options.attachments?.length) {
+      const result = await resolveAttachments(
+        this as unknown as ImapService,
+        accountName,
+        options.attachments,
+      );
+      if (result.failures.length > 0) {
+        const summary = result.failures.map((f) => `${f.label}: ${f.reason}`).join('; ');
+        throw new Error(`Failed to resolve ${result.failures.length} attachment(s): ${summary}`);
+      }
+      resolved = result.resolved;
+    }
+
+    const signed = await applyAccountSignature(
+      this.getAccount(accountName),
+      { body: options.body, html: options.html, attachments: resolved },
+      options.appendSignature,
+    );
+
+    return this.saveDraft(accountName, {
+      to: options.to,
+      subject: options.subject,
+      body: signed.body,
+      cc: options.cc,
+      bcc: options.bcc,
+      html: signed.html,
+      attachments: signed.attachments,
+    });
+  }
+
+  async deleteDraft(accountName: string, draftId: number | string): Promise<void> {
+    await this.client(accountName).request('DELETE', `/me/messages/${String(draftId)}`);
   }
 
   // -------------------------------------------------------------------------
