@@ -2,6 +2,8 @@
  * Shared TypeScript types for the Email MCP Server.
  */
 
+import type { HeaderAnalysis, HeaderEntry } from '../utils/headers.js';
+
 // ---------------------------------------------------------------------------
 // Address
 // ---------------------------------------------------------------------------
@@ -557,4 +559,55 @@ export interface BatchAttachmentResult {
   total_size: number;
   skipped: number;
   errors: { emailId: string; filename: string; error: string }[];
+}
+
+// ---------------------------------------------------------------------------
+// Internet headers / message export
+// ---------------------------------------------------------------------------
+
+/**
+ * En-têtes Internet complets d'un message, sous les trois formes utiles :
+ * bloc brut (fidélité), liste ordonnée (multiplicité) et analyse (lisibilité).
+ *
+ * Un `Record<string, string>` ne suffit pas ici : la chaîne `Received` compte
+ * autant d'occurrences que de relais traversés, et c'est justement la séquence
+ * qui répond à « par où ce message est-il passé ».
+ */
+export interface EmailHeaderDump {
+  emailId: string;
+  account: string;
+  mailbox: string;
+  /** Bloc d'en-têtes tel qu'il a été obtenu du serveur. */
+  raw: string;
+  /** En-têtes dépliés, dans l'ordre du message, occurrences répétées comprises. */
+  entries: HeaderEntry[];
+  /** Regroupement par nom en minuscules — toutes les valeurs, dans l'ordre. */
+  grouped: Record<string, string[]>;
+  /** Chaîne Received chronologique, verdicts d'authentification, alignement. */
+  analysis: HeaderAnalysis;
+  /**
+   * Vrai quand `raw` a été RECONSTRUIT à partir d'une liste d'en-têtes fournie
+   * par l'API (Graph `internetMessageHeaders`) au lieu d'être lu tel quel dans
+   * le message. Les valeurs sont exactes, mais ni l'ordre de pliage ni les
+   * espacements d'origine ne sont garantis.
+   */
+  rawReconstructed?: boolean;
+}
+
+/** Résultat de l'écriture d'un message sur disque au format `.eml`. */
+export interface EmailSaveResult {
+  emailId: string;
+  account?: string;
+  path: string;
+  fileUrl: string;
+  size: number;
+  subject?: string;
+}
+
+/** Bilan d'un export de messages en lot. */
+export interface BatchEmailSaveResult {
+  folder: string;
+  files_saved: number;
+  total_size: number;
+  errors: { emailId: string; account?: string; error: string }[];
 }

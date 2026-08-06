@@ -54,6 +54,14 @@ export default defineConfig([
       "@stylistic/no-trailing-spaces": "off",
       "@stylistic/eol-last": "off",
       "@stylistic/max-len": "off",
+      // These four fight Biome's 100-column wrapping: Biome breaks the line,
+      // `eslint --fix` joins it back, and the pre-commit hook runs both — so a
+      // file touching them never reaches a fixed point and stays dirty after
+      // every commit. Line breaking is Biome's job here.
+      "@stylistic/implicit-arrow-linebreak": "off",
+      "@stylistic/nonblock-statement-body-position": "off",
+      "@stylistic/function-paren-newline": "off",
+      "@stylistic/no-confusing-arrow": "off",
       "import-x/order": "off",
     },
   },

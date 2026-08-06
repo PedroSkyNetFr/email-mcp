@@ -19,17 +19,34 @@
 
 import type {
   AccountConfig,
+  BatchEmailSaveResult,
   BulkResult,
   Email,
   EmailAddress,
+  EmailHeaderDump,
   EmailMeta,
+  EmailSaveResult,
   LabelInfo,
   Mailbox,
   PaginatedResult,
 } from '../../types/index.js';
+import type { HeaderEntry } from '../../utils/headers.js';
+import {
+  analyzeHeaders,
+  flattenHeaders,
+  groupHeaders,
+  parseHeaderBlock,
+  splitHeaderBlock,
+} from '../../utils/headers.js';
 import type { AttachmentInput, ResolvedAttachment } from '../attachment-resolver.js';
 import { resolveAttachments } from '../attachment-resolver.js';
-import { assertSafeDestination, resolveUniquePath, sanitizeFilename } from '../file-paths.js';
+import {
+  assertSafeDestination,
+  defaultEmlFilename,
+  exportSubfolder,
+  resolveUniquePath,
+  sanitizeFilename,
+} from '../file-paths.js';
 import type ImapService from '../imap.service.js';
 import { applyAccountSignature } from '../signature-loader.js';
 import type GraphClient from './graph.client.js';
@@ -76,9 +93,30 @@ interface GraphAttachment {
 /** Fields needed to build an EmailMeta — kept narrow to limit payload size. */
 const META_SELECT =
   'id,subject,from,toRecipients,receivedDateTime,isRead,flag,hasAttachments,bodyPreview,categories';
-const FULL_SELECT = `${META_SELECT},ccRecipients,bccRecipients,sentDateTime,internetMessageId,body`;
+// `internetMessageHeaders` fait partie de la sélection complète : sans lui,
+// Graph ne renvoie rien et `Email.headers` restait systématiquement vide sur un
+// compte Graph, là où le backend IMAP le remplit. Graph ne sert cette propriété
+// que sur la lecture d'UN message avec `$select` explicite — d'où son absence
+// de `META_SELECT`, qui sert aux listes.
+const FULL_SELECT = `${META_SELECT},ccRecipients,bccRecipients,sentDateTime,internetMessageId,body,internetMessageHeaders`;
 
-function toAddress(input?: { emailAddress?: { name?: string; address?: string } } | null): EmailAddress {
+/**
+ * Convertit la liste d'en-têtes de Graph vers la représentation partagée avec
+ * le backend IMAP. Graph rend déjà chaque en-tête déplié et conserve les
+ * occurrences répétées, il n'y a donc rien à analyser — seulement à
+ * réétiqueter.
+ */
+function toHeaderEntries(headers: { name: string; value: string }[] | undefined): HeaderEntry[] {
+  return (headers ?? []).map((header) => ({
+    name: header.name,
+    key: header.name.toLowerCase(),
+    value: header.value,
+  }));
+}
+
+function toAddress(
+  input?: { emailAddress?: { name?: string; address?: string } } | null,
+): EmailAddress {
   return {
     name: input?.emailAddress?.name,
     address: input?.emailAddress?.address ?? '',
@@ -154,9 +192,8 @@ export default class GraphService {
     if (depth > 8) return;
     const folders = await this.client(accountName).collect<GraphFolder>(url);
 
-    /* eslint-disable no-await-in-loop -- depth-first walk, and Graph throttles bursts */
-    for (let i = 0; i < folders.length; i += 1) {
-      const folder = folders[i];
+    /* eslint-disable no-restricted-syntax, no-await-in-loop -- depth-first walk, and Graph throttles bursts */
+    for (const folder of folders) {
       const full = prefix ? `${prefix}/${folder.displayName}` : folder.displayName;
       out.push({ path: full, folder });
       if ((folder.childFolderCount ?? 0) > 0) {
@@ -169,12 +206,10 @@ export default class GraphService {
         );
       }
     }
-    /* eslint-enable no-await-in-loop */
+    /* eslint-enable no-restricted-syntax, no-await-in-loop */
   }
 
-  private async loadFolders(
-    accountName: string,
-  ): Promise<{ path: string; folder: GraphFolder }[]> {
+  private async loadFolders(accountName: string): Promise<{ path: string; folder: GraphFolder }[]> {
     const out: { path: string; folder: GraphFolder }[] = [];
     await this.walkFolders(
       accountName,
@@ -260,8 +295,12 @@ export default class GraphService {
       filters.push(`hasAttachments eq ${options.hasAttachment ? 'true' : 'false'}`);
     }
     if (options.since) filters.push(`receivedDateTime ge ${new Date(options.since).toISOString()}`);
-    if (options.before) filters.push(`receivedDateTime lt ${new Date(options.before).toISOString()}`);
-    if (options.from) filters.push(`from/emailAddress/address eq '${options.from.replace(/'/g, "''")}'`);
+    if (options.before) {
+      filters.push(`receivedDateTime lt ${new Date(options.before).toISOString()}`);
+    }
+    if (options.from) {
+      filters.push(`from/emailAddress/address eq '${options.from.replace(/'/g, "''")}'`);
+    }
 
     const query = [
       `$select=${META_SELECT}`,
@@ -315,9 +354,9 @@ export default class GraphService {
         mimeType: a.contentType ?? 'application/octet-stream',
         size: a.size ?? 0,
       })),
-      headers: Object.fromEntries(
-        (message.internetMessageHeaders ?? []).map((h) => [h.name.toLowerCase(), h.value]),
-      ),
+      // Même aplatissement que le backend IMAP (la dernière occurrence gagne) ;
+      // la chaîne Received complète s'obtient via `getEmailHeaders`.
+      headers: flattenHeaders(toHeaderEntries(message.internetMessageHeaders)),
     };
   }
 
@@ -374,7 +413,10 @@ export default class GraphService {
       hasAttachment?: boolean;
     } = {},
   ): Promise<PaginatedResult<EmailMeta>> {
-    const text = [query, options.subject, options.from, options.to].filter(Boolean).join(' ').trim();
+    const text = [query, options.subject, options.from, options.to]
+      .filter(Boolean)
+      .join(' ')
+      .trim();
 
     if (!text) {
       return this.listEmails(accountName, options);
@@ -541,25 +583,23 @@ export default class GraphService {
    * per id; they are issued sequentially because Graph throttles parallel bursts
    * hard enough that a batch would end up slower.
    */
-  private async runBulk(
+  private static async runBulk(
     ids: (number | string)[],
     operation: (id: string) => Promise<void>,
   ): Promise<BulkResult> {
     const result: BulkResult = { total: ids.length, succeeded: 0, failed: 0, errors: [] };
 
-    /* eslint-disable no-await-in-loop -- sequential on purpose, see above */
-    for (let i = 0; i < ids.length; i += 1) {
+    /* eslint-disable no-restricted-syntax, no-await-in-loop -- sequential on purpose, see above */
+    for (const id of ids) {
       try {
-        await operation(String(ids[i]));
+        await operation(String(id));
         result.succeeded += 1;
       } catch (err) {
         result.failed += 1;
-        result.errors?.push(
-          `${String(ids[i])}: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        result.errors?.push(`${String(id)}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    /* eslint-enable no-await-in-loop */
+    /* eslint-enable no-restricted-syntax, no-await-in-loop */
 
     return result;
   }
@@ -573,7 +613,7 @@ export default class GraphService {
     const single = { mark_read: 'read', mark_unread: 'unread', flag: 'flag', unflag: 'unflag' }[
       action
     ] as 'read' | 'unread' | 'flag' | 'unflag';
-    return this.runBulk(ids, async (id) => this.setFlags(accountName, id, mailbox, single));
+    return GraphService.runBulk(ids, async (id) => this.setFlags(accountName, id, mailbox, single));
   }
 
   async bulkMove(
@@ -582,7 +622,9 @@ export default class GraphService {
     mailbox: string,
     destination: string,
   ): Promise<BulkResult> {
-    return this.runBulk(ids, async (id) => this.moveEmail(accountName, id, mailbox, destination));
+    return GraphService.runBulk(ids, async (id) =>
+      this.moveEmail(accountName, id, mailbox, destination),
+    );
   }
 
   async bulkDelete(
@@ -591,7 +633,9 @@ export default class GraphService {
     mailbox: string,
     permanent = false,
   ): Promise<BulkResult> {
-    return this.runBulk(ids, async (id) => this.deleteEmail(accountName, id, mailbox, permanent));
+    return GraphService.runBulk(ids, async (id) =>
+      this.deleteEmail(accountName, id, mailbox, permanent),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -639,28 +683,24 @@ export default class GraphService {
         .filter(Boolean)
         .map((address) => ({ emailAddress: { address } }));
 
-    const created = await this.client(accountName).request<{ id: string }>(
-      'POST',
-      '/me/messages',
-      {
-        subject: options.subject,
-        body: { contentType: options.html ? 'HTML' : 'Text', content: options.body },
-        toRecipients: recipients(options.to),
-        ccRecipients: recipients(options.cc),
-        bccRecipients: recipients(options.bcc),
-        ...(options.attachments?.length
-          ? {
-              attachments: options.attachments.map((attachment) => ({
-                '@odata.type': '#microsoft.graph.fileAttachment',
-                name: attachment.filename,
-                contentType: attachment.contentType,
-                contentBytes: attachment.content.toString('base64'),
-                ...(attachment.cid ? { isInline: true, contentId: attachment.cid } : {}),
-              })),
-            }
-          : {}),
-      },
-    );
+    const created = await this.client(accountName).request<{ id: string }>('POST', '/me/messages', {
+      subject: options.subject,
+      body: { contentType: options.html ? 'HTML' : 'Text', content: options.body },
+      toRecipients: recipients(options.to),
+      ccRecipients: recipients(options.cc),
+      bccRecipients: recipients(options.bcc),
+      ...(options.attachments?.length
+        ? {
+            attachments: options.attachments.map((attachment) => ({
+              '@odata.type': '#microsoft.graph.fileAttachment',
+              name: attachment.filename,
+              contentType: attachment.contentType,
+              contentBytes: attachment.content.toString('base64'),
+              ...(attachment.cid ? { isInline: true, contentId: attachment.cid } : {}),
+            })),
+          }
+        : {}),
+    });
 
     // Graph files new messages in Drafts itself; the id is opaque, not a UID.
     return { id: created.id, mailbox: 'Drafts' };
@@ -805,18 +845,17 @@ export default class GraphService {
           warnings.push(`attachments_remove named "${name}" but the draft has no such attachment`);
         }
       });
-      /* eslint-disable no-await-in-loop -- sequential: Graph throttles bursts */
-      for (let i = 0; i < doomed.length; i += 1) {
-        await client.request('DELETE', `/me/messages/${id}/attachments/${doomed[i].id}`);
+      /* eslint-disable no-restricted-syntax, no-await-in-loop -- sequential: Graph throttles bursts */
+      for (const attachment of doomed) {
+        await client.request('DELETE', `/me/messages/${id}/attachments/${attachment.id}`);
       }
-      /* eslint-enable no-await-in-loop */
+      /* eslint-enable no-restricted-syntax, no-await-in-loop */
     }
 
     if (options.attachmentsAdd?.length) {
       const resolved = await this.resolveAttachmentsForSend(accountName, options.attachmentsAdd);
-      /* eslint-disable no-await-in-loop -- sequential: Graph throttles bursts */
-      for (let i = 0; i < resolved.length; i += 1) {
-        const attachment = resolved[i];
+      /* eslint-disable no-restricted-syntax, no-await-in-loop -- sequential: Graph throttles bursts */
+      for (const attachment of resolved) {
         await client.request('POST', `/me/messages/${id}/attachments`, {
           '@odata.type': '#microsoft.graph.fileAttachment',
           name: attachment.filename,
@@ -825,11 +864,19 @@ export default class GraphService {
           ...(attachment.cid ? { isInline: true, contentId: attachment.cid } : {}),
         });
       }
-      /* eslint-enable no-await-in-loop */
+      /* eslint-enable no-restricted-syntax, no-await-in-loop */
     }
 
-    warnings.push('Draft updated in place (Graph); its id is unchanged and no copy was left behind.');
-    return { id, mailbox: options.mailbox ?? 'Drafts', oldId: id, oldDraftDeleted: false, warnings };
+    warnings.push(
+      'Draft updated in place (Graph); its id is unchanged and no copy was left behind.',
+    );
+    return {
+      id,
+      mailbox: options.mailbox ?? 'Drafts',
+      oldId: id,
+      oldDraftDeleted: false,
+      warnings,
+    };
   }
 
   async deleteDraft(accountName: string, draftId: number | string): Promise<void> {
@@ -854,9 +901,7 @@ export default class GraphService {
       actions: Record<string, unknown>;
     }[]
   > {
-    return this.client(accountName).collect(
-      '/me/mailFolders/inbox/messageRules',
-    );
+    return this.client(accountName).collect('/me/mailFolders/inbox/messageRules');
   }
 
   /**
@@ -933,10 +978,7 @@ export default class GraphService {
   }> {
     // The sub-resource returns the setting object itself (plus @odata.context),
     // not a wrapper, so it maps straight onto the result.
-    return this.client(accountName).request(
-      'GET',
-      '/me/mailboxSettings/automaticRepliesSetting',
-    );
+    return this.client(accountName).request('GET', '/me/mailboxSettings/automaticRepliesSetting');
   }
 
   /**
@@ -1003,18 +1045,18 @@ export default class GraphService {
     const collected: EmailMeta[] = [];
     let truncated = false;
 
-    /* eslint-disable no-await-in-loop -- one account at a time, Graph throttles */
-    for (let i = 0; i < names.length; i += 1) {
+    /* eslint-disable no-restricted-syntax, no-await-in-loop -- one account at a time, Graph throttles */
+    for (const name of names) {
       let page = 1;
       // Graph caps a page at 1000; walk pages until the row budget is reached.
       while (collected.length < maxRows) {
         const pageSize = Math.min(100, maxRows - collected.length);
-        const result = await this.searchEmails(names[i], query, {
+        const result = await this.searchEmails(name, query, {
           ...options,
           page,
           pageSize,
         });
-        collected.push(...result.items.map((item) => ({ ...item, account: names[i] })));
+        collected.push(...result.items.map((item) => ({ ...item, account: name })));
         if (!result.hasMore || result.items.length === 0) break;
         page += 1;
       }
@@ -1023,7 +1065,7 @@ export default class GraphService {
         break;
       }
     }
-    /* eslint-enable no-await-in-loop */
+    /* eslint-enable no-restricted-syntax, no-await-in-loop */
 
     return { items: collected.slice(0, maxRows), truncated };
   }
@@ -1037,7 +1079,13 @@ export default class GraphService {
     payload: { filename: string; mimeType: string; contentBase64: string },
     destination: string,
     overwrite: boolean,
-  ): Promise<{ filename: string; localPath: string; fileUrl: string; mimeType: string; size: number }> {
+  ): Promise<{
+    filename: string;
+    localPath: string;
+    fileUrl: string;
+    mimeType: string;
+    size: number;
+  }> {
     const { mkdir, stat, writeFile } = await import('node:fs/promises');
     const { dirname, join } = await import('node:path');
     const { pathToFileURL } = await import('node:url');
@@ -1077,7 +1125,13 @@ export default class GraphService {
     filename: string,
     destination: string,
     overwrite = false,
-  ): Promise<{ filename: string; localPath: string; fileUrl: string; mimeType: string; size: number }> {
+  ): Promise<{
+    filename: string;
+    localPath: string;
+    fileUrl: string;
+    mimeType: string;
+    size: number;
+  }> {
     const payload = await this.downloadAttachment(accountName, emailId, mailbox, filename);
     return GraphService.writeToDisk(payload, destination, overwrite);
   }
@@ -1103,11 +1157,11 @@ export default class GraphService {
       size: number;
     }[] = [];
 
-    /* eslint-disable no-await-in-loop -- sequential: Graph throttles bursts */
-    for (let i = 0; i < attachments.length; i += 1) {
-      const meta = attachments[i];
-      // Oversized attachments are skipped, matching the IMAP path.
-      if ((meta.size ?? 0) > maxSizeBytes) continue;
+    // Oversized attachments are skipped, matching the IMAP path.
+    const withinBudget = attachments.filter((meta) => (meta.size ?? 0) <= maxSizeBytes);
+
+    /* eslint-disable no-restricted-syntax, no-await-in-loop -- sequential: Graph throttles bursts */
+    for (const meta of withinBudget) {
       const full = await this.client(accountName).request<GraphAttachment>(
         'GET',
         `/me/messages/${emailId}/attachments/${meta.id}`,
@@ -1124,7 +1178,7 @@ export default class GraphService {
         ),
       );
     }
-    /* eslint-enable no-await-in-loop */
+    /* eslint-enable no-restricted-syntax, no-await-in-loop */
 
     return saved;
   }
@@ -1211,6 +1265,203 @@ export default class GraphService {
       mimeType: full.contentType ?? 'application/octet-stream',
       contentBase64: full.contentBytes ?? '',
       size: full.size ?? 0,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // En-têtes Internet complets
+  // -------------------------------------------------------------------------
+
+  /**
+   * En-têtes Internet complets d'un message Graph.
+   *
+   * Deux sources sont possibles, et l'ordre retenu est un compromis assumé :
+   *
+   *   1. `internetMessageHeaders` — quelques kilo-octets de JSON, une seule
+   *      requête. Graph rend la liste ordonnée et RÉPÉTÉE, donc la chaîne
+   *      `Received` est complète. Le bloc brut est reconstruit à partir de
+   *      cette liste : les valeurs sont exactes, le pliage d'origine non.
+   *   2. `$value` (MIME complet) — fidèle à l'octet, mais télécharge le message
+   *      entier, pièces jointes comprises. Utilisé en repli, quand Graph ne
+   *      fournit pas la liste (certains éléments de calendrier, messages de
+   *      boîtes partagées).
+   */
+  async getEmailHeaders(
+    accountName: string,
+    emailId: string,
+    mailbox = 'INBOX',
+  ): Promise<EmailHeaderDump> {
+    const client = this.client(accountName);
+
+    const message = await client.request<GraphMessage>(
+      'GET',
+      `/me/messages/${emailId}?$select=internetMessageHeaders`,
+    );
+    const listed = message.internetMessageHeaders ?? [];
+
+    if (listed.length > 0) {
+      const entries = toHeaderEntries(listed);
+      return {
+        emailId,
+        account: accountName,
+        mailbox,
+        raw: entries.map((entry) => `${entry.name}: ${entry.value}`).join('\r\n'),
+        entries,
+        grouped: groupHeaders(entries),
+        analysis: analyzeHeaders(entries),
+        rawReconstructed: true,
+      };
+    }
+
+    const raw = splitHeaderBlock(await client.getBinary(`/me/messages/${emailId}/$value`));
+    const entries = parseHeaderBlock(raw);
+    return {
+      emailId,
+      account: accountName,
+      mailbox,
+      raw,
+      entries,
+      grouped: groupHeaders(entries),
+      analysis: analyzeHeaders(entries),
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Export du message au format .eml
+  // -------------------------------------------------------------------------
+
+  /**
+   * Source MIME complète du message (`GET /messages/{id}/$value`).
+   *
+   * Ce sont les octets tels qu'Exchange les a reçus : c'est ce qui rend le
+   * `.eml` exploitable comme preuve (signatures DKIM et chaîne `Received`
+   * intactes), à la différence d'un message reconstruit depuis les propriétés
+   * Graph.
+   */
+  async getEmailRaw(accountName: string, emailId: string, _mailbox = 'INBOX'): Promise<Buffer> {
+    return this.client(accountName).getBinary(`/me/messages/${emailId}/$value`);
+  }
+
+  /** Écrit un message sur disque au format `.eml`, cf. `ImapService`. */
+  async saveEmailToDisk(
+    accountName: string,
+    emailId: string,
+    _mailbox: string,
+    destination: string,
+    overwrite = false,
+  ): Promise<EmailSaveResult> {
+    const { mkdir, stat, writeFile } = await import('node:fs/promises');
+    const { dirname, join } = await import('node:path');
+    const { pathToFileURL } = await import('node:url');
+
+    assertSafeDestination(destination);
+
+    const client = this.client(accountName);
+    // Sujet et date servent uniquement à nommer le fichier — deux propriétés,
+    // pas la sélection complète.
+    const meta = await client.request<GraphMessage>(
+      'GET',
+      `/me/messages/${emailId}?$select=subject,receivedDateTime,sentDateTime`,
+    );
+    const source = await client.getBinary(`/me/messages/${emailId}/$value`);
+
+    let targetPath: string;
+    try {
+      const info = await stat(destination);
+      targetPath = info.isDirectory()
+        ? join(
+            destination,
+            defaultEmlFilename(
+              emailId,
+              meta.subject ?? undefined,
+              meta.sentDateTime ?? meta.receivedDateTime,
+            ),
+          )
+        : destination;
+    } catch {
+      targetPath = destination;
+    }
+    // Le nom de fichier dérive du sujet, donc d'une source non maîtrisée.
+    assertSafeDestination(targetPath);
+
+    const finalPath = await resolveUniquePath(targetPath, overwrite);
+    await mkdir(dirname(finalPath), { recursive: true });
+    await writeFile(finalPath, source);
+
+    return {
+      emailId,
+      account: accountName,
+      path: finalPath,
+      fileUrl: pathToFileURL(finalPath).href,
+      size: source.length,
+      ...(meta.subject ? { subject: meta.subject } : {}),
+    };
+  }
+
+  /** Export `.eml` en lot depuis une recherche, cf. `ImapService`. */
+  async saveEmailsFromSearch(input: {
+    accountNames: string[] | null;
+    accountName: string | null;
+    query: string;
+    searchOptions: { mailbox?: string; [key: string]: unknown };
+    maxEmails: number;
+    destinationFolder: string;
+    organizeBy: 'flat' | 'date' | 'sender' | 'account';
+  }): Promise<BatchEmailSaveResult> {
+    const { mkdir } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+
+    assertSafeDestination(input.destinationFolder);
+    await mkdir(input.destinationFolder, { recursive: true });
+
+    const { items } = await this.searchForExport(
+      input.accountNames,
+      input.accountName,
+      input.query,
+      { ...input.searchOptions, maxRows: input.maxEmails },
+    );
+
+    let filesSaved = 0;
+    let totalSize = 0;
+    const errors: { emailId: string; account?: string; error: string }[] = [];
+
+    /* eslint-disable no-restricted-syntax, no-await-in-loop -- Graph limite les rafales */
+    for (const email of items) {
+      const accountForEmail = email.account ?? input.accountName;
+      if (!accountForEmail) {
+        errors.push({ emailId: email.id, error: 'Could not determine account for email' });
+      } else {
+        const subfolder = join(
+          input.destinationFolder,
+          exportSubfolder(input.organizeBy, email, accountForEmail),
+        );
+        try {
+          await mkdir(subfolder, { recursive: true });
+          const saved = await this.saveEmailToDisk(
+            accountForEmail,
+            email.id,
+            input.searchOptions.mailbox ?? 'INBOX',
+            subfolder,
+            false,
+          );
+          filesSaved += 1;
+          totalSize += saved.size;
+        } catch (err) {
+          errors.push({
+            emailId: email.id,
+            account: accountForEmail,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+    /* eslint-enable no-restricted-syntax, no-await-in-loop */
+
+    return {
+      folder: input.destinationFolder,
+      files_saved: filesSaved,
+      total_size: totalSize,
+      errors,
     };
   }
 }

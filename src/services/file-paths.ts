@@ -122,6 +122,54 @@ export function assertSafeDestination(absolutePath: string): void {
 }
 
 /**
+ * Nom de fichier `.eml` par défaut, quand l'appelant a désigné un répertoire
+ * plutôt qu'un fichier : `2026-08-05_Facture-de-juillet_1234.eml`.
+ *
+ * L'identifiant termine le nom pour distinguer deux messages de même sujet et
+ * de même jour ; {@link resolveUniquePath} couvre le reste des collisions. Le
+ * sujet est tronqué à 80 caractères pour rester sous les limites de longueur
+ * des systèmes de fichiers, et assaini car il provient de l'expéditeur.
+ *
+ * Partagé par les deux backends pour que l'arborescence produite soit la même,
+ * qu'un compte soit servi par IMAP ou par Graph.
+ */
+export function defaultEmlFilename(
+  emailId: string,
+  subject?: string,
+  sentAt?: Date | string,
+): string {
+  const parsed = sentAt === undefined ? undefined : new Date(sentAt);
+  const stamp =
+    parsed && !Number.isNaN(parsed.getTime()) ? parsed.toISOString().slice(0, 10) : 'sans-date';
+  return `${stamp}_${sanitizeFilename((subject ?? 'sans-objet').slice(0, 80))}_${sanitizeFilename(emailId)}.eml`;
+}
+
+/**
+ * Sous-dossier d'un export en lot pour un message donné. Chaîne vide en mode
+ * `flat` — `path.join` l'absorbe, la destination reste le dossier racine.
+ */
+export function exportSubfolder(
+  organizeBy: 'flat' | 'date' | 'sender' | 'account',
+  email: { date: string; from: { address: string } },
+  accountForEmail: string,
+): string {
+  if (organizeBy === 'date') {
+    const parsed = new Date(email.date);
+    return Number.isNaN(parsed.getTime())
+      ? 'unknown-date'
+      : `${parsed.getUTCFullYear()}-${String(parsed.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+  if (organizeBy === 'sender') {
+    const domain = email.from.address.includes('@')
+      ? (email.from.address.split('@')[1] ?? 'unknown-sender')
+      : 'unknown-sender';
+    return sanitizeFilename(domain);
+  }
+  if (organizeBy === 'account') return sanitizeFilename(accountForEmail);
+  return '';
+}
+
+/**
  * Given a desired destination path, return a unique path that does not
  * collide with an existing file. If `filename.ext` already exists, try
  * `filename-1.ext`, `filename-2.ext`, ... up to 9999.

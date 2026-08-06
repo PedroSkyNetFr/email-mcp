@@ -11,9 +11,11 @@ vi.mock('./contacts.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./cross-account-move.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./drafts.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./emails.tool.js', () => ({ default: vi.fn() }));
+vi.mock('./eml.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./exchange.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./export.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./folders.tool.js', () => ({ default: vi.fn() }));
+vi.mock('./headers.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./health.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./label.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./locate.tool.js', () => ({ default: vi.fn() }));
@@ -31,11 +33,13 @@ vi.mock('./watcher.tool.js', () => ({ default: vi.fn() }));
 
 import registerAccountsTools from './accounts.tool.js';
 import registerBulkTools from './bulk.tool.js';
-import registerExchangeTools from './exchange.tool.js';
 import registerCrossAccountMoveTool from './cross-account-move.tool.js';
 import registerDraftTools from './drafts.tool.js';
 import registerEmailsTools from './emails.tool.js';
+import registerEmlTools from './eml.tool.js';
+import registerExchangeTools from './exchange.tool.js';
 import registerFolderTools from './folders.tool.js';
+import registerHeaderTools from './headers.tool.js';
 import registerLabelTools from './label.tool.js';
 import registerManageTools from './manage.tool.js';
 import registerSchedulerTools from './scheduler.tool.js';
@@ -129,6 +133,10 @@ describe('registerAllTools', () => {
     // Read tools should still be registered
     expect(registerAccountsTools).toHaveBeenCalled();
     expect(registerEmailsTools).toHaveBeenCalled();
+    // .eml export and header inspection only read the mailbox (they write to
+    // disk, not to the server), so they stay available in read-only mode.
+    expect(registerEmlTools).toHaveBeenCalled();
+    expect(registerHeaderTools).toHaveBeenCalled();
     // Write tools should NOT be registered
     expect(registerSendTools).not.toHaveBeenCalled();
     expect(registerManageTools).not.toHaveBeenCalled();

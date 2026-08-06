@@ -38,6 +38,11 @@ Thank you for your interest in contributing! This guide will help you get starte
 | `pnpm format` | Format code with Biome |
 | `pnpm format:check` | Check formatting |
 | `pnpm check` | Run both Biome and ESLint |
+| `pnpm test` | Run the unit tests |
+| `pnpm test:watch` | Unit tests in watch mode |
+| `pnpm test:coverage` | Unit tests with coverage report |
+| `pnpm test:integration` | Integration tests — **requires a running Docker daemon** (GreenMail is started via testcontainers) |
+| `pnpm test:all` | Unit + integration |
 
 ### Code Style
 
@@ -67,13 +72,24 @@ src/
 ├── cli/                 # CLI commands (setup, test, config)
 ├── config/              # Config loading + validation
 ├── connections/         # IMAP/SMTP connection management
-├── services/            # Business logic (IMAP, SMTP, calendar, etc.)
+├── services/            # Business logic (IMAP, Graph, SMTP, calendar, etc.)
+│   └── graph/           # Microsoft Graph backend (Exchange / Outlook.com)
+├── routing/             # Cross-account move logic
 ├── tools/               # MCP tool definitions
 ├── resources/           # MCP resource definitions
 ├── prompts/             # MCP prompt definitions
 ├── safety/              # Rate limiter + audit logging
-└── types/               # TypeScript type definitions
+├── utils/               # Pure helpers (body formatting, header parsing, dates)
+├── types/               # TypeScript type definitions
+└── __integration__/     # Integration tests (GreenMail via testcontainers)
 ```
+
+Two backends serve accounts side by side: `ImapService` by default, `GraphService`
+for accounts declared with `backend = "graph"`. `services/mail-router.ts` dispatches
+per account. **A change must keep both working** — when you add a method to
+`ImapService` it becomes part of the `IMailService` contract, and a Graph account
+calling it gets an explicit "not supported yet" error until `GraphService`
+implements it too.
 
 ## Adding a New MCP Tool
 
@@ -81,8 +97,19 @@ src/
 2. Export a default function that takes the MCP server + services
 3. Use `server.tool()` with Zod schemas for input validation
 4. Add tool annotations (`readOnlyHint`, `destructiveHint`, etc.)
-5. Register it in `src/tools/register.ts`
-6. Add to the tools reference table in `README.md`
+5. Put the logic in a service method, not in the tool handler — the handler should
+   parse input, call the service and format the response, so the behaviour stays
+   unit-testable without an MCP server
+6. Implement that method on **both** backends (`ImapService` and `GraphService`),
+   or accept that Graph accounts will get the router's "not supported yet" error
+7. If the method does not take the account name as its first argument, declare its
+   shape in `ACCOUNTS_IN_ARGS` (`src/services/mail-router.ts`) — otherwise calls
+   for Graph accounts are silently routed to IMAP
+8. Register it in `src/tools/register.ts` (read tools are always registered; write
+   tools go inside the `if (!readOnly)` block) and add it to the mock list in
+   `src/tools/register.test.ts`
+9. Add to the tools reference table in `README.md`, and keep the tool counts in the
+   section headings in sync
 
 ## Pull Request Process
 
