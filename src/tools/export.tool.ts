@@ -19,6 +19,13 @@ import { toCsvRow } from '../services/csv.js';
 import { assertSafeDestination } from '../services/file-paths.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import type { EmailMeta } from '../types/index.js';
+import {
+  FROM_DESCRIPTION,
+  literalFilterOptions,
+  literalFilterParams,
+  SUBJECT_DESCRIPTION,
+  TO_DESCRIPTION,
+} from './search-filter-params.js';
 
 /** Column names understood for CSV output. */
 type CsvColumn =
@@ -169,9 +176,10 @@ export default function registerExportTools(
         .describe('Cross-account fan-out; defaults to every configured account'),
       mailbox: z.string().default('INBOX'),
       query: z.string().optional().default(''),
-      to: z.string().optional(),
-      from: z.string().optional(),
-      subject: z.string().optional(),
+      to: z.string().optional().describe(TO_DESCRIPTION),
+      from: z.string().optional().describe(FROM_DESCRIPTION),
+      subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
+      ...literalFilterParams,
       cc: z.string().optional(),
       bcc: z.string().optional(),
       text: z.string().optional(),
@@ -274,6 +282,7 @@ export default function registerExportTools(
             attachmentFilename: params.attachment_filename,
             attachmentMimetype: params.attachment_mimetype,
             gmailRaw: params.gmail_raw,
+            ...literalFilterOptions(params),
             maxRows: params.max_rows,
           },
         );
@@ -296,9 +305,22 @@ export default function registerExportTools(
               text: JSON.stringify(
                 {
                   path: destination,
+                  matched: items.length,
                   rows_written: rowsWritten,
                   truncated,
                   format: params.format,
+                  // Un export vide n'est pas nécessairement une boîte vide : le
+                  // filtre est interprété par le serveur, qui indexe des jetons.
+                  ...(items.length === 0
+                    ? {
+                        notes: [
+                          'The SEARCH returned no message. If you expected matches, suspect the ' +
+                            'filter rather than the mailbox: from/to/subject are matched by the ' +
+                            'server on indexed tokens, so a parent domain misses its subdomains. ' +
+                            'Retry with from_contains for a literal match.',
+                        ],
+                      }
+                    : {}),
                 },
                 null,
                 2,

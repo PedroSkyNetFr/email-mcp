@@ -555,6 +555,10 @@ export interface AttachmentSaveResult {
 
 export interface BatchAttachmentResult {
   folder: string;
+  /** Messages the search returned — see {@link BatchEmailSaveResult.matched}. */
+  matched: number;
+  /** True when the search hit `max_emails` and the set is a prefix, not the whole. */
+  truncated: boolean;
   files_saved: number;
   total_size: number;
   skipped: number;
@@ -604,9 +608,27 @@ export interface EmailSaveResult {
   subject?: string;
 }
 
-/** Bilan d'un export de messages en lot. */
+/**
+ * Bilan d'un export de messages en lot.
+ *
+ * `matched` est délibérément rapporté à côté de `files_saved`. Sans lui, un
+ * export incomplet est indiscernable d'un dossier vide : `files_saved: 1` avec
+ * `errors: []` se lit comme un succès, alors que la RECHERCHE peut n'avoir
+ * ramené qu'un message sur neuf — les filtres d'en-tête sont interprétés par le
+ * serveur, dont l'index ne fait pas forcément la correspondance de sous-chaîne
+ * attendue. L'écriture, elle, n'a rien raté.
+ *
+ * Avec `matched`, l'appelant distingue les trois cas : la recherche n'a rien
+ * trouvé (`matched: 0`), elle a trouvé moins que prévu (`matched` inférieur à
+ * l'attendu — c'est le critère qu'il faut revoir), ou l'écriture a échoué
+ * (`matched` supérieur à `files_saved`, avec le détail dans `errors`).
+ */
 export interface BatchEmailSaveResult {
   folder: string;
+  /** Messages retournés par la recherche, avant toute écriture. */
+  matched: number;
+  /** True quand la recherche a atteint `max_emails` : le lot est un préfixe. */
+  truncated: boolean;
   files_saved: number;
   total_size: number;
   errors: { emailId: string; account?: string; error: string }[];

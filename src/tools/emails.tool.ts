@@ -17,6 +17,14 @@ import type {
 } from '../types/index.js';
 import type { BodyFormat } from '../utils/body-format.js';
 import { applyBodyFormat } from '../utils/body-format.js';
+import {
+  FROM_DESCRIPTION,
+  literalFilterOptions,
+  literalFilterParams,
+  SERVER_MATCH_CAVEAT,
+  SUBJECT_DESCRIPTION,
+  TO_DESCRIPTION,
+} from './search-filter-params.js';
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -223,11 +231,12 @@ export default function registerEmailsTools(
           'Date header: sent on/after (differs from since which uses internal delivery date)',
         ),
       sent_before: z.string().optional().describe('Date header: sent before'),
-      from: z.string().optional().describe('Filter by sender address or name'),
-      subject: z.string().optional().describe('Substring in Subject'),
-      to: z.string().optional().describe('Substring in To'),
-      cc: z.string().optional().describe('Substring in Cc'),
-      bcc: z.string().optional().describe('Substring in Bcc'),
+      from: z.string().optional().describe(FROM_DESCRIPTION),
+      subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
+      to: z.string().optional().describe(TO_DESCRIPTION),
+      ...literalFilterParams,
+      cc: z.string().optional().describe(`Filter by Cc. ${SERVER_MATCH_CAVEAT}`),
+      bcc: z.string().optional().describe(`Filter by Bcc. ${SERVER_MATCH_CAVEAT}`),
       text: z.string().optional().describe('Any text field (headers + body)'),
       body: z.string().optional().describe('Body only'),
       seen: z.boolean().optional().describe('true = read only; false = unread only'),
@@ -307,6 +316,7 @@ export default function registerEmailsTools(
           attachmentFilename: params.attachment_filename,
           attachmentMimetype: params.attachment_mimetype,
           gmailRaw: params.gmail_raw,
+          ...literalFilterOptions(params),
         });
 
         // R4: list_emails has its OWN inline empty path (it does not use
@@ -616,11 +626,12 @@ export default function registerEmailsTools(
       mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
       page: z.number().int().min(1).default(1).describe('Page number'),
       pageSize: z.number().int().min(1).max(100).default(20).describe('Results per page'),
-      to: z.string().optional().describe('Filter by recipient address'),
-      from: z.string().optional().describe('Filter by sender address or name'),
-      subject: z.string().optional().describe('Substring in Subject'),
-      cc: z.string().optional().describe('Substring in Cc'),
-      bcc: z.string().optional().describe('Substring in Bcc'),
+      to: z.string().optional().describe(TO_DESCRIPTION),
+      from: z.string().optional().describe(FROM_DESCRIPTION),
+      subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
+      ...literalFilterParams,
+      cc: z.string().optional().describe(`Filter by Cc. ${SERVER_MATCH_CAVEAT}`),
+      bcc: z.string().optional().describe(`Filter by Bcc. ${SERVER_MATCH_CAVEAT}`),
       text: z.string().optional().describe('Any text field (headers + body)'),
       body: z.string().optional().describe('Body only'),
       since: z
@@ -723,6 +734,7 @@ export default function registerEmailsTools(
           attachmentMimetype: params.attachment_mimetype,
           facets: params.facets,
           gmailRaw: params.gmail_raw,
+          ...literalFilterOptions(params),
         });
 
         const totalDisplay = result.totalApprox ? `~${result.total}` : `${result.total}`;
@@ -789,9 +801,10 @@ export default function registerEmailsTools(
         .max(100)
         .default(20)
         .describe('Results per page (merged across accounts)'),
-      to: z.string().optional(),
-      from: z.string().optional(),
-      subject: z.string().optional(),
+      to: z.string().optional().describe(TO_DESCRIPTION),
+      from: z.string().optional().describe(FROM_DESCRIPTION),
+      subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
+      ...literalFilterParams,
       cc: z.string().optional(),
       bcc: z.string().optional(),
       text: z.string().optional(),
@@ -874,6 +887,7 @@ export default function registerEmailsTools(
           attachmentMimetype: params.attachment_mimetype,
           facets: params.facets,
           gmailRaw: params.gmail_raw,
+          ...literalFilterOptions(params),
         });
 
         const totalDisplay = result.totalApprox ? `~${result.total}` : `${result.total}`;

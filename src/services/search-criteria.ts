@@ -40,6 +40,29 @@ export interface SearchParams {
   attachmentFilename?: string;
   /** Regex (case-insensitive) applied to `${type}/${subtype}` of each attachment. */
   attachmentMimetype?: string;
+  /**
+   * Literal substring match on the `From` header, applied HERE rather than by
+   * the server.
+   *
+   * `from` is handed to the server untouched, so what it matches is whatever
+   * the server's index does. RFC 3501 defines `SEARCH FROM` as a substring
+   * match, but a server with a full-text index (Dovecot FTS, and OVH's in
+   * particular) matches indexed TOKENS instead: searching
+   * `enviropro-salon.fr` then misses `contact@news.enviropro-salon.fr`, and
+   * `salon.fr` misses everything — while the shorter `enviropro` matches both.
+   * A caller expecting `contains` gets a silent subset.
+   *
+   * These `*Contains` filters never reach the server. The set the server
+   * returns is filtered here on the decoded header, so the result is the same
+   * on every provider. The cost is that the server-side query must be wide
+   * enough to contain the answer — hence the warning when nothing else narrows
+   * it.
+   */
+  fromContains?: string;
+  /** Literal substring match on any `To` recipient. See {@link fromContains}. */
+  toContains?: string;
+  /** Literal substring match on the decoded subject. See {@link fromContains}. */
+  subjectContains?: string;
   /** Faceted counts to return alongside the paginated result. */
   facets?: ('sender' | 'year' | 'mailbox')[];
   gmailRaw?: string;
@@ -51,6 +74,9 @@ export interface BuildResult {
     hasAttachment?: boolean;
     attachmentFilename?: string;
     attachmentMimetype?: string;
+    fromContains?: string;
+    toContains?: string;
+    subjectContains?: string;
     facets?: ('sender' | 'year' | 'mailbox')[];
   };
   gmailRawUsed: boolean;
@@ -186,18 +212,85 @@ export function buildSearchCriteria(params: SearchParams, opts: { isGmail: boole
   const nonEmpty = (v: string | undefined): boolean => v !== undefined && v.length > 0;
   const bodyScan = nonEmpty(params.query) || nonEmpty(params.body) || nonEmpty(params.text);
 
+  // A `*Contains` filter narrows nothing server-side. On its own it therefore
+  // asks the server for the whole mailbox and sifts the result here — correct,
+  // but worth saying out loud on a folder of any size, and worth pairing with a
+  // date range or a coarse `from` when the caller knows one.
+  const literalOnly =
+    (nonEmpty(params.fromContains) ||
+      nonEmpty(params.toContains) ||
+      nonEmpty(params.subjectContains)) &&
+    andConditions.length === 0;
+  if (literalOnly) {
+    warnings.push(
+      'ℹ️ from_contains / to_contains / subject_contains are matched locally, not by the server. ' +
+        'With no other filter the whole mailbox is scanned — add since/before, or a coarse from, ' +
+        'to keep it bounded.',
+    );
+  }
+
   return {
     criteria,
     postFilters: {
       hasAttachment: params.hasAttachment,
       attachmentFilename: params.attachmentFilename,
       attachmentMimetype: params.attachmentMimetype,
+      fromContains: params.fromContains,
+      toContains: params.toContains,
+      subjectContains: params.subjectContains,
       facets: params.facets,
     },
     gmailRawUsed: false,
     bodyScan,
     warnings,
   };
+}
+
+/** Forme d'un message telle qu'utilisée par les filtres littéraux. */
+interface MatchableMessage {
+  subject: string;
+  from: { name?: string; address: string };
+  to: { name?: string; address: string }[];
+}
+
+/** Recompose un en-tête d'adresse : `Nom <adresse>`, ou l'adresse seule. */
+function addressText(entry: { name?: string; address: string } | undefined): string {
+  if (!entry) return '';
+  return entry.name ? `${entry.name} <${entry.address}>` : entry.address;
+}
+
+/**
+ * Applique les filtres littéraux (`*Contains`) à un jeu de résultats.
+ *
+ * Partagé par les deux chemins de recherche et les deux backends : c'est ce qui
+ * garantit qu'un même critère donne le même résultat sur IMAP et sur Graph,
+ * indépendamment de ce que chaque index de serveur juge être une
+ * correspondance. La comparaison est faite en minuscules sur l'en-tête
+ * reconstitué, donc `enviropro-salon.fr` retrouve bien
+ * `ENVIROpro Rennes <contact@news.enviropro-salon.fr>`.
+ */
+export function applyLiteralFilters<T extends MatchableMessage>(
+  items: T[],
+  filters: { fromContains?: string; toContains?: string; subjectContains?: string },
+): T[] {
+  let out = items;
+
+  if (filters.fromContains) {
+    const needle = filters.fromContains.toLowerCase();
+    out = out.filter((m) => addressText(m.from).toLowerCase().includes(needle));
+  }
+  if (filters.toContains) {
+    const needle = filters.toContains.toLowerCase();
+    out = out.filter((m) =>
+      (m.to ?? []).some((t) => addressText(t).toLowerCase().includes(needle)),
+    );
+  }
+  if (filters.subjectContains) {
+    const needle = filters.subjectContains.toLowerCase();
+    out = out.filter((m) => (m.subject ?? '').toLowerCase().includes(needle));
+  }
+
+  return out;
 }
 
 /** Splits a UID list into fixed-size chunks — handy for bounded FETCH ranges. */

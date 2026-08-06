@@ -12,6 +12,7 @@ import { sanitizeMailboxName } from '../safety/validation.js';
 import type {
   AttachmentMeta,
   AttachmentSaveResult,
+  BatchAttachmentResult,
   BatchEmailSaveResult,
   BulkResult,
   Contact,
@@ -52,7 +53,7 @@ import { detectLabelStrategy } from './label-strategy.js';
 import type { MailboxRef } from './mailbox-resolver.js';
 import { resolveMailboxForAccount } from './mailbox-resolver.js';
 import type { SearchParams } from './search-criteria.js';
-import { buildSearchCriteria, chunkUids } from './search-criteria.js';
+import { applyLiteralFilters, buildSearchCriteria, chunkUids } from './search-criteria.js';
 import {
   connectionErrorStatus,
   SearchFailedError,
@@ -1063,6 +1064,11 @@ export default class ImapService {
         if (items.length !== pageUids.length) totalApprox = true;
       }
 
+      // Literal (server-independent) header filters.
+      const beforeLiteral = items.length;
+      items = applyLiteralFilters(items, postFilters);
+      if (items.length !== beforeLiteral) totalApprox = true;
+
       // Sort by date descending
       items.sort(
         (a, b) => safeDate(b.date, new Date(0)).getTime() - safeDate(a.date, new Date(0)).getTime(),
@@ -1413,6 +1419,11 @@ export default class ImapService {
         });
         if (items.length !== pageUids.length) totalApprox = true;
       }
+
+      // Literal (server-independent) header filters.
+      const beforeLiteral = items.length;
+      items = applyLiteralFilters(items, postFilters);
+      if (items.length !== beforeLiteral) totalApprox = true;
 
       items.sort(
         (a, b) => safeDate(b.date, new Date(0)).getTime() - safeDate(a.date, new Date(0)).getTime(),
@@ -3432,6 +3443,9 @@ export default class ImapService {
         items = items.filter((m) => (m.attachments ?? []).some((a) => re.test(a.mimeType)));
       }
 
+      // Literal (server-independent) header filters — see applyLiteralFilters.
+      items = applyLiteralFilters(items, postFilters);
+
       items.sort(
         (a, b) => safeDate(b.date, new Date(0)).getTime() - safeDate(a.date, new Date(0)).getTime(),
       );
@@ -3565,20 +3579,14 @@ export default class ImapService {
     organizeBy: 'flat' | 'date' | 'sender' | 'account';
     attachmentFilename?: string;
     attachmentMimetype?: string;
-  }): Promise<{
-    folder: string;
-    files_saved: number;
-    total_size: number;
-    skipped: number;
-    errors: { emailId: string; filename: string; error: string }[];
-  }> {
+  }): Promise<BatchAttachmentResult> {
     const { mkdir } = await import('node:fs/promises');
     const { join } = await import('node:path');
 
     assertSafeDestination(input.destinationFolder);
     await mkdir(input.destinationFolder, { recursive: true });
 
-    const { items } = await this.searchForExport(
+    const { items, truncated } = await this.searchForExport(
       input.accountNames,
       input.accountName,
       input.query,
@@ -3661,6 +3669,8 @@ export default class ImapService {
 
     return {
       folder: input.destinationFolder,
+      matched: items.length,
+      truncated,
       files_saved: filesSaved,
       total_size: totalSize,
       skipped,
@@ -3854,7 +3864,7 @@ export default class ImapService {
     assertSafeDestination(input.destinationFolder);
     await mkdir(input.destinationFolder, { recursive: true });
 
-    const { items } = await this.searchForExport(
+    const { items, truncated } = await this.searchForExport(
       input.accountNames,
       input.accountName,
       input.query,
@@ -3901,6 +3911,8 @@ export default class ImapService {
 
     return {
       folder: input.destinationFolder,
+      matched: items.length,
+      truncated,
       files_saved: filesSaved,
       total_size: totalSize,
       errors,

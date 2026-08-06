@@ -1229,6 +1229,41 @@ the body and switches the message to HTML. **Like the password, this is just
 config — no code or HTML to touch.** The MCP server must run on the machine
 where that signature path exists (e.g. your local build on Windows).
 
+## How the `from` / `to` / `subject` filters actually match
+
+These filters are handed to the **mail server**, which decides what matches. RFC 3501 defines `SEARCH FROM` as a substring match, but a server with a full-text index (Dovecot FTS, as deployed by OVH among others) matches indexed **tokens** instead. Observed on a real mailbox holding nine messages from two ENVIROpro domains:
+
+| `from:` | Messages returned | Substring would give |
+|---|---|---|
+| `enviropro` | 9 | 9 |
+| `enviropro-salon.fr` | **1** | 9 |
+| `news.enviropro-salon.fr` | 8 | 8 |
+| `salon.fr` | **0** | 9 |
+
+A parent domain does not find its subdomains, and a fragment starting mid-token finds nothing — while a *shorter* prefix finds everything. Nothing in the response distinguishes this from an empty mailbox.
+
+**When the result must be exhaustive, use the literal variants** — `from_contains`, `to_contains`, `subject_contains`. They are matched here, on the decoded header, so the result no longer depends on the server's index and is identical on IMAP and Graph:
+
+```jsonc
+{ "account": "work", "mailbox": "Junk", "from_contains": "enviropro-salon.fr" }  // → 9
+```
+
+They do not narrow the server-side query, so pair them with `since`/`before` or a coarse `from` on a large mailbox; the tool warns when nothing else bounds the scan.
+
+Available on `search_emails`, `search_all_accounts`, `list_emails`, `export_search`, `save_emails_from_search` and `save_all_attachments_from_search`.
+
+### Reading an export result
+
+The batch tools report `matched` (what the search returned) next to `files_saved` (what was written), plus `truncated`:
+
+```jsonc
+{ "matched": 9, "files_saved": 9, "truncated": false }   // complete
+{ "matched": 1, "files_saved": 1, "truncated": false }   // the QUERY is the problem
+{ "matched": 9, "files_saved": 7, "error_count": 2 }     // the WRITE is the problem
+```
+
+Without `matched`, the middle case is indistinguishable from an empty folder — which is the worst failure mode for an archival tool, since it presents a partial export as a success. When `matched` is 0, or lower than you expected, the response now says so and points at the filter.
+
 ## Internet Headers
 
 `get_email` exposes a flattened `headers` map — one value per name. That is enough to read a `List-Unsubscribe`, and useless for tracing a message: a real message crosses 5–10 relays and carries that many `Received:` lines, and a map keeps only one of them.

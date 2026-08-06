@@ -48,6 +48,7 @@ import {
   sanitizeFilename,
 } from '../file-paths.js';
 import type ImapService from '../imap.service.js';
+import { applyLiteralFilters } from '../search-criteria.js';
 import { applyAccountSignature } from '../signature-loader.js';
 import type GraphClient from './graph.client.js';
 
@@ -411,6 +412,9 @@ export default class GraphService {
       seen?: boolean;
       flagged?: boolean;
       hasAttachment?: boolean;
+      fromContains?: string;
+      toContains?: string;
+      subjectContains?: string;
     } = {},
   ): Promise<PaginatedResult<EmailMeta>> {
     const text = [query, options.subject, options.from, options.to]
@@ -419,7 +423,8 @@ export default class GraphService {
       .trim();
 
     if (!text) {
-      return this.listEmails(accountName, options);
+      const listed = await this.listEmails(accountName, options);
+      return { ...listed, items: applyLiteralFilters(listed.items, options) };
     }
 
     const page = options.page ?? 1;
@@ -439,7 +444,9 @@ export default class GraphService {
         `&$top=${wanted}`,
     );
 
-    const all = response.value.map(toEmailMeta);
+    // `$search` matches indexed tokens, exactly like the IMAP full-text case, so
+    // the literal filters are applied here too — same result on both backends.
+    const all = applyLiteralFilters(response.value.map(toEmailMeta), options);
     const items = all.slice((page - 1) * pageSize, page * pageSize);
     return {
       items,
@@ -1414,7 +1421,7 @@ export default class GraphService {
     assertSafeDestination(input.destinationFolder);
     await mkdir(input.destinationFolder, { recursive: true });
 
-    const { items } = await this.searchForExport(
+    const { items, truncated } = await this.searchForExport(
       input.accountNames,
       input.accountName,
       input.query,
@@ -1459,6 +1466,8 @@ export default class GraphService {
 
     return {
       folder: input.destinationFolder,
+      matched: items.length,
+      truncated,
       files_saved: filesSaved,
       total_size: totalSize,
       errors,
