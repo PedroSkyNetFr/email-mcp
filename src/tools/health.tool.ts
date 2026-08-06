@@ -8,7 +8,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
+import { PKG_VERSION } from '../server.js';
 import type { IMailService } from '../services/mail-service.types.js';
+import { buildInfo } from '../utils/build-info.js';
 
 export default function registerHealthTools(
   server: McpServer,
@@ -17,7 +19,10 @@ export default function registerHealthTools(
 ): void {
   server.tool(
     'check_health',
-    'Check connection health, quota, and capabilities for email accounts. Useful for diagnosing issues.',
+    'Check connection health, quota, and capabilities for email accounts. Also reports which ' +
+      'build of the server is actually running (version, source, build date) — check this first ' +
+      'when a documented tool seems to be missing: a stdio MCP server keeps serving the code it ' +
+      'was started with, so an old compiled build looks exactly like a feature that does not exist.',
     {
       account: z.string().optional().describe('Account name (checks all accounts if omitted)'),
     },
@@ -115,11 +120,22 @@ export default function registerHealthTools(
         }),
       );
 
+      // L'identité du build vient en tête : c'est la première chose à vérifier
+      // quand un outil documenté paraît absent.
+      const build = await buildInfo(PKG_VERSION);
+      const serverBuild = {
+        ...build,
+        note:
+          build.runningFrom === 'dist'
+            ? 'Running compiled code. A change under src/ needs `pnpm build` AND a restart of the MCP client before it is visible.'
+            : 'Running from source. A change needs only a restart of the MCP client.',
+      };
+
       return {
         content: [
           {
             type: 'text' as const,
-            text: JSON.stringify({ accounts: results }, null, 2),
+            text: JSON.stringify({ server_build: serverBuild, accounts: results }, null, 2),
           },
         ],
       };

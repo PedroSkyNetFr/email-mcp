@@ -46,3 +46,8 @@ pre-push:
       run: pnpm test
     check:
       run: pnpm check
+    # dist/ is what the MCP client actually executes. Left to drift, a change
+    # under src/ is invisible at runtime and reads exactly like a missing
+    # feature — so the build runs here rather than being remembered.
+    build:
+      run: pnpm build

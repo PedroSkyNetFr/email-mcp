@@ -91,6 +91,41 @@ per account. **A change must keep both working** — when you add a method to
 calling it gets an explicit "not supported yet" error until `GraphService`
 implements it too.
 
+## Seeing Your Change in an MCP Client
+
+An MCP server over stdio is a process the client spawns at startup. Two things
+therefore stand between an edit and a tool an assistant can call:
+
+1. **The build.** MCP clients are usually configured to run `dist/main.js`, so a
+   change under `src/` is invisible until `pnpm build`. The pre-push hook runs
+   the build for this reason, but between commits it is on you.
+2. **The client restart.** Even with a fresh `dist/`, the already-running server
+   process keeps serving the code it started with. Restart the client (or
+   reconnect the server) to reload the tool list.
+
+The failure mode is quiet and easy to misread: a newly added tool is simply
+absent from `tools/list`, which reads exactly like "that feature does not
+exist". `check_health` reports which build is actually running — version,
+`src` vs `dist`, and the build date — so check that first when a documented
+tool appears to be missing.
+
+To take the build step out of the loop entirely during development, point the
+client at the sources instead of the compiled output:
+
+```jsonc
+{
+  "command": "node",
+  "args": [
+    "<repo>/node_modules/tsx/dist/cli.mjs",
+    "<repo>/src/main.ts",
+    "stdio"
+  ]
+}
+```
+
+The client restart is still required, but `dist/` can no longer go stale
+underneath you.
+
 ## Adding a New MCP Tool
 
 1. Create a new file in `src/tools/` (e.g., `my-feature.tool.ts`)
