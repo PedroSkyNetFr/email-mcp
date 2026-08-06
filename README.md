@@ -6,9 +6,9 @@
 [![npm downloads](https://img.shields.io/npm/dm/@codefuturist/email-mcp.svg?style=flat-square)](https://www.npmjs.com/package/@codefuturist/email-mcp)
 [![CI](https://img.shields.io/github/actions/workflow/status/codefuturist/email-mcp/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/codefuturist/email-mcp/actions/workflows/ci.yml)
 
-An MCP (Model Context Protocol) server providing comprehensive email capabilities via IMAP and SMTP.
+An MCP (Model Context Protocol) server providing comprehensive email capabilities via IMAP and SMTP, or via Microsoft Graph for Exchange / Outlook.com accounts.
 
-Enables AI assistants to read, search, send, manage, schedule, and analyze emails across multiple accounts. Exposes 47 tools, 7 prompts, and 6 resources over the MCP protocol with OAuth2 support _(experimental)_, email scheduling, calendar extraction, analytics, provider-aware label management, real-time IMAP IDLE watcher with AI-powered triage, customizable presets and static rules, and a guided setup wizard.
+Enables AI assistants to read, search, send, manage, schedule, export and analyze emails across multiple accounts. Exposes 64 tools, 7 prompts, and 6 resources over the MCP protocol with OAuth2 support _(experimental)_, email scheduling, calendar extraction, analytics, provider-aware label management, real-time IMAP IDLE watcher with AI-powered triage, customizable presets and static rules, `.eml` export, full Internet-header inspection, and a guided setup wizard.
 
 ## Highlights
 
@@ -24,6 +24,8 @@ Enables AI assistants to read, search, send, manage, schedule, and analyze email
 | Desktop & webhook alerts | ✅ | ❌ |
 | Calendar (ICS) extraction | ✅ | ❌ |
 | Email analytics | ✅ | ❌ |
+| `.eml` export (verbatim RFC822) | ✅ | ❌ |
+| Full Internet headers + Received/SPF/DKIM/DMARC analysis | ✅ | ❌ |
 | OAuth2 (Gmail / M365) | ✅ _experimental_ | ❌ |
 | Guided setup wizard | ✅ auto-detect | ❌ |
 
@@ -548,14 +550,15 @@ For single-account setups (overrides config file):
 | `MCP_EMAIL_SMTP_POOL_MAX_MESSAGES` | `100` | Max messages per pooled connection |
 | `MCP_EMAIL_RATE_LIMIT` | `10` | Max sends per minute |
 | `MCP_EMAIL_SIGNATURE_PATH` | — | Path to an Outlook `.htm` signature for `append_signature` |
-| `MAIL_ALLOWED_SAVE_DIRS` | — | Extra directories where attachments/exports may be written (see below) |
+| `MAIL_ALLOWED_SAVE_DIRS` | — | Extra directories where attachments, `.eml` messages and exports may be written (see below) |
 | `MAIL_ALLOW_ANY_SAVE_DIR` | `false` | `true` disables the allow-list entirely (any absolute path) |
 
-#### Where attachments can be saved (`MAIL_ALLOWED_SAVE_DIRS`)
+#### Where files can be saved (`MAIL_ALLOWED_SAVE_DIRS`)
 
-`save_attachment`, `save_all_attachments_from_search` and the CSV/NDJSON export
-tool refuse to write outside an allow‑list of root directories, as a guard‑rail
-against path‑traversal. By default the allow‑list is:
+`save_attachment`, `save_all_attachments_from_search`, `save_email`,
+`save_emails_from_search` and the CSV/NDJSON export tool refuse to write outside
+an allow‑list of root directories, as a guard‑rail against path‑traversal. By
+default the allow‑list is:
 
 - the user's home directory, and
 - the OS temp directory.
@@ -1024,7 +1027,15 @@ seen    = false
 
 ## Export & Attachment Save
 
-Three tools that write directly to disk under `~/Downloads/` (or a caller-supplied path under `$HOME` / `/tmp`). Every path is validated — attempts to write to `/etc`, `/System`, `/usr/bin`, etc. are rejected, and `..` traversal is stripped.
+Five tools that write directly to disk under `~/Downloads/` (or a caller-supplied path under `$HOME` / `/tmp`). Every path is validated — attempts to write to `/etc`, `/System`, `/usr/bin`, etc. are rejected, and `..` traversal is stripped.
+
+Pick by what you want to keep:
+
+| Want | Tool | Writes |
+|---|---|---|
+| Metadata of many messages | `export_search` | one CSV / NDJSON file |
+| The messages themselves | `save_email`, `save_emails_from_search` | one `.eml` per message |
+| Files sent with the messages | `save_attachment`, `save_all_attachments_from_search` | the attachments |
 
 ### `export_search`
 
@@ -1053,6 +1064,41 @@ Default CSV columns (snake_case headers): `id`, `account`, `date`, `from`, `subj
 NDJSON mode emits one `JSON.stringify(EmailMeta)` per line — the `columns` parameter is ignored and the full structured record (including attachments array) is dumped.
 
 `max_rows` defaults to 5000 (hard ceiling 50 000). When the underlying match set is larger the file is truncated and the response sets `truncated: true`.
+
+### `save_email`
+
+Write one message to disk as a **`.eml`** file — the exact RFC822 source the server returned, byte for byte. Nothing is re-encoded, so the file reopens in any mail client (Thunderbird, Outlook, Apple Mail, `mutt -f`) with its attachments and formatting, the DKIM signature and `Received` chain stay verifiable, and the message survives deletion on the server. That last point is what `export_search` cannot give you: CSV/NDJSON records *about* a message, `.eml` is the message.
+
+```jsonc
+{
+  "account":     "wgs-usa",
+  "emailId":     "12345",
+  "mailbox":     "INBOX",
+  "destination": "/Users/me/Downloads"   // optional — file or directory
+}
+```
+
+When `destination` is a directory (or omitted — defaults to `~/Downloads/`), the filename is derived from the message: `2026-08-05_Signed lease v7_12345.eml`. The subject is sanitised and truncated, and the id keeps two same-day/same-subject messages apart. Auto-collision suffix as elsewhere: `…-1.eml` unless `overwrite: true`.
+
+There is no size cap. The parse ceiling that guards `get_email` is a *display* guard; applying it here would produce truncated, unopenable files.
+
+Works on both backends: IMAP fetches the message source, Graph reads the full MIME through `GET /messages/{id}/$value`. No extra OAuth scope is needed — `Mail.Read` (included in `Mail.ReadWrite`) covers it.
+
+### `save_emails_from_search`
+
+Same thing over a whole search — mailbox archival, year-end exports, handing a full sender history to another tool.
+
+```jsonc
+{
+  "accounts":    ["wgs-usa", "all-pedal"],
+  "from":        "landlord@example.com",
+  "since":       "2024-01-01",
+  "organize_by": "date",
+  "max_emails":  500
+}
+```
+
+`organize_by` takes the same values as `save_all_attachments_from_search` (`flat`, `date`, `sender`, `account`). Default destination is `~/Downloads/email-messages-<ISO-ts>/`. A message that fails is recorded in `errors[]` and the batch continues — one unreadable message does not cost you the other 499.
 
 ### `save_attachment`
 
@@ -1183,11 +1229,57 @@ the body and switches the message to HTML. **Like the password, this is just
 config — no code or HTML to touch.** The MCP server must run on the machine
 where that signature path exists (e.g. your local build on Windows).
 
+## Internet Headers
+
+`get_email` exposes a flattened `headers` map — one value per name. That is enough to read a `List-Unsubscribe`, and useless for tracing a message: a real message crosses 5–10 relays and carries that many `Received:` lines, and a map keeps only one of them.
+
+`get_email_headers` returns the header block in the three forms that matter:
+
+- **`analysis`** — the `Received` chain rebuilt in *chronological* order (relays prepend their line, so the raw order is backwards) with the delay at each hop, the SPF/DKIM/DMARC verdicts parsed out of `Authentication-Results`, the DKIM signatures, and From/Return-Path/SPF/DKIM domain alignment;
+- **`headers`** — every occurrence, unfolded, in message order;
+- **`raw`** — the header block exactly as received (`include_raw: true`).
+
+Only the header block is fetched (`BODY.PEEK[HEADER]` on IMAP), so the call is cheap even on a 40 MB message, and it does **not** mark the message as read.
+
+```jsonc
+{ "account": "work", "emailId": "12345", "mailbox": "INBOX" }
+```
+
+```text
+📨 Internet headers — account "work", mailbox INBOX, id 12345
+Subject: Your invoice
+From: Billing <billing@example.com>
+Return-Path: <bounce@mailer.example.net>
+
+--- Authentication ---
+spf=pass (smtp.mailfrom=bounce@mailer.example.net)
+dkim=pass (header.d=example.com)
+dmarc=pass (header.from=example.com)
+Alignment: From=example.com | SPF=mailer.example.net ❌ | DKIM=example.com ✅ | Return-Path ❌
+DKIM signatures: example.com (s=sel1, rsa-sha256)
+
+--- Received chain (3 hops, transit 2m 10s) ---
+1. mail.example.com → mx1.mailer.example.net  [ESMTPS]  2026-08-05T10:00:00.000Z
+2. mx1.mailer.example.net → mx.recipient.tld  [ESMTPS]  2026-08-05T10:02:00.000Z  (+2m 0s)
+3. mx.recipient.tld → store.recipient.tld  [LMTP]  2026-08-05T10:02:10.000Z  (+10s)
+
+--- Notes ---
+• Return-Path (mailer.example.net) and From (example.com) are on different domains.
+```
+
+Set `format: "json"` for the structured dump instead, `include_all_headers: false` to drop the full listing, `include_raw: true` for the raw block.
+
+Reading the verdicts: when several `Authentication-Results` headers are present, the **topmost wins** — it was added by the last relay to touch the message, so it is the only one an upstream relay could not have forged. Alignment is computed with relaxed (subdomain-tolerant) matching rather than the Public Suffix List; the `dmarc=` verdict from the receiving server remains authoritative and is reported verbatim.
+
+On Graph-backed accounts the header list comes from `internetMessageHeaders` (one cheap request); the `raw` block is then *rebuilt* from that list — values are exact, original folding is not, and the response flags this with `rawReconstructed: true`. When Graph does not serve the list, the tool falls back to the full MIME source (`$value`). No extra OAuth scope is needed either way.
+
+The same fix applies to `get_email`: its flattened `headers` map was always empty on Graph accounts (the backend never requested `internetMessageHeaders`) and now matches the IMAP behaviour.
+
 ## API
 
-### Tools (52)
+### Tools (64)
 
-#### Read (19)
+#### Read (22)
 
 | Tool | Description |
 |------|-------------|
@@ -1197,10 +1289,13 @@ where that signature path exists (e.g. your local build on Windows).
 | `get_email` | Read full email content with attachment metadata |
 | `get_emails` | Fetch full content of multiple emails in a single call (max 20) |
 | `get_email_status` | Get read/flag/label state of an email without fetching the body |
+| `get_email_headers` | Full Internet headers — every occurrence, unfolded — plus the chronological Received chain, SPF/DKIM/DMARC verdicts and domain alignment (header block only, does not mark as read) |
 | `search_emails` | Search by keyword across subject, sender, and body (deep by default; bounded + cost-warned on huge non-FTS folders); failed searches are flagged, never a silent zero |
 | `search_all_accounts` | Fan a search across multiple accounts in parallel; merges + date-sorts results and tags each with its account |
 | `run_preset` | Run a saved search preset defined under `[[searches]]` in config.toml |
 | `export_search` | Run a search and stream the result set to a CSV or NDJSON file under `~/Downloads/` (bypasses MCP response byte budget) |
+| `save_email` | Save one message to disk as a `.eml` — exact RFC822 source, attachments and DKIM/Received intact, reopens in any mail client |
+| `save_emails_from_search` | Run a search and save every matching message as a `.eml` into a dated folder |
 | `download_attachment` | Download an email attachment by filename (base64 in response; ≤5MB) |
 | `save_attachment` | Save an attachment directly to disk — no base64 hop, no size limit |
 | `save_all_attachments_from_search` | Run a search and download every matching attachment into a dated folder (with optional filename/mimetype filter) |
@@ -1211,7 +1306,7 @@ where that signature path exists (e.g. your local build on Windows).
 | `get_email_stats` | Email analytics — volume, top senders, daily trends |
 | `check_health` | Connection health, latency, quota, and IMAP capabilities |
 
-#### Write (9)
+#### Write (10)
 
 | Tool | Description |
 |------|-------------|
@@ -1219,6 +1314,7 @@ where that signature path exists (e.g. your local build on Windows).
 | `reply_email` | Reply with proper threading (In-Reply-To, References) |
 | `forward_email` | Forward with original content quoted |
 | `save_draft` | Save an email draft to the Drafts folder |
+| `update_draft` | Replace a draft's content while preserving (or changing) its attachments |
 | `send_draft` | Send an existing draft and remove from Drafts |
 | `apply_template` | Apply a template with variable substitution |
 | `schedule_email` | Schedule an email for future delivery |
@@ -1240,11 +1336,12 @@ on any other.
 | `get_auto_reply` | Read the automatic reply (out of office) setting |
 | `set_auto_reply` | Turn the automatic reply on (always or scheduled) or off |
 
-#### Manage (7)
+#### Manage (8)
 
 | Tool | Description |
 |------|-------------|
 | `move_email` | Move email between folders |
+| `cross_account_move` | Move an email between two different accounts, preserving raw headers, flags and original date |
 | `delete_email` | Move to Trash or permanently delete |
 | `mark_email` | Mark as read/unread, flag/unflag |
 | `bulk_action` | Batch operation on up to 100 emails |
@@ -1273,7 +1370,7 @@ on any other.
 | `check_notification_setup` | Diagnose desktop notification support and provide setup instructions |
 | `test_notification` | Send a test notification to verify OS permissions are configured |
 
-#### Calendar & Reminders (6)
+#### Calendar & Reminders (8)
 
 | Tool | Description |
 |------|-------------|
@@ -1282,6 +1379,8 @@ on any other.
 | `add_to_calendar` | Add an email event to the local calendar (macOS/Linux) |
 | `create_reminder` | Create a reminder in macOS Reminders.app from an email |
 | `list_calendars` | List all available local calendars |
+| `list_events` | List local calendar events, filtered by title, date range or calendar |
+| `list_reminders` | List macOS Reminders.app reminders, filtered by title or list |
 | `check_calendar_permissions` | Check whether the local calendar is accessible |
 
 ### Prompts (7)

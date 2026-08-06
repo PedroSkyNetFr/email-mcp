@@ -114,7 +114,13 @@ export default function registerExchangeTools(
         return jsonResult({ created: rule });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        await audit.log('create_mail_rule', params.account, { name: params.name }, 'error', message);
+        await audit.log(
+          'create_mail_rule',
+          params.account,
+          { name: params.name },
+          'error',
+          message,
+        );
         return errorResult(`Failed to create the rule: ${message}`);
       }
     },
@@ -207,13 +213,17 @@ export default function registerExchangeTools(
         });
         await audit.log('set_auto_reply', params.account, { status: params.status }, 'ok');
         return {
-          content: [
-            { type: 'text' as const, text: `Automatic reply is now "${params.status}".` },
-          ],
+          content: [{ type: 'text' as const, text: `Automatic reply is now "${params.status}".` }],
         };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        await audit.log('set_auto_reply', params.account, { status: params.status }, 'error', message);
+        await audit.log(
+          'set_auto_reply',
+          params.account,
+          { status: params.status },
+          'error',
+          message,
+        );
         return errorResult(`Failed to set the automatic reply: ${message}`);
       }
     },

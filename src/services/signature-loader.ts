@@ -51,10 +51,38 @@ function guessImageMime(filename: string): string {
 // Outside this range cp1252 matches latin1 byte-for-byte. A 0 entry means the
 // byte is undefined in cp1252 and falls through to its raw value.
 const CP1252_HIGH = [
-  0x20ac, 0, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, // 0x80–0x87
-  0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017d, 0, // 0x88–0x8F
-  0, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, // 0x90–0x97
-  0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0, 0x017e, 0x0178, // 0x98–0x9F
+  0x20ac,
+  0,
+  0x201a,
+  0x0192,
+  0x201e,
+  0x2026,
+  0x2020,
+  0x2021, // 0x80–0x87
+  0x02c6,
+  0x2030,
+  0x0160,
+  0x2039,
+  0x0152,
+  0,
+  0x017d,
+  0, // 0x88–0x8F
+  0,
+  0x2018,
+  0x2019,
+  0x201c,
+  0x201d,
+  0x2022,
+  0x2013,
+  0x2014, // 0x90–0x97
+  0x02dc,
+  0x2122,
+  0x0161,
+  0x203a,
+  0x0153,
+  0,
+  0x017e,
+  0x0178, // 0x98–0x9F
 ];
 
 /** Manual windows-1252 decoder. Reliable regardless of the Node ICU build. */
@@ -188,7 +216,10 @@ export async function loadAccountSignature(account: AccountConfig): Promise<Load
  *   - when omitted (`undefined`), fall back to the account's `signature_default`;
  *   - otherwise off.
  */
-export function shouldAppendSignature(account: AccountConfig, append: boolean | undefined): boolean {
+export function shouldAppendSignature(
+  account: AccountConfig,
+  append: boolean | undefined,
+): boolean {
   return append ?? account.signatureDefault ?? false;
 }
 

@@ -12,6 +12,11 @@
  * the IMAP/SMTP ones (Microsoft does not let one be redeemed for the other).
  */
 
+/* eslint-disable max-classes-per-file -- GraphError is the transport's own error
+   type: it carries the HTTP status and the Graph response body, and is thrown
+   from nowhere else. Splitting a five-line error class into its own module would
+   scatter the transport rather than clarify it. */
+
 import type { AccountConfig } from '../../types/index.js';
 import type OAuthService from '../oauth.service.js';
 
@@ -91,8 +96,9 @@ export default class GraphClient {
       // the caller only ever sees a bare status code.
       const detail = text.slice(0, 300).replace(/\s+/g, ' ').trim();
       throw new GraphError(
-        `Graph ${method} ${url.replace(GRAPH_ROOT, '')} failed (${response.status})` +
-          (detail ? `: ${detail}` : ''),
+        `Graph ${method} ${url.replace(GRAPH_ROOT, '')} failed (${response.status})${
+          detail ? `: ${detail}` : ''
+        }`,
         response.status,
         text,
       );

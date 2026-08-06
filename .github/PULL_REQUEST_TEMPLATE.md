@@ -16,5 +16,6 @@ Brief description of what this PR does.
 - [ ] I have run `pnpm check` and it passes
 - [ ] I have run `pnpm typecheck` and it passes
 - [ ] I have added tests that prove my fix/feature works (if applicable)
+- [ ] My change keeps **both** backends working — IMAP and Microsoft Graph (see CONTRIBUTING → Project Structure)
 - [ ] I have updated documentation (if applicable)
 - [ ] My changes generate no new warnings

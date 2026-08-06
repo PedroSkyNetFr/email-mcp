@@ -47,7 +47,9 @@ describe('GraphClient.request', () => {
   // in fact been sent — the worst kind of failure, since it invites a resend.
   it('accepts an empty 202 body without throwing (sendMail)', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(202, '')));
-    await expect(client().request('POST', '/me/sendMail', { message: {} })).resolves.toBeUndefined();
+    await expect(
+      client().request('POST', '/me/sendMail', { message: {} }),
+    ).resolves.toBeUndefined();
   });
 
   it('accepts an empty 204 body without throwing (delete)', async () => {

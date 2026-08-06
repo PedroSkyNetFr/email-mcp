@@ -281,7 +281,6 @@ export default class SmtpService {
     const fromAddr = account.fullName ? `"${account.fullName}" <${account.email}>` : account.email;
 
     // Fetch attachment binaries from IMAP when requested (parallel downloads)
-    /* eslint-disable @stylistic/implicit-arrow-linebreak */
     const fetchAttachment = async (filename: string) =>
       this.imapService.downloadAttachment(
         accountName,
@@ -289,7 +288,6 @@ export default class SmtpService {
         options.mailbox ?? 'INBOX',
         filename,
       );
-    /* eslint-enable @stylistic/implicit-arrow-linebreak */
 
     const attachments: { filename: string; content: Buffer; contentType: string }[] = [];
     if (options.includeAttachments && original.attachments.length > 0) {

@@ -27,6 +27,7 @@ Performance for an Email MCP server operates across **three distinct layers**, e
 | Connection health checks | ✅ Done | `manager.ts` — checks `.usable` before reuse; SMTP `verify()` |
 | Auto-reconnect (basic) | ✅ Done | `manager.ts` — drops stale connections, recreates on failure |
 | Source preview truncation | ✅ Done | `imap.service.ts` — `maxLength: 256` for list operations |
+| Header-only fetch for header inspection | ✅ Done | `imap.service.ts` — `getEmailHeaders()` fetches `{ headers: true }` (BODY.PEEK[HEADER]) instead of the full source |
 | Preview text capping | ✅ Done | `imap.service.ts` — 200 char preview limit |
 | Thread cap | ✅ Done | Thread reconstruction capped at 50 messages |
 | Contact extraction cap | ✅ Done | Caps at 500 recent messages for contact extraction |

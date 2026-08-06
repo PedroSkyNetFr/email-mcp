@@ -12,12 +12,15 @@ import { sanitizeMailboxName } from '../safety/validation.js';
 import type {
   AttachmentMeta,
   AttachmentSaveResult,
+  BatchEmailSaveResult,
   BulkResult,
   Contact,
   DailyVolume,
   Email,
   EmailAddress,
+  EmailHeaderDump,
   EmailMeta,
+  EmailSaveResult,
   EmailStats,
   FacetResult,
   LabelInfo,
@@ -28,9 +31,22 @@ import type {
   SenderStat,
 } from '../types/index.js';
 import { nonEmpty, RAW_CAP } from '../utils/body-format.js';
+import {
+  analyzeHeaders,
+  flattenHeaders,
+  groupHeaders,
+  parseHeaderBlock,
+  splitHeaderBlock,
+} from '../utils/headers.js';
 import type { AttachmentInput, ResolvedAttachment } from './attachment-resolver.js';
 import { resolveAttachments } from './attachment-resolver.js';
-import { assertSafeDestination, resolveUniquePath, sanitizeFilename } from './file-paths.js';
+import {
+  assertSafeDestination,
+  defaultEmlFilename,
+  exportSubfolder,
+  resolveUniquePath,
+  sanitizeFilename,
+} from './file-paths.js';
 import type { LabelStrategy } from './label-strategy.js';
 import { detectLabelStrategy } from './label-strategy.js';
 import type { MailboxRef } from './mailbox-resolver.js';
@@ -476,18 +492,12 @@ async function messageToEmail(msg: Record<string, unknown>): Promise<Email> {
     // the cap, decode in full (25 MB is the accepted upper bound).
     const decodeBuf = oversize ? source.subarray(0, RAW_CAP) : source;
     const rawStr = decodeBuf.toString('utf-8');
-    const headerEnd = rawStr.indexOf('\r\n\r\n');
-    if (headerEnd >= 0) {
-      rawStr
-        .slice(0, headerEnd)
-        .split('\r\n')
-        .forEach((line) => {
-          const colonIdx = line.indexOf(':');
-          if (colonIdx > 0 && !line.startsWith(' ') && !line.startsWith('\t')) {
-            headers[line.slice(0, colonIdx).trim().toLowerCase()] = line.slice(colonIdx + 1).trim();
-          }
-        });
-    }
+    // Le découpage se fait via le parseur partagé : il déplie les continuations
+    // (sans quoi tout en-tête multi-ligne était tronqué à sa première ligne) et
+    // accepte les fins de ligne LF seules. `flattenHeaders` conserve le
+    // comportement historique « la dernière occurrence gagne » ; les appelants
+    // qui ont besoin de la multiplicité passent par `getEmailHeaders`.
+    Object.assign(headers, flattenHeaders(parseHeaderBlock(splitHeaderBlock(rawStr))));
 
     if (oversize) {
       bodyWarning = `source too large to parse (${Math.round(
@@ -3616,22 +3626,11 @@ export default class ImapService {
             error: 'Could not determine account for email',
           });
         } else {
-          // Subfolder strategy
-          let subfolder = input.destinationFolder;
-          if (input.organizeBy === 'date') {
-            const d = safeDate(email.date, new Date(NaN));
-            const ym = Number.isNaN(d.getTime())
-              ? 'unknown-date'
-              : `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
-            subfolder = join(input.destinationFolder, ym);
-          } else if (input.organizeBy === 'sender') {
-            const domain = email.from.address.includes('@')
-              ? (email.from.address.split('@')[1] ?? 'unknown-sender')
-              : 'unknown-sender';
-            subfolder = join(input.destinationFolder, sanitizeFilename(domain));
-          } else if (input.organizeBy === 'account') {
-            subfolder = join(input.destinationFolder, sanitizeFilename(accountForEmail));
-          }
+          // Stratégie de sous-dossier — partagée avec l'export `.eml`.
+          const subfolder = join(
+            input.destinationFolder,
+            exportSubfolder(input.organizeBy, email, accountForEmail),
+          );
 
           await mkdir(subfolder, { recursive: true });
 
@@ -3665,6 +3664,245 @@ export default class ImapService {
       files_saved: filesSaved,
       total_size: totalSize,
       skipped,
+      errors,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // En-têtes Internet complets
+  // -------------------------------------------------------------------------
+
+  /**
+   * Récupère le bloc d'en-têtes complet d'un message et l'analyse.
+   *
+   * Le FETCH ne demande que `BODY.PEEK[HEADER]`, pas la source entière : les
+   * en-têtes d'un message pèsent quelques kilo-octets là où le message peut en
+   * peser des dizaines de méga-octets, et ce sont les seuls octets nécessaires
+   * ici. Comme partout ailleurs, `PEEK` ne marque pas le message comme lu.
+   *
+   * Contrairement au champ `Email.headers` (aplati, une valeur par nom), la
+   * sortie conserve toutes les occurrences : la chaîne `Received` complète
+   * survit, ce qui est la raison d'être de cette méthode.
+   */
+  async getEmailHeaders(
+    accountName: string,
+    emailId: string,
+    mailbox = 'INBOX',
+  ): Promise<EmailHeaderDump> {
+    const client = await this.connections.getImapClient(accountName);
+    const safeMailbox = sanitizeMailboxName(mailbox);
+
+    const lock = await client.getMailboxLock(safeMailbox);
+    try {
+      const msg = await client.fetchOne(emailId, { uid: true, headers: true }, { uid: true });
+      const headerBlock = (msg as unknown as Record<string, unknown> | false | null)
+        ? (msg as unknown as Record<string, unknown>).headers
+        : undefined;
+
+      if (!msg || !Buffer.isBuffer(headerBlock)) {
+        throw new Error(`Email ${emailId} not found in ${mailbox}`);
+      }
+
+      // BODY.PEEK[HEADER] renvoie le bloc suivi de sa ligne vide terminale ;
+      // `splitHeaderBlock` la retire et couvre au passage les serveurs qui
+      // répondent en LF seul.
+      const raw = splitHeaderBlock(headerBlock);
+      const entries = parseHeaderBlock(raw);
+
+      return {
+        emailId,
+        account: accountName,
+        mailbox: safeMailbox,
+        raw,
+        entries,
+        grouped: groupHeaders(entries),
+        analysis: analyzeHeaders(entries),
+      };
+    } finally {
+      lock.release();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Export du message au format .eml
+  // -------------------------------------------------------------------------
+
+  /**
+   * Source RFC822 COMPLETE et NON PLAFONNEE d'un message.
+   *
+   * `MAX_PARSE_SOURCE_BYTES` est un garde-fou d'analyse et d'affichage :
+   * l'appliquer ici produirait des `.eml` tronqués, donc illisibles par un
+   * client de messagerie et inutilisables comme preuve. Même raisonnement que
+   * {@link fetchDraftRaw}, dont cette méthode est la généralisation à
+   * n'importe quel message.
+   */
+  async getEmailRaw(accountName: string, emailId: string, mailbox = 'INBOX'): Promise<Buffer> {
+    const client = await this.connections.getImapClient(accountName);
+    const safeMailbox = sanitizeMailboxName(mailbox);
+
+    const lock = await client.getMailboxLock(safeMailbox);
+    try {
+      const msg = await client.fetchOne(emailId, { uid: true, source: true }, { uid: true });
+      const source = msg ? (msg as unknown as Record<string, unknown>).source : undefined;
+      if (!msg || !Buffer.isBuffer(source)) {
+        throw new Error(`Email ${emailId} source not found in ${mailbox}`);
+      }
+      return source;
+    } finally {
+      lock.release();
+    }
+  }
+
+  /**
+   * Écrit un message sur disque au format `.eml` (RFC822 verbatim).
+   *
+   * Les octets sont ceux du serveur, sans réencodage : pièces jointes,
+   * signatures DKIM et chaîne `Received` restent vérifiables, ce qui est le
+   * seul intérêt d'un `.eml` par rapport à un export CSV/NDJSON.
+   *
+   * `destination` accepte un chemin de fichier absolu ou un répertoire absolu ;
+   * dans ce dernier cas le nom est dérivé de la date, du sujet et de l'UID.
+   */
+  async saveEmailToDisk(
+    accountName: string,
+    emailId: string,
+    mailbox: string,
+    destination: string,
+    overwrite = false,
+  ): Promise<EmailSaveResult> {
+    const { mkdir, stat, writeFile } = await import('node:fs/promises');
+    const { dirname, join } = await import('node:path');
+    const { pathToFileURL } = await import('node:url');
+
+    assertSafeDestination(destination);
+
+    const client = await this.connections.getImapClient(accountName);
+    const safeMailbox = sanitizeMailboxName(mailbox);
+
+    // Un seul FETCH : l'enveloppe (sujet et date déjà décodés par imapflow,
+    // donc pas de =?UTF-8?B?…?= à démêler pour nommer le fichier) et la source.
+    const lock = await client.getMailboxLock(safeMailbox);
+    let source: Buffer;
+    let subject: string | undefined;
+    let sentAt: Date | undefined;
+    try {
+      const msg = await client.fetchOne(
+        emailId,
+        { uid: true, envelope: true, source: true },
+        { uid: true },
+      );
+      const raw = msg ? (msg as unknown as Record<string, unknown>).source : undefined;
+      if (!msg || !Buffer.isBuffer(raw)) {
+        throw new Error(`Email ${emailId} source not found in ${mailbox}`);
+      }
+      source = raw;
+      const envelope = (msg.envelope ?? {}) as { subject?: string; date?: Date };
+      subject = envelope.subject;
+      sentAt = envelope.date;
+    } finally {
+      lock.release();
+    }
+
+    let targetPath: string;
+    try {
+      const info = await stat(destination);
+      targetPath = info.isDirectory()
+        ? join(destination, defaultEmlFilename(emailId, subject, sentAt))
+        : destination;
+    } catch {
+      // La destination n'existe pas encore — traitée comme un chemin de fichier.
+      targetPath = destination;
+    }
+    // Nouvelle vérification du chemin résolu : le nom de fichier vient en
+    // partie du sujet du message, donc d'une source non maîtrisée.
+    assertSafeDestination(targetPath);
+
+    const finalPath = await resolveUniquePath(targetPath, overwrite);
+    await mkdir(dirname(finalPath), { recursive: true });
+    await writeFile(finalPath, source);
+
+    return {
+      emailId,
+      account: accountName,
+      path: finalPath,
+      fileUrl: pathToFileURL(finalPath).href,
+      size: source.length,
+      ...(subject ? { subject } : {}),
+    };
+  }
+
+  /**
+   * Exécute une recherche et écrit chaque message trouvé en `.eml` dans
+   * `destinationFolder`, éventuellement réparti en sous-dossiers.
+   *
+   * Comme pour {@link saveAllAttachmentsFromSearch}, une erreur sur un message
+   * est collectée et n'interrompt pas le lot : sur un export d'archive, un
+   * message illisible ne doit pas faire perdre les 500 autres.
+   */
+  async saveEmailsFromSearch(input: {
+    accountNames: string[] | null;
+    accountName: string | null;
+    query: string;
+    searchOptions: SearchOptions;
+    maxEmails: number;
+    destinationFolder: string;
+    organizeBy: 'flat' | 'date' | 'sender' | 'account';
+  }): Promise<BatchEmailSaveResult> {
+    const { mkdir } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+
+    assertSafeDestination(input.destinationFolder);
+    await mkdir(input.destinationFolder, { recursive: true });
+
+    const { items } = await this.searchForExport(
+      input.accountNames,
+      input.accountName,
+      input.query,
+      { ...input.searchOptions, maxRows: input.maxEmails },
+    );
+
+    let filesSaved = 0;
+    let totalSize = 0;
+    const errors: { emailId: string; account?: string; error: string }[] = [];
+
+    /* eslint-disable no-restricted-syntax, no-await-in-loop */
+    for (const email of items) {
+      // En mode multi-comptes, EmailMeta porte `.account` ; en mono-compte on
+      // retombe sur le compte fourni par l'appelant.
+      const accountForEmail = email.account ?? input.accountName;
+      if (!accountForEmail) {
+        errors.push({ emailId: email.id, error: 'Could not determine account for email' });
+      } else {
+        const subfolder = join(
+          input.destinationFolder,
+          exportSubfolder(input.organizeBy, email, accountForEmail),
+        );
+        try {
+          await mkdir(subfolder, { recursive: true });
+          const saved = await this.saveEmailToDisk(
+            accountForEmail,
+            email.id,
+            input.searchOptions.mailbox ?? 'INBOX',
+            subfolder,
+            false,
+          );
+          filesSaved += 1;
+          totalSize += saved.size;
+        } catch (err) {
+          errors.push({
+            emailId: email.id,
+            account: accountForEmail,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+    /* eslint-enable no-restricted-syntax, no-await-in-loop */
+
+    return {
+      folder: input.destinationFolder,
+      files_saved: filesSaved,
+      total_size: totalSize,
       errors,
     };
   }

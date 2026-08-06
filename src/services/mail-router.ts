@@ -17,8 +17,8 @@
  */
 
 import type { AccountConfig } from '../types/index.js';
-import type GraphSendService from './graph/graph-send.service.js';
 import type GraphService from './graph/graph.service.js';
+import type GraphSendService from './graph/graph-send.service.js';
 import type ImapService from './imap.service.js';
 import type { IMailService } from './mail-service.types.js';
 import type { ISendService } from './send-service.types.js';
@@ -26,7 +26,9 @@ import type SmtpService from './smtp.service.js';
 
 function asNames(value: unknown): string[] {
   if (typeof value === 'string') return [value];
-  if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === 'string');
+  if (Array.isArray(value)) {
+    return value.filter((entry): entry is string => typeof entry === 'string');
+  }
   return [];
 }
 
@@ -44,6 +46,11 @@ const ACCOUNTS_IN_ARGS: Record<string, (args: unknown[]) => string[]> = {
   searchForExport: (args) => [...asNames(args[0]), ...asNames(args[1])],
   // ({ accountNames, accountName, … })
   saveAllAttachmentsFromSearch: (args) => {
+    const input = args[0] as { accountNames?: unknown; accountName?: unknown } | undefined;
+    return [...asNames(input?.accountNames), ...asNames(input?.accountName)];
+  },
+  // ({ accountNames, accountName, … })
+  saveEmailsFromSearch: (args) => {
     const input = args[0] as { accountNames?: unknown; accountName?: unknown } | undefined;
     return [...asNames(input?.accountNames), ...asNames(input?.accountName)];
   },
