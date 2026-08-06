@@ -24,6 +24,13 @@ import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
 import type { IMailService } from '../services/mail-service.types.js';
+import {
+  FROM_DESCRIPTION,
+  literalFilterOptions,
+  literalFilterParams,
+  SUBJECT_DESCRIPTION,
+  TO_DESCRIPTION,
+} from './search-filter-params.js';
 
 export default function registerEmlTools(
   server: McpServer,
@@ -108,7 +115,10 @@ export default function registerEmlTools(
     'Run any search and save every matching message as a .eml file into a dated folder under ' +
       '~/Downloads/ (or a caller-supplied folder). Use for mailbox archival, year-end exports, ' +
       'or handing a whole thread/sender history to another tool. Per-message failures are ' +
-      'collected and reported, they do not abort the batch.',
+      'collected and reported, they do not abort the batch. The response reports `matched` (what ' +
+      'the SEARCH returned) next to `files_saved` (what was written): when the two differ, or ' +
+      'when matched is lower than you expected, the query is the suspect — see the caveat on the ' +
+      'from/to/subject filters.',
     {
       account: z.string().optional().describe('Single-account mode'),
       accounts: z
@@ -117,9 +127,10 @@ export default function registerEmlTools(
         .describe('Cross-account fan-out; defaults to every configured account'),
       mailbox: z.string().default('INBOX'),
       query: z.string().optional().default(''),
-      to: z.string().optional(),
-      from: z.string().optional(),
-      subject: z.string().optional(),
+      to: z.string().optional().describe(TO_DESCRIPTION),
+      from: z.string().optional().describe(FROM_DESCRIPTION),
+      subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
+      ...literalFilterParams,
       cc: z.string().optional(),
       bcc: z.string().optional(),
       text: z.string().optional(),
@@ -204,11 +215,38 @@ export default function registerEmlTools(
             attachmentFilename: params.attachment_filename,
             attachmentMimetype: params.attachment_mimetype,
             gmailRaw: params.gmail_raw,
+            ...literalFilterOptions(params),
           },
           maxEmails: params.max_emails,
           destinationFolder: folder,
           organizeBy: params.organize_by,
         });
+
+        // `matched` en tête, et un avertissement explicite dès que le lot n'est
+        // pas ce que l'appelant attendait : un export incomplet renvoyait
+        // jusqu'ici `files_saved: 1, errors: []`, indiscernable d'un dossier
+        // vide. Le silence est le pire mode de défaillance pour un outil
+        // d'archivage.
+        const notes: string[] = [];
+        if (result.matched === 0) {
+          notes.push(
+            'The SEARCH returned no message, so nothing was written. If you expected matches, ' +
+              'the filter is the suspect, not the export: from/to/subject are matched by the ' +
+              'server on indexed tokens, so a parent domain misses its subdomains. Retry with ' +
+              'from_contains for a literal match.',
+          );
+        }
+        if (result.truncated) {
+          notes.push(
+            `The search hit max_emails (${params.max_emails}); this is a prefix of the matching ` +
+              'set, not the whole of it. Raise max_emails or narrow the query.',
+          );
+        }
+        if (result.errors.length > 0) {
+          notes.push(
+            `${result.errors.length} message(s) matched but could not be written — see errors.`,
+          );
+        }
 
         return {
           content: [
@@ -217,13 +255,16 @@ export default function registerEmlTools(
               text: JSON.stringify(
                 {
                   folder: result.folder,
+                  matched: result.matched,
                   files_saved: result.files_saved,
+                  truncated: result.truncated,
                   total_size: result.total_size,
                   total_size_human: `${Math.round(result.total_size / 1024 / 1024)}MB`,
                   // Les erreurs sont plafonnées pour ne pas noyer la réponse ;
                   // le compte total reste exact.
                   error_count: result.errors.length,
                   errors: result.errors.slice(0, 20),
+                  ...(notes.length > 0 ? { notes } : {}),
                 },
                 null,
                 2,

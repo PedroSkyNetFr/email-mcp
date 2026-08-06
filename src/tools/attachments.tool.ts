@@ -15,6 +15,13 @@ import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
 import type { IMailService } from '../services/mail-service.types.js';
+import {
+  FROM_DESCRIPTION,
+  literalFilterOptions,
+  literalFilterParams,
+  SUBJECT_DESCRIPTION,
+  TO_DESCRIPTION,
+} from './search-filter-params.js';
 
 export default function registerAttachmentTools(
   server: McpServer,
@@ -182,9 +189,10 @@ export default function registerAttachmentTools(
         ),
       mailbox: z.string().default('INBOX'),
       query: z.string().optional().default(''),
-      to: z.string().optional(),
-      from: z.string().optional(),
-      subject: z.string().optional(),
+      to: z.string().optional().describe(TO_DESCRIPTION),
+      from: z.string().optional().describe(FROM_DESCRIPTION),
+      subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
+      ...literalFilterParams,
       cc: z.string().optional(),
       bcc: z.string().optional(),
       text: z.string().optional(),
@@ -269,6 +277,7 @@ export default function registerAttachmentTools(
           largerThan: params.larger_than,
           smallerThan: params.smaller_than,
           gmailRaw: params.gmail_raw,
+          ...literalFilterOptions(params),
         };
 
         const result = await imapService.saveAllAttachmentsFromSearch({
@@ -290,11 +299,24 @@ export default function registerAttachmentTools(
               text: JSON.stringify(
                 {
                   folder: result.folder,
+                  // `matched` distingue « la recherche n'a rien trouvé » de
+                  // « aucun message trouvé ne portait de pièce jointe ».
+                  matched: result.matched,
                   files_saved: result.files_saved,
+                  truncated: result.truncated,
                   total_size: result.total_size,
                   total_size_human: `${(result.total_size / 1024 / 1024).toFixed(2)}MB`,
                   skipped: result.skipped,
                   errors: result.errors,
+                  ...(result.matched === 0
+                    ? {
+                        notes: [
+                          'The SEARCH returned no message. If you expected matches, suspect the ' +
+                            'filter rather than the mailbox: from/to/subject are matched by the ' +
+                            'server on indexed tokens. Retry with from_contains for a literal match.',
+                        ],
+                      }
+                    : {}),
                 },
                 null,
                 2,

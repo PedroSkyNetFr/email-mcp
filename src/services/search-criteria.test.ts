@@ -1,4 +1,4 @@
-import { buildSearchCriteria, chunkUids } from './search-criteria.js';
+import { applyLiteralFilters, buildSearchCriteria, chunkUids } from './search-criteria.js';
 
 describe('buildSearchCriteria', () => {
   describe('empty / defaults', () => {
@@ -10,12 +10,39 @@ describe('buildSearchCriteria', () => {
           hasAttachment: undefined,
           attachmentFilename: undefined,
           attachmentMimetype: undefined,
+          fromContains: undefined,
+          toContains: undefined,
+          subjectContains: undefined,
           facets: undefined,
         },
         gmailRawUsed: false,
         bodyScan: false,
         warnings: [],
       });
+    });
+  });
+
+  describe('literal filters', () => {
+    it('never reach the server — they are post-filters, not criteria', () => {
+      const result = buildSearchCriteria(
+        { fromContains: 'enviropro-salon.fr', since: '2026-01-01' },
+        { isGmail: false },
+      );
+      expect(result.criteria.from).toBeUndefined();
+      expect(result.postFilters.fromContains).toBe('enviropro-salon.fr');
+    });
+
+    it('warn when nothing else narrows the server-side query', () => {
+      const { warnings } = buildSearchCriteria({ fromContains: 'x' }, { isGmail: false });
+      expect(warnings.some((w) => w.includes('matched locally'))).toBe(true);
+    });
+
+    it('stay silent when another filter bounds the scan', () => {
+      const { warnings } = buildSearchCriteria(
+        { fromContains: 'x', since: '2026-01-01' },
+        { isGmail: false },
+      );
+      expect(warnings).toEqual([]);
     });
   });
 
@@ -287,5 +314,70 @@ describe('chunkUids', () => {
 
   it('chunk larger than input returns single chunk', () => {
     expect(chunkUids([1, 2, 3], 100)).toEqual([[1, 2, 3]]);
+  });
+});
+
+/**
+ * Le jeu de données vient d'un incident réel : neuf messages ENVIROpro dans le
+ * dossier Junk d'un compte OVH, sur deux domaines. Le filtre `from` du serveur
+ * (index Dovecot, correspondance par jetons) en ramenait un seul sur
+ * `enviropro-salon.fr` et aucun sur `salon.fr`, sans que rien ne le signale.
+ */
+const ENVIROPRO = [
+  ...Array.from({ length: 8 }, (_, i) => ({
+    subject: `Invitation ${i + 1}`,
+    from: { name: 'ENVIROpro Rennes', address: 'contact@news.enviropro-salon.fr' },
+    to: [{ address: 'contact@pierrecanet.fr' }],
+  })),
+  {
+    subject: 'Relance',
+    from: { name: 'Laurent MINUT', address: 'contact@enviropro-salon.fr' },
+    to: [{ name: 'Pierre', address: 'contact@pierrecanet.fr' }],
+  },
+];
+
+describe('applyLiteralFilters', () => {
+  it('REGRESSION: un domaine parent retrouve bien ses sous-domaines', () => {
+    // Le serveur n'en rendait qu'un ; la correspondance littérale en rend neuf.
+    expect(applyLiteralFilters(ENVIROPRO, { fromContains: 'enviropro-salon.fr' })).toHaveLength(9);
+  });
+
+  it('REGRESSION: un fragment en milieu de jeton correspond aussi', () => {
+    // `salon.fr` ne renvoyait rien côté serveur, faute d'être un préfixe.
+    expect(applyLiteralFilters(ENVIROPRO, { fromContains: 'salon.fr' })).toHaveLength(9);
+  });
+
+  it('discrimine bien le sous-domaine exact', () => {
+    expect(applyLiteralFilters(ENVIROPRO, { fromContains: 'news.enviropro' })).toHaveLength(8);
+  });
+
+  it('cherche aussi dans le nom d’affichage, pas seulement l’adresse', () => {
+    expect(applyLiteralFilters(ENVIROPRO, { fromContains: 'Laurent' })).toHaveLength(1);
+  });
+
+  it('ignore la casse', () => {
+    expect(applyLiteralFilters(ENVIROPRO, { fromContains: 'ENVIROPRO-SALON.FR' })).toHaveLength(9);
+  });
+
+  it('filtre sur les destinataires et le sujet', () => {
+    expect(applyLiteralFilters(ENVIROPRO, { toContains: 'pierrecanet' })).toHaveLength(9);
+    expect(applyLiteralFilters(ENVIROPRO, { subjectContains: 'relance' })).toHaveLength(1);
+  });
+
+  it('combine les filtres en ET', () => {
+    const out = applyLiteralFilters(ENVIROPRO, {
+      fromContains: 'enviropro',
+      subjectContains: 'Invitation 3',
+    });
+    expect(out).toHaveLength(1);
+  });
+
+  it('rend la liste inchangée sans filtre', () => {
+    expect(applyLiteralFilters(ENVIROPRO, {})).toHaveLength(9);
+  });
+
+  it('tolère une absence de destinataires', () => {
+    const items = [{ subject: 's', from: { address: 'a@b.fr' }, to: [] }];
+    expect(applyLiteralFilters(items, { toContains: 'x' })).toEqual([]);
   });
 });
