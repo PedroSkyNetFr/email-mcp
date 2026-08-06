@@ -9,8 +9,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
-import type { IMailService } from '../services/mail-service.types.js';
 import type { SearchOptions } from '../services/imap.service.js';
+import type { IMailService } from '../services/mail-service.types.js';
 import type { SearchPresetRegistry } from '../services/search-presets.js';
 import type { SearchPreset } from '../types/index.js';
 import { formatSearchResult } from './emails.tool.js';

@@ -113,11 +113,11 @@ export default class GraphSendService {
       ...(small.length ? { attachments: small.map(toGraphAttachment) } : {}),
     });
 
-    /* eslint-disable no-await-in-loop -- uploads are sequential by design */
-    for (let i = 0; i < large.length; i += 1) {
-      await client.uploadLargeAttachment(draft.id, large[i]);
+    /* eslint-disable no-restricted-syntax, no-await-in-loop -- uploads are sequential by design */
+    for (const attachment of large) {
+      await client.uploadLargeAttachment(draft.id, attachment);
     }
-    /* eslint-enable no-await-in-loop */
+    /* eslint-enable no-restricted-syntax, no-await-in-loop */
 
     await client.request('POST', `/me/messages/${draft.id}/send`);
 
