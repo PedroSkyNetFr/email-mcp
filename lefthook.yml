@@ -44,3 +44,22 @@ pre-push:
     # feature — so the build runs here rather than being remembered.
     build:
       run: pnpm build
+
+# dist/ est ce que les clients MCP exécutent, et il n'est pas versionné : sans
+# reconstruction, un pull ou un changement de branche laisse tourner l'ancienne
+# version sans rien dire. Le script décide selon le hook et ses arguments ; voir
+# son en-tête.
+post-merge:
+  commands:
+    rebuild-dist:
+      run: node scripts/rebuild-after-update.mjs post-merge
+
+post-checkout:
+  commands:
+    rebuild-dist:
+      run: node scripts/rebuild-after-update.mjs post-checkout {1} {2} {3}
+
+post-rewrite:
+  commands:
+    rebuild-dist:
+      run: node scripts/rebuild-after-update.mjs post-rewrite {1}
