@@ -648,12 +648,13 @@ forward fix. Run `pnpm db:migrate` after pulling code that adds new
 
 The scheduler enables future email delivery with a layered architecture:
 
-1. **MCP auto-check** — Processes the queue on server startup and every 60 seconds while the MCP server is running
+1. **MCP auto-check** — Processes the queue on server startup and every 60 seconds while the MCP server is running — **except in read-only mode**, where the server sends nothing at all, scheduled emails included, and logs `Scheduler disabled` at startup
 2. **CLI** — `email-mcp scheduler check` for manual or cron-based processing
 3. **OS-level daemon** — `email-mcp scheduler install` sets up launchd (macOS) or crontab (Linux) to run every minute, independently of the MCP server
 
 > **Important — the daemon must be installed for reliable delivery.**
-> Without it, scheduled emails only fire while an AI client is actively connected.
+> Without it, scheduled emails only fire while an AI client is actively connected
+> to a server that is not read-only.
 > Your machine also needs to be running at the scheduled time; if it's asleep or
 > off, the daemon will process overdue emails on next wake/startup. Failed sends
 > are retried up to **3 times** before being marked `failed`.
@@ -677,7 +678,19 @@ email-mcp scheduler check
 email-mcp scheduler uninstall
 ```
 
-Scheduled emails are stored as JSON files in `~/.local/state/email-mcp/scheduled/` with status-based locking. Each entry tracks attempts (max 3) and the last error, so you can inspect failures with `scheduler list`.
+Scheduled emails are stored as JSON files in `~/.local/state/email-mcp/scheduled/`. Each entry tracks attempts (max 3) and the last error, so you can inspect failures with `scheduler list`.
+
+Several processes can work on that queue at once — every MCP client conversation
+starts its own server, and the daemon runs `scheduler check` besides. Each email
+still goes out once: before sending, a process creates `<id>.claim` next to the
+entry, and the filesystem lets only one process create it; the others leave that
+entry alone. Entries are written to a temporary file and renamed into place, so
+no process ever reads half of one.
+
+If a process is killed while sending, the entry stays in `sending` with its
+`.claim` file and is **not** retried automatically: the SMTP server may already
+have accepted the message, and a retry would send it twice. The claim file
+records which process took it and when.
 
 ### Real-time Watcher & AI Hooks
 

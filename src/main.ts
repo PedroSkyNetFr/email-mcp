@@ -146,8 +146,6 @@ async function runServer(): Promise<void> {
   // the real capabilities (including `sampling` support).
   // --------------------------------------------------------------------------
 
-  let schedulerInterval: ReturnType<typeof setInterval> | undefined;
-
   const lowLevelServer = server.server;
 
   lowLevelServer.oninitialized = () => {
@@ -163,24 +161,9 @@ async function runServer(): Promise<void> {
 
         await mcpLog('info', 'server', 'Email MCP server started');
 
-        // Check for overdue scheduled emails on startup
-        try {
-          const result = await schedulerService.checkAndSend();
-          if (result.sent > 0) {
-            await mcpLog('info', 'scheduler', `Sent ${result.sent} overdue email(s) on startup`);
-          }
-        } catch {
-          // Non-fatal: scheduler check failure shouldn't prevent server start
-        }
-
-        // Periodic scheduler check every 60 seconds
-        schedulerInterval = setInterval(async () => {
-          try {
-            await schedulerService.checkAndSend();
-          } catch {
-            // Silent — don't spam logs
-          }
-        }, 60_000);
+        // Sends overdue scheduled emails now and every minute — unless the
+        // server is read-only, in which case it logs why and does nothing.
+        await schedulerService.start({ readOnly: config.settings.readOnly });
       } catch (err) {
         // Log to stderr — mcpLog may not be safe if init itself errored
         process.stderr.write(
@@ -192,7 +175,7 @@ async function runServer(): Promise<void> {
 
   // Graceful shutdown
   const shutdown = async () => {
-    if (schedulerInterval) clearInterval(schedulerInterval);
+    schedulerService.stop();
     hooksService.stop();
     await watcherService.stop();
     await connections.closeAll();

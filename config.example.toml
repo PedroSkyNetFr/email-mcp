@@ -4,6 +4,10 @@
 
 [settings]
 rate_limit = 10
+# true: no email is sent — the scheduled-email queue is not processed either —
+# and nothing changes in the mailboxes. Scheduled emails then go out only
+# through a server without read_only, or `email-mcp scheduler check`.
+read_only = false
 
 # ============================================================
 # cPanel / Dovecot HOSTED ACCOUNTS
