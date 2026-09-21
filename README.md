@@ -548,6 +548,7 @@ For single-account setups (overrides config file):
 | `MCP_EMAIL_SMTP_POOL_ENABLED` | `true` | Enable SMTP transport pooling |
 | `MCP_EMAIL_SMTP_POOL_MAX_CONNECTIONS` | `1` | Max pooled SMTP connections |
 | `MCP_EMAIL_SMTP_POOL_MAX_MESSAGES` | `100` | Max messages per pooled connection |
+| `MCP_EMAIL_READ_ONLY` | `false` | `true` makes this instance read-only: it sends no email — scheduled ones included — and changes nothing in the mailboxes. Also applies over `config.toml`, where it can only turn read-only on, never off |
 | `MCP_EMAIL_RATE_LIMIT` | `10` | Max sends per minute |
 | `MCP_EMAIL_SIGNATURE_PATH` | — | Path to an Outlook `.htm` signature for `append_signature` |
 | `MAIL_ALLOWED_SAVE_DIRS` | — | Extra directories where attachments, `.eml` messages and exports may be written (see below) |

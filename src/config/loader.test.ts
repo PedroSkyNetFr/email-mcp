@@ -165,6 +165,29 @@ read_only = true
 
       expect(config.settings.readOnly).toBe(true);
     });
+
+    it('applies MCP_EMAIL_READ_ONLY over a config file too', async () => {
+      // A client entry sets it to make one instance read-only while the
+      // accounts come from config.toml. Ignored there, every write tool —
+      // and the scheduler — stayed live without a word.
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, MINIMAL_TOML, 'utf-8');
+      process.env.MCP_EMAIL_READ_ONLY = 'true';
+
+      const config = await loadConfig(configPath);
+
+      expect(config.settings.readOnly).toBe(true);
+    });
+
+    it('never lets MCP_EMAIL_READ_ONLY lift read_only set in the config file', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, `${MINIMAL_TOML}\n[settings]\nread_only = true\n`, 'utf-8');
+      process.env.MCP_EMAIL_READ_ONLY = 'false';
+
+      const config = await loadConfig(configPath);
+
+      expect(config.settings.readOnly).toBe(true);
+    });
   });
 
   // -------------------------------------------------------------------------
