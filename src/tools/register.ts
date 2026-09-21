@@ -43,7 +43,7 @@ import registerSchedulerTools from './scheduler.tool.js';
 import registerSendTools from './send.tool.js';
 import { registerTemplateReadTools, registerTemplateWriteTools } from './templates.tool.js';
 import registerThreadTools from './thread.tool.js';
-import registerWatcherTools from './watcher.tool.js';
+import registerWatcherTools, { registerWatcherWriteTools } from './watcher.tool.js';
 
 export default function registerAllTools(
   server: McpServer,
@@ -101,5 +101,7 @@ export default function registerAllTools(
     registerFolderTools(server, imapService);
     registerTemplateWriteTools(server, templateService, imapService, smtpService);
     registerSchedulerTools(server, schedulerService);
+    // Can send new-email metadata to a webhook and rewrite config.toml
+    registerWatcherWriteTools(server, hooksService);
   }
 }

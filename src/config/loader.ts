@@ -351,7 +351,10 @@ function normalizeConfig(raw: RawAppConfig): AppConfig {
     database: resolveDatabaseConfig(raw.database),
     settings: {
       rateLimit: raw.settings.rate_limit,
-      readOnly: raw.settings.read_only,
+      // MCP_EMAIL_READ_ONLY applies over a config file as well, and only ever
+      // tightens it: a client entry can make one instance read-only, never
+      // lift a read_only set in the file.
+      readOnly: raw.settings.read_only || process.env.MCP_EMAIL_READ_ONLY === 'true',
       watcher: {
         enabled: raw.settings.watcher.enabled,
         folders: raw.settings.watcher.folders,
@@ -460,7 +463,7 @@ export function generateTemplate(): string {
 
 [settings]
 rate_limit = 10  # max emails per minute per account
-read_only = false  # set to true to disable all write operations
+read_only = false  # true: send nothing (scheduled emails included), change no mailbox
 
 # [settings.watcher]
 # enabled = false        # enable IMAP IDLE real-time monitoring

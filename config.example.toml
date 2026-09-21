@@ -4,6 +4,13 @@
 
 [settings]
 rate_limit = 10
+# true: no email is sent — the scheduled-email queue is not processed either —
+# and nothing changes in the mailboxes or the alert settings (no
+# configure_alerts, which can set a webhook). Scheduled emails then go out only
+# through a server without read_only, or `email-mcp scheduler check`.
+# MCP_EMAIL_READ_ONLY=true in an MCP client entry does the same for that one
+# instance, whatever this file says.
+read_only = false
 
 # ============================================================
 # cPanel / Dovecot HOSTED ACCOUNTS

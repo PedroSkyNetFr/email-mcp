@@ -548,6 +548,7 @@ For single-account setups (overrides config file):
 | `MCP_EMAIL_SMTP_POOL_ENABLED` | `true` | Enable SMTP transport pooling |
 | `MCP_EMAIL_SMTP_POOL_MAX_CONNECTIONS` | `1` | Max pooled SMTP connections |
 | `MCP_EMAIL_SMTP_POOL_MAX_MESSAGES` | `100` | Max messages per pooled connection |
+| `MCP_EMAIL_READ_ONLY` | `false` | `true` makes this instance read-only: it sends no email — scheduled ones included — and changes neither the mailboxes nor the alert settings. Also applies over `config.toml`, where it can only turn read-only on, never off |
 | `MCP_EMAIL_RATE_LIMIT` | `10` | Max sends per minute |
 | `MCP_EMAIL_SIGNATURE_PATH` | — | Path to an Outlook `.htm` signature for `append_signature` |
 | `MCP_EMAIL_PASSWORD_COMMAND` | — | Command printing the password, instead of `MCP_EMAIL_PASSWORD` (see below) |
@@ -735,12 +736,13 @@ forward fix. Run `pnpm db:migrate` after pulling code that adds new
 
 The scheduler enables future email delivery with a layered architecture:
 
-1. **MCP auto-check** — Processes the queue on server startup and every 60 seconds while the MCP server is running
+1. **MCP auto-check** — Processes the queue on server startup and every 60 seconds while the MCP server is running — **except in read-only mode**, where the server sends nothing at all, scheduled emails included, and logs `Scheduler disabled` at startup
 2. **CLI** — `email-mcp scheduler check` for manual or cron-based processing
 3. **OS-level daemon** — `email-mcp scheduler install` sets up launchd (macOS) or crontab (Linux) to run every minute, independently of the MCP server
 
 > **Important — the daemon must be installed for reliable delivery.**
-> Without it, scheduled emails only fire while an AI client is actively connected.
+> Without it, scheduled emails only fire while an AI client is actively connected
+> to a server that is not read-only.
 > Your machine also needs to be running at the scheduled time; if it's asleep or
 > off, the daemon will process overdue emails on next wake/startup. Failed sends
 > are retried up to **3 times** before being marked `failed`.
@@ -764,7 +766,25 @@ email-mcp scheduler check
 email-mcp scheduler uninstall
 ```
 
-Scheduled emails are stored as JSON files in `~/.local/state/email-mcp/scheduled/` with status-based locking. Each entry tracks attempts (max 3) and the last error, so you can inspect failures with `scheduler list`.
+Scheduled emails are stored as JSON files in `~/.local/state/email-mcp/scheduled/`. Each entry tracks attempts (max 3) and the last error, so you can inspect failures with `scheduler list`.
+
+A scheduled email goes out through its account's own backend — SMTP, or Microsoft Graph for an account with `backend = "graph"` — from the MCP server and from `scheduler check` alike. Its draft mirror (`[Scheduled: …]`) is kept in that account's Drafts and removed once the email is sent. A server only sends the scheduled emails of the accounts it serves; the others wait, without using up an attempt, for a server or a `scheduler check` that serves them — `scheduler list` shows them as overdue meanwhile.
+
+Several processes can work on that queue at once — every MCP client conversation
+starts its own server, and the daemon runs `scheduler check` besides. Each email
+still goes out once: before sending, a process creates `<id>.claim` next to the
+entry, and the filesystem lets only one process create it; the others leave that
+entry alone. Entries are written to a temporary file and renamed into place, so
+no process ever reads half of one.
+
+If a process is killed while sending, the email is **never** retried
+automatically: the SMTP server may already have accepted the message, and a
+retry would send it twice. Once its claim is 15 minutes old — longer than a
+stuck send lasts with the default timeouts — the next check marks it `failed`
+with `Interrupted while sending: it may have gone out`, so it shows up in
+`scheduler list`. Check the Sent folder before scheduling it again. An entry
+whose process died before its send began is marked `failed` the same way, as
+not sent.
 
 ### Real-time Watcher & AI Hooks
 
@@ -898,7 +918,7 @@ Uses PowerShell toast notifications (built-in):
 **AI-configurable:** The AI can check, test, and configure notifications at runtime:
 - `check_notification_setup` — diagnose platform support and show setup instructions
 - `test_notification` — send a test notification to verify everything works
-- `configure_alerts` — enable/disable desktop, sound, threshold, webhook (with optional persist to config file)
+- `configure_alerts` — enable/disable desktop, sound, threshold, webhook (with optional persist to config file); not available in read-only mode
 
 **Webhook payload:**
 ```json
@@ -1488,7 +1508,7 @@ on any other.
 | `get_watcher_status` | Show IMAP IDLE connections, folders being monitored, and last-seen UIDs |
 | `list_presets` | List available AI triage presets AND saved search presets (from `[[searches]]` in config.toml) |
 | `get_hooks_config` | Show current hooks configuration — preset, rules, and custom instructions |
-| `configure_alerts` | Update alert/notification settings at runtime |
+| `configure_alerts` | Update alert/notification settings at runtime — not in read-only mode, since it can set a webhook and rewrite `config.toml` |
 | `check_notification_setup` | Diagnose desktop notification support and provide setup instructions |
 | `test_notification` | Send a test notification to verify OS permissions are configured |
 

@@ -13,11 +13,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { loadConfig } from '../config/loader.js';
-import ConnectionManager from '../connections/manager.js';
-import RateLimiter from '../safety/rate-limiter.js';
-import ImapService from '../services/imap.service.js';
+import createMailBackends from '../services/mail-backends.js';
 import SchedulerService from '../services/scheduler.service.js';
-import SmtpService from '../services/smtp.service.js';
 
 const LAUNCHD_LABEL = 'com.email-mcp.scheduler';
 const LAUNCHD_PLIST_DIR = path.join(os.homedir(), 'Library', 'LaunchAgents');
@@ -30,11 +27,13 @@ function getExecutablePath(): string {
 
 async function createSchedulerService(): Promise<SchedulerService> {
   const config = await loadConfig();
-  const connections = new ConnectionManager(config.accounts);
-  const rateLimiter = new RateLimiter(config.settings.rateLimit);
-  const imapService = new ImapService(connections);
-  const smtpService = new SmtpService(connections, rateLimiter, imapService);
-  return new SchedulerService(smtpService, imapService);
+  // The server's own wiring, so a Graph account sends through Graph here too
+  const { mailService, sendService } = createMailBackends(config);
+  return new SchedulerService(
+    sendService,
+    mailService,
+    config.accounts.map((account) => account.name),
+  );
 }
 
 // ---------------------------------------------------------------------------

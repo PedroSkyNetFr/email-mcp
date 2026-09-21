@@ -29,7 +29,7 @@ vi.mock('./templates.tool.js', () => ({
   registerTemplateWriteTools: vi.fn(),
 }));
 vi.mock('./thread.tool.js', () => ({ default: vi.fn() }));
-vi.mock('./watcher.tool.js', () => ({ default: vi.fn() }));
+vi.mock('./watcher.tool.js', () => ({ default: vi.fn(), registerWatcherWriteTools: vi.fn() }));
 
 import registerAccountsTools from './accounts.tool.js';
 import registerBulkTools from './bulk.tool.js';
@@ -45,6 +45,7 @@ import registerManageTools from './manage.tool.js';
 import registerSchedulerTools from './scheduler.tool.js';
 import registerSendTools from './send.tool.js';
 import { registerTemplateWriteTools } from './templates.tool.js';
+import registerWatcherTools, { registerWatcherWriteTools } from './watcher.tool.js';
 
 function createConfig(readOnly: boolean): AppConfig {
   return {
@@ -111,6 +112,7 @@ describe('registerAllTools', () => {
     expect(registerFolderTools).toHaveBeenCalled();
     expect(registerTemplateWriteTools).toHaveBeenCalled();
     expect(registerSchedulerTools).toHaveBeenCalled();
+    expect(registerWatcherWriteTools).toHaveBeenCalled();
   });
 
   it('skips write tools when readOnly is true', () => {
@@ -137,6 +139,7 @@ describe('registerAllTools', () => {
     // disk, not to the server), so they stay available in read-only mode.
     expect(registerEmlTools).toHaveBeenCalled();
     expect(registerHeaderTools).toHaveBeenCalled();
+    expect(registerWatcherTools).toHaveBeenCalled();
     // Write tools should NOT be registered
     expect(registerSendTools).not.toHaveBeenCalled();
     expect(registerManageTools).not.toHaveBeenCalled();
@@ -147,5 +150,8 @@ describe('registerAllTools', () => {
     expect(registerFolderTools).not.toHaveBeenCalled();
     expect(registerTemplateWriteTools).not.toHaveBeenCalled();
     expect(registerSchedulerTools).not.toHaveBeenCalled();
+    // configure_alerts can send new-email metadata to a webhook and rewrite
+    // config.toml, so it is a write tool too.
+    expect(registerWatcherWriteTools).not.toHaveBeenCalled();
   });
 });
