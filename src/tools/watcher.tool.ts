@@ -1,6 +1,6 @@
 /**
  * Watcher & Hooks tools — inspect watcher status, list presets, view hooks config,
- * check notification setup, test notifications, configure alerts.
+ * check notification setup, test notifications; configure alerts (write).
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -265,6 +265,18 @@ export default function registerWatcherTools(
       };
     },
   );
+}
+
+/**
+ * Tools that change settings — registered only when writes are allowed.
+ *
+ * configure_alerts can point the webhook at any URL, which then receives the
+ * account, sender, subject and priority of every new email the watcher sees,
+ * and with save=true it writes that into config.toml for every instance. A
+ * read-only instance must not be able to do either.
+ */
+export function registerWatcherWriteTools(server: McpServer, hooksService: HooksService): void {
+  const hooksConfig = hooksService.getHooksConfig();
 
   // -------------------------------------------------------------------------
   // configure_alerts — runtime alert configuration

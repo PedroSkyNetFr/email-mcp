@@ -548,7 +548,7 @@ For single-account setups (overrides config file):
 | `MCP_EMAIL_SMTP_POOL_ENABLED` | `true` | Enable SMTP transport pooling |
 | `MCP_EMAIL_SMTP_POOL_MAX_CONNECTIONS` | `1` | Max pooled SMTP connections |
 | `MCP_EMAIL_SMTP_POOL_MAX_MESSAGES` | `100` | Max messages per pooled connection |
-| `MCP_EMAIL_READ_ONLY` | `false` | `true` makes this instance read-only: it sends no email — scheduled ones included — and changes nothing in the mailboxes. Also applies over `config.toml`, where it can only turn read-only on, never off |
+| `MCP_EMAIL_READ_ONLY` | `false` | `true` makes this instance read-only: it sends no email — scheduled ones included — and changes neither the mailboxes nor the alert settings. Also applies over `config.toml`, where it can only turn read-only on, never off |
 | `MCP_EMAIL_RATE_LIMIT` | `10` | Max sends per minute |
 | `MCP_EMAIL_SIGNATURE_PATH` | — | Path to an Outlook `.htm` signature for `append_signature` |
 | `MAIL_ALLOWED_SAVE_DIRS` | — | Extra directories where attachments, `.eml` messages and exports may be written (see below) |
@@ -831,7 +831,7 @@ Uses PowerShell toast notifications (built-in):
 **AI-configurable:** The AI can check, test, and configure notifications at runtime:
 - `check_notification_setup` — diagnose platform support and show setup instructions
 - `test_notification` — send a test notification to verify everything works
-- `configure_alerts` — enable/disable desktop, sound, threshold, webhook (with optional persist to config file)
+- `configure_alerts` — enable/disable desktop, sound, threshold, webhook (with optional persist to config file); not available in read-only mode
 
 **Webhook payload:**
 ```json
@@ -1421,7 +1421,7 @@ on any other.
 | `get_watcher_status` | Show IMAP IDLE connections, folders being monitored, and last-seen UIDs |
 | `list_presets` | List available AI triage presets AND saved search presets (from `[[searches]]` in config.toml) |
 | `get_hooks_config` | Show current hooks configuration — preset, rules, and custom instructions |
-| `configure_alerts` | Update alert/notification settings at runtime |
+| `configure_alerts` | Update alert/notification settings at runtime — not in read-only mode, since it can set a webhook and rewrite `config.toml` |
 | `check_notification_setup` | Diagnose desktop notification support and provide setup instructions |
 | `test_notification` | Send a test notification to verify OS permissions are configured |
 
