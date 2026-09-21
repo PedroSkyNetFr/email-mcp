@@ -88,14 +88,23 @@ async function renameWithRetry(from: string, to: string, attempt = 0): Promise<v
 export default class SchedulerService {
   private interval: ReturnType<typeof setInterval> | undefined;
 
+  private readonly servedAccounts: ReadonlySet<string>;
+
   /**
    * Both services route per account: a Graph-backed account sends and keeps
    * its draft mirror through Microsoft Graph, never through SMTP or IMAP.
+   *
+   * `accounts` names the accounts this process serves. Due entries of any
+   * other account are left for a process that serves it: sending them here
+   * could only fail with "account not found" and burn one of their attempts.
    */
   constructor(
     private sendService: ISendService,
     private mailService: IMailService,
-  ) {}
+    accounts: readonly string[],
+  ) {
+    this.servedAccounts = new Set(accounts);
+  }
 
   // -------------------------------------------------------------------------
   // Schedule a new email
@@ -354,6 +363,12 @@ export default class SchedulerService {
     if (firstLook === 'check-interrupted') {
       const failed = await SchedulerService.failIfInterrupted(filePath, id, unclaimed, now);
       return { outcome: failed ? 'failed' : 'skipped', errors };
+    }
+
+    // Not ours to send: left unclaimed and untouched, for a process that
+    // serves this account. Until one runs, `scheduler list` shows it overdue.
+    if (firstLook === 'send' && !this.servedAccounts.has(unclaimed.account)) {
+      return { outcome: 'skipped', errors };
     }
 
     // Another process holds it: normally it is sending this email, or

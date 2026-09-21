@@ -39,13 +39,20 @@ vi.mock('../logging.js', () => ({
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** A fake SMTP service that records every email it is asked to send. */
-function createFakeSmtp(options: { fail?: boolean } = {}) {
-  const sendEmail = vi.fn(async (_account: string, _email: { subject: string }) => {
+/**
+ * A fake SMTP service that records every email it is asked to send. Given
+ * `accounts`, it refuses any other one, as the real service does for an
+ * account missing from its configuration.
+ */
+function createFakeSmtp(options: { fail?: boolean; accounts?: string[] } = {}) {
+  const sendEmail = vi.fn(async (account: string, _email: { subject: string }) => {
     // Let the other instances run while this "network call" is in flight.
     await new Promise((resolve) => {
       setTimeout(resolve, 10);
     });
+    if (options.accounts && !options.accounts.includes(account)) {
+      throw new Error(`Account "${account}" not found`);
+    }
     if (options.fail) throw new Error('SMTP connection refused');
     return { messageId: `<${crypto.randomUUID()}@test>` };
   });
@@ -57,8 +64,15 @@ const fakeImap = {
   saveDraft: vi.fn().mockResolvedValue({ id: 1, mailbox: 'Drafts' }),
 };
 
-function createScheduler(smtp: ReturnType<typeof createFakeSmtp>): SchedulerService {
-  return new SchedulerService(smtp as unknown as ISendService, fakeImap as unknown as IMailService);
+function createScheduler(
+  smtp: ReturnType<typeof createFakeSmtp>,
+  accounts: string[] = ['work'],
+): SchedulerService {
+  return new SchedulerService(
+    smtp as unknown as ISendService,
+    fakeImap as unknown as IMailService,
+    accounts,
+  );
 }
 
 /** Write a queue entry directly — `schedule()` refuses a date in the past. */
@@ -376,5 +390,44 @@ describe('SchedulerService.checkAndSend — interrupted sends', () => {
     expect(smtp.sendEmail).not.toHaveBeenCalled();
     expect((await readEntry(SCHEDULED_DIR, scheduled.id))?.status).toBe('failed');
     expect(await leftovers()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Accounts served
+// ---------------------------------------------------------------------------
+
+describe('SchedulerService.checkAndSend — accounts this instance does not serve', () => {
+  it('leaves them unclaimed and untouched, without spending an attempt', async () => {
+    const scheduled = await seed({ account: 'personal' });
+    const smtp = createFakeSmtp({ accounts: ['work'] });
+
+    const result = await createScheduler(smtp, ['work']).checkAndSend();
+
+    expect(smtp.sendEmail).not.toHaveBeenCalled();
+    expect(result).toEqual({ sent: 0, failed: 0, errors: [] });
+    expect(await readEntry(SCHEDULED_DIR, scheduled.id)).toMatchObject({
+      status: 'pending',
+      attempts: 0,
+    });
+    expect(await leftovers()).toEqual([]);
+  });
+
+  it('lets each instance send only its own accounts, once each, on the first attempt', async () => {
+    // One instance per account group, like three MCP client entries each
+    // restricted to some accounts, all sharing the one queue.
+    const accounts = ['pro', 'personal', 'team'];
+    const entries = await Promise.all(accounts.map(async (account) => seed({ account })));
+    const fakes = accounts.map((account) => createFakeSmtp({ accounts: [account] }));
+    const instances = accounts.map((account, i) => createScheduler(fakes[i], [account]));
+
+    await Promise.all(instances.map(async (s) => s.checkAndSend()));
+
+    accounts.forEach((account, i) => {
+      expect(fakes[i].sendEmail).toHaveBeenCalledTimes(1);
+      expect(fakes[i].sendEmail.mock.calls[0][0]).toBe(account);
+    });
+    const sent = await Promise.all(entries.map(async (e) => readEntry(SCHEDULED_SENT_DIR, e.id)));
+    expect(sent.map((e) => e?.attempts)).toEqual([1, 1, 1]);
   });
 });

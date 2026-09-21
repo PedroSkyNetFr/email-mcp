@@ -29,7 +29,11 @@ async function createSchedulerService(): Promise<SchedulerService> {
   const config = await loadConfig();
   // The server's own wiring, so a Graph account sends through Graph here too
   const { mailService, sendService } = createMailBackends(config);
-  return new SchedulerService(sendService, mailService);
+  return new SchedulerService(
+    sendService,
+    mailService,
+    config.accounts.map((account) => account.name),
+  );
 }
 
 // ---------------------------------------------------------------------------

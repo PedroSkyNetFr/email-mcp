@@ -77,7 +77,11 @@ async function runServer(): Promise<void> {
   const calendarService = new CalendarService();
   const localCalendarService = new LocalCalendarService();
   const remindersService = new RemindersService();
-  const schedulerService = new SchedulerService(sendService, mailService);
+  const schedulerService = new SchedulerService(
+    sendService,
+    mailService,
+    config.accounts.map((account) => account.name),
+  );
   const watcherService = new WatcherService(config.settings.watcher, config.accounts);
   const hooksService = new HooksService(config.settings.hooks, imapService);
   const searchPresetRegistry = new SearchPresetRegistry(config.searches);
