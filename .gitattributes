@@ -1,0 +1,13 @@
+# Fins de ligne : LF partout, quel que soit le réglage de la machine.
+#
+# Le linter exige LF (règle linebreak-style), mais sans consigne ici git applique
+# core.autocrlf, que Git pour Windows règle à true : il réécrit alors en CRLF
+# chaque fichier qu'il sort du dépôt. Le 2026-08-06, un pull après fusion a ainsi
+# remis dix fichiers de src/ en CRLF ; pnpm check, donc le hook pre-push, a
+# échoué dès lors sur cette machine. Déclarée ici, la consigne voyage avec le
+# dépôt et passe avant le réglage local.
+* text=auto eol=lf
+
+# cmd.exe lit mal les scripts batch en LF : ils restent en CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
