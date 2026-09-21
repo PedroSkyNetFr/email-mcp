@@ -393,7 +393,7 @@ Commands:
   config init               Create template config
   scheduler check           Process pending scheduled emails
   scheduler list            Show all scheduled emails
-  scheduler install         Install OS-level scheduler (launchd/crontab)
+  scheduler install         Install OS-level scheduler (launchd/crontab/Task Scheduler)
   scheduler uninstall       Remove OS-level scheduler
   scheduler status          Show scheduler installation status
   help                      Show help
@@ -651,7 +651,7 @@ The scheduler enables future email delivery with a layered architecture:
 
 1. **MCP auto-check** — Processes the queue on server startup and every 60 seconds while the MCP server is running — **except in read-only mode**, where the server sends nothing at all, scheduled emails included, and logs `Scheduler disabled` at startup
 2. **CLI** — `email-mcp scheduler check` for manual or cron-based processing
-3. **OS-level daemon** — `email-mcp scheduler install` sets up launchd (macOS) or crontab (Linux) to run every minute, independently of the MCP server
+3. **OS-level daemon** — `email-mcp scheduler install` sets up launchd (macOS), crontab (Linux) or a Task Scheduler task (Windows) to run every minute, independently of the MCP server
 
 > **Important — the daemon must be installed for reliable delivery.**
 > Without it, scheduled emails only fire while an AI client is actively connected
@@ -663,7 +663,7 @@ The scheduler enables future email delivery with a layered architecture:
 #### Setting up the daemon
 
 ```bash
-# Install (macOS launchd / Linux crontab — runs every minute)
+# Install (macOS launchd / Linux crontab / Windows Task Scheduler — runs every minute)
 email-mcp scheduler install
 
 # Verify it's running
@@ -678,6 +678,14 @@ email-mcp scheduler check
 # Remove the daemon
 email-mcp scheduler uninstall
 ```
+
+**Windows.** The task, named `email-mcp scheduler`, runs without a console window. Run from an
+**administrator** terminal, `install` registers it to run in the background whether you are signed
+in or not (no password is stored). From a normal terminal Windows refuses that, and the task runs
+only while you are signed in; `install` says which one you got, and `status` shows it along with
+the last run and its result. The task records the paths of `node` and of email-mcp as they are at
+install time — including the `tsx` loader when you run from source — so reinstall after moving
+the folder or changing Node versions.
 
 Scheduled emails are stored as JSON files in `~/.local/state/email-mcp/scheduled/`. Each entry tracks attempts (max 3) and the last error, so you can inspect failures with `scheduler list`.
 
