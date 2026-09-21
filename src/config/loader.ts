@@ -35,7 +35,7 @@ function loadFromEnv(): RawAppConfig | null {
     return null;
   }
 
-  // Need a password, a command that prints one, or OAuth2 env vars
+  // Il faut un mot de passe, une commande qui l'imprime, ou les variables OAuth2
   const oauth2Provider = process.env.MCP_EMAIL_OAUTH2_PROVIDER;
   if (!password && !passwordCommand && !oauth2Provider) {
     return null;
@@ -150,29 +150,31 @@ async function loadFromFile(filePath: string = CONFIG_FILE): Promise<RawAppConfi
 }
 
 // ---------------------------------------------------------------------------
-// Account allow-list — `MCP_EMAIL_ACCOUNTS`
+// Liste des comptes exposés — `MCP_EMAIL_ACCOUNTS`
 // ---------------------------------------------------------------------------
 
-/** Env var restricting which of the configured accounts an instance exposes. */
+/** Variable d'environnement qui restreint les comptes exposés par une instance. */
 export const ACCOUNTS_FILTER_ENV = 'MCP_EMAIL_ACCOUNTS';
 
 /**
- * Narrow the configured accounts to the comma-separated names in
- * `MCP_EMAIL_ACCOUNTS`, leaving the config file untouched.
+ * Restreint les comptes configurés aux noms, séparés par des virgules, listés
+ * dans `MCP_EMAIL_ACCOUNTS`, sans toucher au fichier de configuration.
  *
- * An MCP client toggles a whole server, never an account inside one — accounts
- * are a parameter of the tools, not a protocol concept. So a single server
- * holding every mailbox is all-or-nothing. This var lets one config file back
- * several server entries, each exposing its own subset, which restores a
- * per-account switch on the client side: a second entry limited to the
- * mailboxes that should stay off most of the time can be enabled on demand.
+ * Un client MCP active ou coupe un serveur entier, jamais un compte à
+ * l'intérieur : les comptes sont un paramètre des outils, pas une notion du
+ * protocole. Un serveur unique qui porte toutes les boîtes, c'est donc tout ou
+ * rien. Cette variable permet à un même fichier d'alimenter plusieurs entrées de
+ * serveur, chacune avec son sous-ensemble, ce qui rend au client un interrupteur
+ * par compte : une entrée limitée aux boîtes qui doivent rester coupées la
+ * plupart du temps peut être activée à la demande.
  *
- * An unknown name is refused rather than ignored: a typo in a client config
- * would otherwise silently shrink what the instance serves, and a silently
- * shorter result is the failure mode that is hardest to notice.
+ * Un nom inconnu est refusé plutôt qu'ignoré : une faute de frappe dans la
+ * configuration du client réduirait sinon en silence ce que l'instance sert, et
+ * un résultat discrètement incomplet est la panne la plus difficile à repérer.
  *
- * Order comes from the config file, not from the variable, so the first account
- * — the default for saved searches — does not depend on how the list is typed.
+ * L'ordre vient du fichier, pas de la variable : le premier compte — celui que
+ * les recherches enregistrées utilisent par défaut — ne dépend pas de la façon
+ * dont la liste est saisie.
  */
 function applyAccountFilter(raw: RawAppConfig): RawAppConfig {
   const requested = (process.env[ACCOUNTS_FILTER_ENV] ?? '')
@@ -201,10 +203,11 @@ function applyAccountFilter(raw: RawAppConfig): RawAppConfig {
 // ---------------------------------------------------------------------------
 
 /**
- * Read a secret the schema allows to arrive either literally or from a
- * `*_command`. By this point `resolveSecretCommands` has run, so an empty value
- * means the two never met — a wiring mistake, not a config one, and it must not
- * reach the provider as an empty credential.
+ * Lit un secret que le schéma autorise à arriver soit en clair, soit par une
+ * `*_command`. À ce stade `resolveSecretCommands` a déjà tourné : une valeur
+ * vide signifie que les deux ne se sont pas rejoints — une erreur de câblage, pas
+ * de configuration — et elle ne doit pas partir chez le fournisseur comme un
+ * identifiant vide.
  */
 function requireResolved(value: string | undefined, account: string, field: string): string {
   if (!value) {
@@ -390,14 +393,14 @@ function normalizeConfig(raw: RawAppConfig): AppConfig {
  * Useful for read-modify-write operations in CLI commands.
  * Throws if no config file exists or validation fails.
  *
- * Deliberately NOT filtered by `MCP_EMAIL_ACCOUNTS`: its callers save the
- * result back with `saveConfig`, so a filter here would erase from the file
- * every account the current instance happens to hide.
+ * Volontairement NON filtrée par `MCP_EMAIL_ACCOUNTS` : ses appelants
+ * réenregistrent le résultat avec `saveConfig`, et un filtre ici effacerait du
+ * fichier tous les comptes que l'instance en cours se trouve masquer.
  *
- * Deliberately NOT passed through `resolveSecretCommands` either, for the same
- * reason and with a worse outcome: the first `account edit` would write every
- * vault-held secret back into the file in plain text, next to the command that
- * was meant to keep it out.
+ * Volontairement NON passée par `resolveSecretCommands` non plus, pour la même
+ * raison et avec une conséquence pire : le premier `account edit` réécrirait en
+ * clair dans le fichier chaque secret tenu par le coffre, à côté de la commande
+ * censée l'en tenir à l'écart.
  */
 export async function loadRawConfig(configPath?: string): Promise<RawAppConfig> {
   const filePath = configPath ?? CONFIG_FILE;

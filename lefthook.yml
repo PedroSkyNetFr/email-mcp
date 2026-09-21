@@ -26,9 +26,10 @@ pre-commit:
 commit-msg:
   commands:
     conventional-commit:
-      # A script file, not an inline block: on Windows lefthook passes inline
-      # scripts to `sh -c "..."` without escaping their own double quotes, and
-      # the inline version never parsed. See the header of the script.
+      # Un fichier de script, pas un bloc en ligne : sous Windows, lefthook passe
+      # les scripts en ligne à `sh -c "..."` sans échapper leurs propres
+      # guillemets doubles, et la version en ligne n'était jamais analysée.
+      # Voir l'en-tête du script.
       run: node scripts/verify-commit-msg.mjs {1}
 
 pre-push:

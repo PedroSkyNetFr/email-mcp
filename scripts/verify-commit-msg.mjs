@@ -1,28 +1,28 @@
 /**
- * commit-msg hook: enforce the Conventional Commits header.
+ * Hook commit-msg : impose l'en-tête Conventional Commits.
  *
- *   node scripts/verify-commit-msg.mjs <commit message file>
+ *   node scripts/verify-commit-msg.mjs <fichier du message de commit>
  *
- * Why a script file. Lefthook hands a multi-line `run:` block to
- * `sh -c "…"`, and on Windows that wrapper does not escape the block's own
- * double quotes. The former inline version was full of `echo "…"`, so it never
- * parsed there: every commit was rejected with
+ * Pourquoi un fichier. Lefthook passe un bloc `run:` sur plusieurs lignes à
+ * `sh -c "…"`, et sous Windows cette enveloppe n'échappe pas les guillemets
+ * doubles du bloc lui-même. L'ancienne version en ligne était pleine de
+ * `echo "…"` : elle n'y était jamais analysée, et chaque commit était rejeté par
  *
  *   -c: line 2: unexpected EOF while looking for matching `"'
  *
- * whatever the message, and whether or not cocogitto was installed. A file
- * leaves nothing for the wrapper to mangle.
+ * quel que soit le message, et que cocogitto soit installé ou non. Un fichier
+ * ne laisse rien à abîmer à l'enveloppe.
  *
- * cocogitto stays the reference when it is on the PATH. Without it, the header
- * is checked against the types declared in cog.toml — so a missing tool no
- * longer blocks every commit, and no longer lets a malformed one through
- * either. CI does not check commit messages; this hook is the only guard.
+ * cocogitto reste la référence quand il est dans le PATH. Sans lui, l'en-tête
+ * est vérifié contre les types déclarés dans cog.toml : un outil absent ne
+ * bloque plus tous les commits, et ne laisse pas passer non plus un message mal
+ * formé. La CI ne vérifie pas les messages : ce hook est le seul garde-fou.
  */
 
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-// Mirrors [commit_types] in cog.toml.
+// Reflet de [commit_types] dans cog.toml.
 const TYPES = [
   'feat',
   'fix',
@@ -39,8 +39,9 @@ const TYPES = [
 
 const HEADER = new RegExp(`^(${TYPES.join('|')})(\\([\\w./-]+\\))?!?: \\S`);
 
-// Headers git writes itself. `git merge` and `git revert` run this hook too,
-// and refusing their default message would block two routine operations.
+// En-têtes que git écrit lui-même. `git merge` et `git revert` déclenchent aussi
+// ce hook, et refuser leur message par défaut bloquerait deux opérations
+// courantes.
 const GIT_GENERATED = /^(Merge |Revert ")/;
 
 function explain() {
@@ -70,8 +71,9 @@ if (!cog.error) {
   process.exit(cog.status ?? 1);
 }
 
-// cocogitto is not installed: check the header ourselves. It is the first line
-// that is neither blank nor a comment git added for the editor.
+// cocogitto n'est pas installé : on vérifie l'en-tête nous-mêmes. C'est la
+// première ligne qui n'est ni vide, ni un commentaire ajouté par git pour
+// l'éditeur.
 const header =
   readFileSync(file, 'utf-8')
     .split(/\r?\n/)

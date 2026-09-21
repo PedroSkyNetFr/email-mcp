@@ -1,10 +1,10 @@
 /**
- * Connection test command.
+ * Commande de test des connexions.
  *
- * Probes each configured account over the transport it actually uses at
- * runtime: Microsoft Graph for `backend = "graph"`, IMAP + SMTP otherwise.
- * OAuth2 accounts get the token service the server gives them, so a mailbox
- * reachable by the server is reachable here too — and vice versa.
+ * Sonde chaque compte configuré par le transport qu'il utilise réellement à
+ * l'exécution : Microsoft Graph pour `backend = "graph"`, IMAP + SMTP sinon.
+ * Les comptes OAuth2 reçoivent le service de jetons que leur donne le serveur :
+ * une boîte joignable par le serveur l'est aussi ici, et inversement.
  */
 
 import { intro, log, outro, spinner as p_spinner } from '@clack/prompts';
@@ -18,9 +18,10 @@ import OAuthService from '../services/oauth.service.js';
 import type { AccountConfig } from '../types/index.js';
 
 /**
- * Graph-backed accounts never open an IMAP or SMTP socket, so testing those
- * ports would report a failure the server would never hit. Listing folders
- * exercises the whole chain instead: refresh token → access token → Graph API.
+ * Un compte servi par Graph n'ouvre jamais de connexion IMAP ni SMTP : tester
+ * ces ports signalerait un échec que le serveur ne rencontre jamais. Lister les
+ * dossiers exerce au contraire toute la chaîne : jeton de rafraîchissement →
+ * jeton d'accès → API Graph.
  */
 async function testGraphAccount(
   account: AccountConfig,
@@ -35,8 +36,8 @@ async function testGraphAccount(
       () => account,
     );
     const mailboxes = await service.listMailboxes(account.name);
-    // Graph names the inbox after the mailbox language ("Boîte de réception"),
-    // so the SPECIAL-USE attribute is what identifies it, not the path.
+    // Graph nomme la boîte de réception dans la langue de la boîte (« Boîte de
+    // réception ») : c'est l'attribut SPECIAL-USE qui l'identifie, pas le chemin.
     const inbox = mailboxes.find((box) => box.specialUse === '\\Inbox' || box.path === 'INBOX');
     const inboxInfo = inbox ? `, INBOX ${inbox.totalMessages} messages` : '';
     spinner.stop(`Graph ✓ graph.microsoft.com — ${mailboxes.length} folders${inboxInfo}`);
@@ -50,9 +51,9 @@ async function testGraphAccount(
 }
 
 /**
- * Test the IMAP and SMTP endpoints of a mail-protocol account. The OAuth
- * service is forwarded so token-authenticated accounts are exercised with a
- * real access token instead of a missing password.
+ * Teste les points d'accès IMAP et SMTP d'un compte de messagerie classique.
+ * Le service OAuth est transmis pour qu'un compte authentifié par jeton soit
+ * testé avec un vrai jeton d'accès, et non avec un mot de passe inexistant.
  */
 async function testImapAccount(
   account: AccountConfig,
@@ -117,8 +118,9 @@ export default async function runTest(accountFilter?: string): Promise<void> {
     throw new Error('No matching accounts found');
   }
 
-  // One token cache for the whole run — an account tested twice (or two
-  // accounts sharing an app registration) does not re-redeem its refresh token.
+  // Un seul cache de jetons pour toute l'exécution : un compte testé deux fois
+  // (ou deux comptes partageant une application) n'échange pas son jeton de
+  // rafraîchissement à chaque fois.
   const oauthService = new OAuthService();
 
   let allPassed = true;

@@ -37,8 +37,9 @@ export const OAuth2ConfigSchema = z
     client_id: z.string().min(1, 'OAuth2 client_id is required'),
     client_secret: z.string().min(1, 'OAuth2 client_secret is required').optional(),
     refresh_token: z.string().min(1, 'OAuth2 refresh_token is required').optional(),
-    // Shell commands printing the secret instead of storing it here, so the
-    // credential can live in a password manager. See secret-command.ts.
+    // Commandes qui impriment le secret au lieu de le stocker ici, pour que
+    // l'identifiant puisse vivre dans un gestionnaire de mots de passe. Voir
+    // secret-command.ts.
     client_secret_command: z.string().min(1).optional(),
     refresh_token_command: z.string().min(1).optional(),
     // Custom provider endpoints (only when provider = "custom")
@@ -60,7 +61,7 @@ export const AccountConfigSchema = z
     full_name: z.string().optional(),
     username: z.string().optional(),
     password: z.string().optional(),
-    // Shell command printing the password instead of storing it here. See
+    // Commande qui imprime le mot de passe au lieu de le stocker ici. Voir
     // secret-command.ts.
     password_command: z.string().min(1).optional(),
     oauth2: OAuth2ConfigSchema.optional(),

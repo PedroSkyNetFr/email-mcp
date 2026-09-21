@@ -29,10 +29,11 @@ name = "account-one"
 email = "example@sample.com"
 full_name = "Your Name"
 password = "________"
-# Instead of storing the password here, a command can print it — the secret
-# then lives in a password manager and this file only says where to fetch it.
-# Give one or the other, never both. The command must be non-interactive.
-# See "Keeping credentials out of the config file" in the README.
+# Au lieu de stocker le mot de passe ici, une commande peut l'imprimer : le
+# secret vit alors dans un gestionnaire de mots de passe, et ce fichier dit
+# seulement où le chercher. L'un ou l'autre, jamais les deux. La commande ne doit
+# rien demander de façon interactive. Voir « Keeping credentials out of the
+# config file » dans le README.
 # password_command = 'op read "op://Private/mail/password"'
 sent_folder = "INBOX.Sent Messages"
 # Optional — Outlook signature (.htm). With append_signature:true on

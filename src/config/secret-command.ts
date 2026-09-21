@@ -1,23 +1,24 @@
 /**
- * Secret indirection — `*_command` config fields.
+ * Indirection des secrets — champs de configuration `*_command`.
  *
- * Credentials in `config.toml` sit in plain text: mailbox passwords, an OAuth2
- * client secret, a refresh token. Encrypting the file in place would not buy
- * much, because the server has to hand the cleartext to the mail provider on
- * its own, at startup, with nobody around to unlock anything — so whatever key
- * it uses must be reachable by any code running as the same user.
+ * Les identifiants de `config.toml` y sont en clair : mots de passe des boîtes,
+ * secret client OAuth2, jeton de rafraîchissement. Chiffrer le fichier sur place
+ * n'apporterait pas grand-chose : le serveur doit remettre le secret en clair au
+ * fournisseur de messagerie tout seul, au démarrage, sans personne pour
+ * déverrouiller quoi que ce soit — la clé qu'il utiliserait serait donc
+ * accessible à tout code tournant sous le même utilisateur.
  *
- * What does help is not holding the secret at all. `password_command`,
- * `client_secret_command` and `refresh_token_command` name a command; the
- * server runs it at load time and reads the secret from its standard output.
- * The store on the other end is the user's to choose — KeePassXC, Bitwarden,
- * 1Password, `pass`, the Windows Credential Manager — because the contract is
- * just "print the secret and exit 0".
+ * Ce qui aide, c'est de ne pas détenir le secret du tout. `password_command`,
+ * `client_secret_command` et `refresh_token_command` désignent une commande ;
+ * le serveur l'exécute au chargement et lit le secret sur sa sortie standard.
+ * Le coffre à l'autre bout est au choix de l'utilisateur — KeePassXC,
+ * Bitwarden, 1Password, `pass`, le Gestionnaire d'identifiants Windows — puisque
+ * le contrat se résume à « imprimer le secret et sortir avec le code 0 ».
  *
- * The command runs through the platform shell (`cmd.exe` on Windows, `sh`
- * elsewhere), which is what makes the published one-liners of those tools work
- * unchanged. That is not a new attack surface: anyone who can write to
- * `config.toml` can already read the secrets it holds.
+ * La commande passe par le shell de la plateforme (`cmd.exe` sous Windows, `sh`
+ * ailleurs) : c'est ce qui fait fonctionner tels quels les one-liners publiés
+ * par ces outils. Ce n'est pas une surface d'attaque nouvelle : qui peut écrire
+ * dans `config.toml` peut déjà lire les secrets qu'il contient.
  */
 
 import { exec } from 'node:child_process';
@@ -28,20 +29,21 @@ import type { RawAppConfig } from './schema.js';
 const execAsync = promisify(exec);
 
 /**
- * How long a secret command may take. The server is started by an MCP client
- * with no terminal attached, so a vault that decides to prompt would otherwise
- * hang the whole process with nothing on screen to explain it.
+ * Durée maximale d'une commande de secret. Le serveur est lancé par un client
+ * MCP sans terminal : un coffre qui déciderait de demander une phrase de passe
+ * bloquerait tout le processus, sans rien à l'écran pour l'expliquer.
  */
 export const SECRET_COMMAND_TIMEOUT_MS = 30_000;
 
-/** Longest stderr excerpt echoed back in an error. */
+/** Longueur maximale de l'extrait de stderr repris dans un message d'erreur. */
 const STDERR_EXCERPT = 400;
 
 /**
- * Run one secret command and return what it printed.
+ * Exécute une commande de secret et renvoie ce qu'elle a imprimé.
  *
- * `label` identifies the field in every error — "account \"work\" password_command"
- * — because a failure here surfaces at server startup, far from the file.
+ * `label` identifie le champ dans chaque erreur — « account "work"
+ * password_command » — car un échec ici apparaît au démarrage du serveur, loin
+ * du fichier de configuration.
  */
 export async function runSecretCommand(command: string, label: string): Promise<string> {
   let stdout: string;
@@ -69,9 +71,10 @@ export async function runSecretCommand(command: string, label: string): Promise<
     throw new Error(`${label} failed${exit}: ${command}${detail ? `\n${detail}` : ''}`);
   }
 
-  // Only trailing newlines are stripped: a password may legitimately end with a
-  // space, and silently trimming it would fail authentication for no visible
-  // reason. Password managers print the secret followed by a newline.
+  // Seuls les sauts de ligne finaux sont retirés : un mot de passe peut
+  // légitimement finir par une espace, et la rogner en silence ferait échouer
+  // l'authentification sans raison visible. Les gestionnaires de mots de passe
+  // impriment le secret suivi d'un saut de ligne.
   const secret = stdout.replace(/[\r\n]+$/, '');
 
   if (secret.length === 0) {
@@ -86,14 +89,15 @@ export async function runSecretCommand(command: string, label: string): Promise<
 }
 
 /**
- * Replace every `*_command` field by the secret its command prints.
+ * Remplace chaque champ `*_command` par le secret qu'imprime sa commande.
  *
- * Runs after the account filter, so an instance scoped with
- * `MCP_EMAIL_ACCOUNTS` only asks the vault for the mailboxes it actually
- * serves — three instances of the server do not mean three times the prompts.
+ * S'exécute après le filtre de comptes : une instance restreinte par
+ * `MCP_EMAIL_ACCOUNTS` n'interroge le coffre que pour les boîtes qu'elle sert
+ * réellement — trois instances du serveur ne font pas trois fois les demandes.
  *
- * Commands run one after another rather than at once: a locked vault asking to
- * be opened should do it once, not in five simultaneous windows.
+ * Les commandes s'exécutent l'une après l'autre plutôt qu'en même temps : un
+ * coffre verrouillé qui demande à être ouvert doit le faire une fois, pas dans
+ * cinq fenêtres simultanées.
  */
 export async function resolveSecretCommands(raw: RawAppConfig): Promise<RawAppConfig> {
   const needsResolution = raw.accounts.some(

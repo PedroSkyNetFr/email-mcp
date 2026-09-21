@@ -100,8 +100,8 @@ describe('AccountConfigSchema', () => {
   });
 
   it('rejects password and password_command together', () => {
-    // Ambiguous rather than harmless: nothing in the file would say which of
-    // the two the server actually used.
+    // Ambigu plutôt qu'inoffensif : rien dans le fichier ne dirait lequel des
+    // deux le serveur a réellement utilisé.
     expect(() =>
       AccountConfigSchema.parse(validAccount({ password_command: 'echo hunter2' })),
     ).toThrow('not both');
