@@ -15,6 +15,12 @@ import path from 'node:path';
 import { loadConfig } from '../config/loader.js';
 import createMailBackends from '../services/mail-backends.js';
 import SchedulerService from '../services/scheduler.service.js';
+import {
+  installWindowsTask,
+  removeWindowsTask,
+  WINDOWS_TASK_NAME,
+  windowsTaskStatus,
+} from './windows-task.js';
 
 const LAUNCHD_LABEL = 'com.email-mcp.scheduler';
 const LAUNCHD_PLIST_DIR = path.join(os.homedir(), 'Library', 'LaunchAgents');
@@ -25,15 +31,32 @@ function getExecutablePath(): string {
   return process.argv[1] ?? 'email-mcp';
 }
 
-async function createSchedulerService(): Promise<SchedulerService> {
+/**
+ * The command line of one queue check, rebuilt from this very process: its
+ * node flags come along, so the check also runs from source under tsx, whose
+ * loader lives in execArgv, and not only from the published package.
+ */
+function checkCommandLine(): string[] {
+  return [process.execPath, ...process.execArgv, getExecutablePath(), 'scheduler', 'check'];
+}
+
+async function createSchedulerService(): Promise<{
+  scheduler: SchedulerService;
+  close: () => Promise<void>;
+}> {
   const config = await loadConfig();
   // The server's own wiring, so a Graph account sends through Graph here too
-  const { mailService, sendService } = createMailBackends(config);
-  return new SchedulerService(
-    sendService,
-    mailService,
-    config.accounts.map((account) => account.name),
-  );
+  const { connections, mailService, sendService } = createMailBackends(config);
+  return {
+    scheduler: new SchedulerService(
+      sendService,
+      mailService,
+      config.accounts.map((account) => account.name),
+    ),
+    // Open IMAP/SMTP connections would keep the process alive long after the
+    // check — and a periodic task waits for one check to end before the next.
+    close: async () => connections.closeAll(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -41,8 +64,13 @@ async function createSchedulerService(): Promise<SchedulerService> {
 // ---------------------------------------------------------------------------
 
 async function runCheck(): Promise<void> {
-  const scheduler = await createSchedulerService();
-  const result = await scheduler.checkAndSend();
+  const { scheduler, close } = await createSchedulerService();
+  let result: Awaited<ReturnType<SchedulerService['checkAndSend']>>;
+  try {
+    result = await scheduler.checkAndSend();
+  } finally {
+    await close();
+  }
 
   if (result.sent > 0) {
     console.log(`✅ Sent ${result.sent} scheduled email(s)`);
@@ -57,7 +85,7 @@ async function runCheck(): Promise<void> {
 }
 
 async function runList(): Promise<void> {
-  const scheduler = await createSchedulerService();
+  const { scheduler } = await createSchedulerService();
   const emails = await scheduler.list({ status: 'all' });
 
   if (emails.length === 0) {
@@ -160,6 +188,16 @@ async function runInstall(): Promise<void> {
 
     console.log('✅ Installed Linux crontab scheduler');
     console.log('   Runs every minute');
+  } else if (platform === 'win32') {
+    const mode = await installWindowsTask(checkCommandLine());
+    console.log(`✅ Installed Windows scheduled task "${WINDOWS_TASK_NAME}"`);
+    console.log('   Runs every minute, without a window');
+    if (mode === 'S4U') {
+      console.log('   In the background, whether you are signed in or not');
+    } else {
+      console.log('   While you are signed in. To run it signed out too, run');
+      console.log('   `email-mcp scheduler install` again from an administrator terminal.');
+    }
   } else {
     console.error(`❌ Unsupported platform: ${platform}`);
     console.error("   Manually run 'email-mcp scheduler check' on a schedule.");
@@ -193,6 +231,12 @@ async function runUninstall(): Promise<void> {
       console.log('✅ Removed Linux crontab scheduler');
     } catch {
       console.log('ℹ️  No crontab scheduler found');
+    }
+  } else if (platform === 'win32') {
+    if (removeWindowsTask()) {
+      console.log(`✅ Removed Windows scheduled task "${WINDOWS_TASK_NAME}"`);
+    } else {
+      console.log('ℹ️  No Windows scheduled task found');
     }
   } else {
     console.error(`❌ Unsupported platform: ${platform}`);
@@ -235,10 +279,29 @@ async function runStatus(): Promise<void> {
     } catch {
       console.log('❌ Linux crontab scheduler: NOT INSTALLED');
     }
+  } else if (platform === 'win32') {
+    const task = windowsTaskStatus();
+    if (!task) {
+      console.log('❌ Windows scheduled task: NOT INSTALLED');
+    } else {
+      const where =
+        task.logonType === 'S4U' ? 'in the background, signed in or not' : 'while signed in';
+      console.log(`✅ Windows scheduled task: INSTALLED (${task.state}, runs ${where})`);
+      if (task.lastRun === null) {
+        console.log('   Last run: not yet');
+      } else {
+        const outcome =
+          task.lastResult === 0
+            ? 'succeeded'
+            : `failed, code 0x${(task.lastResult ?? 0).toString(16)}`;
+        console.log(`   Last run: ${new Date(task.lastRun).toLocaleString()} — ${outcome}`);
+      }
+      if (task.nextRun) console.log(`   Next run: ${new Date(task.nextRun).toLocaleString()}`);
+    }
   }
 
   // Show queue status
-  const scheduler = await createSchedulerService();
+  const { scheduler } = await createSchedulerService();
   const pending = await scheduler.list({ status: 'pending' });
   const overdue = pending.filter((e) => new Date(e.sendAt).getTime() < Date.now());
 
@@ -255,7 +318,7 @@ email-mcp scheduler — Email scheduling management
 Commands:
   check      Send overdue scheduled emails
   list       Display all scheduled emails
-  install    Install OS periodic check (macOS launchd / Linux crontab)
+  install    Install OS periodic check (macOS launchd / Linux crontab / Windows Task Scheduler)
   uninstall  Remove OS periodic check
   status     Show scheduler installation status
 `.trim();
