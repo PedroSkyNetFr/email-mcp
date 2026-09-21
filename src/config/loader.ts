@@ -17,6 +17,7 @@ import type {
 } from '../types/index.js';
 import type { RawAccountConfig, RawAppConfig, RawSearchPreset } from './schema.js';
 import { AppConfigFileSchema } from './schema.js';
+import { resolveSecretCommands } from './secret-command.js';
 import { CONFIG_FILE, xdg } from './xdg.js';
 
 // ---------------------------------------------------------------------------
@@ -26,6 +27,7 @@ import { CONFIG_FILE, xdg } from './xdg.js';
 function loadFromEnv(): RawAppConfig | null {
   const email = process.env.MCP_EMAIL_ADDRESS;
   const password = process.env.MCP_EMAIL_PASSWORD;
+  const passwordCommand = process.env.MCP_EMAIL_PASSWORD_COMMAND;
   const imapHost = process.env.MCP_EMAIL_IMAP_HOST;
   const smtpHost = process.env.MCP_EMAIL_SMTP_HOST;
 
@@ -33,9 +35,9 @@ function loadFromEnv(): RawAppConfig | null {
     return null;
   }
 
-  // Need either password or OAuth2 env vars
+  // Need a password, a command that prints one, or OAuth2 env vars
   const oauth2Provider = process.env.MCP_EMAIL_OAUTH2_PROVIDER;
-  if (!password && !oauth2Provider) {
+  if (!password && !passwordCommand && !oauth2Provider) {
     return null;
   }
 
@@ -103,6 +105,7 @@ function loadFromEnv(): RawAppConfig | null {
         full_name: process.env.MCP_EMAIL_FULL_NAME,
         username: process.env.MCP_EMAIL_USERNAME,
         password,
+        password_command: passwordCommand,
         oauth2,
         signature_path: process.env.MCP_EMAIL_SIGNATURE_PATH,
         backend: process.env.MCP_EMAIL_BACKEND === 'graph' ? 'graph' : undefined,
@@ -197,12 +200,28 @@ function applyAccountFilter(raw: RawAppConfig): RawAppConfig {
 // Normalize raw config → typed AppConfig
 // ---------------------------------------------------------------------------
 
-function normalizeOAuth2(raw: NonNullable<RawAccountConfig['oauth2']>): OAuth2Config {
+/**
+ * Read a secret the schema allows to arrive either literally or from a
+ * `*_command`. By this point `resolveSecretCommands` has run, so an empty value
+ * means the two never met — a wiring mistake, not a config one, and it must not
+ * reach the provider as an empty credential.
+ */
+function requireResolved(value: string | undefined, account: string, field: string): string {
+  if (!value) {
+    throw new Error(`Account "${account}": ${field} is empty after secret resolution.`);
+  }
+  return value;
+}
+
+function normalizeOAuth2(
+  raw: NonNullable<RawAccountConfig['oauth2']>,
+  accountName: string,
+): OAuth2Config {
   return {
     provider: raw.provider,
     clientId: raw.client_id,
-    clientSecret: raw.client_secret,
-    refreshToken: raw.refresh_token,
+    clientSecret: requireResolved(raw.client_secret, accountName, 'oauth2.client_secret'),
+    refreshToken: requireResolved(raw.refresh_token, accountName, 'oauth2.refresh_token'),
     tokenUrl: raw.token_url,
     authUrl: raw.auth_url,
     scopes: raw.scopes,
@@ -216,7 +235,7 @@ function normalizeAccount(raw: RawAccountConfig): AccountConfig {
     fullName: raw.full_name,
     username: raw.username ?? raw.email,
     password: raw.password,
-    oauth2: raw.oauth2 ? normalizeOAuth2(raw.oauth2) : undefined,
+    oauth2: raw.oauth2 ? normalizeOAuth2(raw.oauth2, raw.name) : undefined,
     imap: {
       host: raw.imap.host,
       port: raw.imap.port,
@@ -374,6 +393,11 @@ function normalizeConfig(raw: RawAppConfig): AppConfig {
  * Deliberately NOT filtered by `MCP_EMAIL_ACCOUNTS`: its callers save the
  * result back with `saveConfig`, so a filter here would erase from the file
  * every account the current instance happens to hide.
+ *
+ * Deliberately NOT passed through `resolveSecretCommands` either, for the same
+ * reason and with a worse outcome: the first `account edit` would write every
+ * vault-held secret back into the file in plain text, next to the command that
+ * was meant to keep it out.
  */
 export async function loadRawConfig(configPath?: string): Promise<RawAppConfig> {
   const filePath = configPath ?? CONFIG_FILE;
@@ -393,14 +417,14 @@ export async function loadConfig(configPath?: string): Promise<AppConfig> {
   const envConfig = loadFromEnv();
   if (envConfig) {
     const validated = AppConfigFileSchema.parse(envConfig);
-    return normalizeConfig(applyAccountFilter(validated));
+    return normalizeConfig(await resolveSecretCommands(applyAccountFilter(validated)));
   }
 
   // 2. Fall back to TOML config file
   const fileConfig = await loadFromFile(configPath);
   if (fileConfig) {
     const validated = AppConfigFileSchema.parse(fileConfig);
-    return normalizeConfig(applyAccountFilter(validated));
+    return normalizeConfig(await resolveSecretCommands(applyAccountFilter(validated)));
   }
 
   throw new Error(

@@ -427,4 +427,113 @@ read_only = true
       expect(config.accounts.map((a) => a.name)).toEqual(['envAccount']);
     });
   });
+
+  describe('secrets par commande (password_command)', () => {
+    /**
+     * Le secret n'est plus dans le fichier : une commande l'imprime au
+     * chargement. Ces cas vérifient le bout en bout — schéma, filtre de
+     * comptes, résolution — pas seulement la résolution isolée.
+     */
+    afterEach(() => {
+      delete process.env[ACCOUNTS_FILTER_ENV];
+    });
+
+    /** Écrit un script Node et rend la commande qui l'exécute. */
+    async function script(name: string, body: string): Promise<string> {
+      const file = path.join(tmpDir, `${name}.cjs`);
+      await fs.writeFile(file, body, 'utf-8');
+      return `node "${file}"`;
+    }
+
+    it('remplace le mot de passe par la sortie de la commande', async () => {
+      const command = await script('pw', "process.stdout.write('depuis-le-coffre');");
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        `
+[[accounts]]
+name = "vault"
+email = "vault@example.com"
+password_command = '${command}'
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+`,
+        'utf-8',
+      );
+
+      const config = await loadConfig(configPath);
+
+      expect(config.accounts[0].password).toBe('depuis-le-coffre');
+    });
+
+    it("n'interroge pas le coffre pour un compte écarté par le filtre", async () => {
+      // Trois connecteurs pointant sur le même fichier ne doivent pas provoquer
+      // trois fois les demandes de déverrouillage : seuls les comptes servis
+      // par l'instance sont résolus.
+      const failing = await script('locked', 'process.exit(1);');
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        `
+[[accounts]]
+name = "served"
+email = "served@example.com"
+password = "literal"
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+
+[[accounts]]
+name = "hidden"
+email = "hidden@example.com"
+password_command = '${failing}'
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+`,
+        'utf-8',
+      );
+
+      // Sans filtre, la commande du second compte s'exécute et échoue.
+      await expect(loadConfig(configPath)).rejects.toThrow(/hidden/);
+
+      // Filtrée, elle n'est jamais lancée.
+      process.env[ACCOUNTS_FILTER_ENV] = 'served';
+      const config = await loadConfig(configPath);
+      expect(config.accounts.map((a) => a.name)).toEqual(['served']);
+    });
+
+    it('refuse un compte qui donne à la fois password et password_command', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        `
+[[accounts]]
+name = "ambigu"
+email = "ambigu@example.com"
+password = "literal"
+password_command = 'node --version'
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+`,
+        'utf-8',
+      );
+
+      await expect(loadConfig(configPath)).rejects.toThrow();
+    });
+  });
 });

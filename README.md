@@ -550,6 +550,7 @@ For single-account setups (overrides config file):
 | `MCP_EMAIL_SMTP_POOL_MAX_MESSAGES` | `100` | Max messages per pooled connection |
 | `MCP_EMAIL_RATE_LIMIT` | `10` | Max sends per minute |
 | `MCP_EMAIL_SIGNATURE_PATH` | — | Path to an Outlook `.htm` signature for `append_signature` |
+| `MCP_EMAIL_PASSWORD_COMMAND` | — | Command printing the password, instead of `MCP_EMAIL_PASSWORD` (see below) |
 | `MCP_EMAIL_ACCOUNTS` | — | Restrict this instance to these `config.toml` account names (see below) |
 | `MAIL_ALLOWED_SAVE_DIRS` | — | Extra directories where attachments, `.eml` messages and exports may be written (see below) |
 | `MAIL_ALLOW_ANY_SAVE_DIR` | `false` | `true` disables the allow-list entirely (any absolute path) |
@@ -582,6 +583,62 @@ Toggling `email-team` off in the client now hides that mailbox and nothing else.
   serves, which is the failure mode hardest to notice.
 - The filter never touches the file: `email-mcp account edit` and friends still
   see and save every account.
+
+#### Keeping credentials out of the config file (`*_command`)
+
+`config.toml` holds credentials in plain text. Three fields let a command supply
+them instead, so the secret lives in a password manager and the file only names
+where to fetch it:
+
+| Field | Replaces |
+|-------|----------|
+| `password_command` | `password` |
+| `oauth2.client_secret_command` | `oauth2.client_secret` |
+| `oauth2.refresh_token_command` | `oauth2.refresh_token` |
+
+```toml
+[[accounts]]
+name = "work"
+email = "you@example.com"
+password_command = 'keepassxc-cli show -q -s -a Password --no-password -k "C:\keys\mail.keyx" "C:\keys\mail.kdbx" "mail/you@example.com"'
+```
+
+The command runs through the platform shell (`cmd.exe` on Windows, `sh`
+elsewhere), which is what makes the published one-liners of these tools work
+unchanged:
+
+```sh
+# Bitwarden          bw get password you@example.com
+# 1Password          op read "op://Private/mail/password"
+# pass               pass show mail/you@example.com
+# GNOME keyring      secret-tool lookup service mail account you@example.com
+# macOS keychain     security find-generic-password -s mail -a you@example.com -w
+```
+
+Rules, and what they exist for:
+
+- Give **either** the literal field **or** its `_command`, never both — nothing
+  in the file would otherwise say which one the server actually used.
+- The secret is read from standard output; trailing newlines are stripped, but
+  nothing else is, so a password ending in a space survives.
+- Empty output is an error rather than an empty credential, which would fail
+  later as an unexplained authentication rejection.
+- The command **must be non-interactive**. The server is started by an MCP
+  client with no terminal, so a vault that decides to prompt has no one to
+  answer it; after 30 seconds the command is killed and the error says so.
+  With KeePassXC this means a key-file-protected database (`--no-password -k`),
+  since `keepassxc-cli` otherwise reads the passphrase from standard input.
+- Commands run one at a time, and only for the accounts the instance actually
+  serves — combined with `MCP_EMAIL_ACCOUNTS`, three client entries pointing at
+  the same file do not mean three times the vault lookups.
+- `MCP_EMAIL_PASSWORD_COMMAND` does the same for the single-account
+  environment-variable setup.
+
+What this does and does not buy: the credential no longer sits in a file that a
+backup, a synced folder or a copied disk would carry off. It is **not** a
+defence against code running as the same user — that code can run the very same
+command. Scoped, revocable credentials (OAuth2) and rotation are what limit the
+damage there.
 
 #### Where files can be saved (`MAIL_ALLOWED_SAVE_DIRS`)
 
