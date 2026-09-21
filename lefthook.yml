@@ -26,18 +26,10 @@ pre-commit:
 commit-msg:
   commands:
     conventional-commit:
-      run: |
-        cog verify --file {1} 2>/dev/null || {
-          echo ""
-          echo "❌ Invalid commit message format"
-          echo ""
-          echo "Expected: <type>(<scope>): <description>"
-          echo "Example:  feat(imap): add thread reconstruction"
-          echo ""
-          echo "Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
-          echo ""
-          exit 1
-        }
+      # A script file, not an inline block: on Windows lefthook passes inline
+      # scripts to `sh -c "..."` without escaping their own double quotes, and
+      # the inline version never parsed. See the header of the script.
+      run: node scripts/verify-commit-msg.mjs {1}
 
 pre-push:
   parallel: true
