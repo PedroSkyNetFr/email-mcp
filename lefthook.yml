@@ -26,18 +26,11 @@ pre-commit:
 commit-msg:
   commands:
     conventional-commit:
-      run: |
-        cog verify --file {1} 2>/dev/null || {
-          echo ""
-          echo "❌ Invalid commit message format"
-          echo ""
-          echo "Expected: <type>(<scope>): <description>"
-          echo "Example:  feat(imap): add thread reconstruction"
-          echo ""
-          echo "Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
-          echo ""
-          exit 1
-        }
+      # Un fichier de script, pas un bloc en ligne : sous Windows, lefthook passe
+      # les scripts en ligne à `sh -c "..."` sans échapper leurs propres
+      # guillemets doubles, et la version en ligne n'était jamais analysée.
+      # Voir l'en-tête du script.
+      run: node scripts/verify-commit-msg.mjs {1}
 
 pre-push:
   parallel: true

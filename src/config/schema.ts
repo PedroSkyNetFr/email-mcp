@@ -31,16 +31,28 @@ export const SmtpConfigSchema = z.object({
     }),
 });
 
-export const OAuth2ConfigSchema = z.object({
-  provider: z.enum(['google', 'microsoft', 'custom']),
-  client_id: z.string().min(1, 'OAuth2 client_id is required'),
-  client_secret: z.string().min(1, 'OAuth2 client_secret is required'),
-  refresh_token: z.string().min(1, 'OAuth2 refresh_token is required'),
-  // Custom provider endpoints (only when provider = "custom")
-  token_url: z.string().url().optional(),
-  auth_url: z.string().url().optional(),
-  scopes: z.array(z.string()).optional(),
-});
+export const OAuth2ConfigSchema = z
+  .object({
+    provider: z.enum(['google', 'microsoft', 'custom']),
+    client_id: z.string().min(1, 'OAuth2 client_id is required'),
+    client_secret: z.string().min(1, 'OAuth2 client_secret is required').optional(),
+    refresh_token: z.string().min(1, 'OAuth2 refresh_token is required').optional(),
+    // Commandes qui impriment le secret au lieu de le stocker ici, pour que
+    // l'identifiant puisse vivre dans un gestionnaire de mots de passe. Voir
+    // secret-command.ts.
+    client_secret_command: z.string().min(1).optional(),
+    refresh_token_command: z.string().min(1).optional(),
+    // Custom provider endpoints (only when provider = "custom")
+    token_url: z.string().url().optional(),
+    auth_url: z.string().url().optional(),
+    scopes: z.array(z.string()).optional(),
+  })
+  .refine((data) => Boolean(data.client_secret) !== Boolean(data.client_secret_command), {
+    message: 'Set exactly one of oauth2.client_secret or oauth2.client_secret_command',
+  })
+  .refine((data) => Boolean(data.refresh_token) !== Boolean(data.refresh_token_command), {
+    message: 'Set exactly one of oauth2.refresh_token or oauth2.refresh_token_command',
+  });
 
 export const AccountConfigSchema = z
   .object({
@@ -49,6 +61,9 @@ export const AccountConfigSchema = z
     full_name: z.string().optional(),
     username: z.string().optional(),
     password: z.string().optional(),
+    // Commande qui imprime le mot de passe au lieu de le stocker ici. Voir
+    // secret-command.ts.
+    password_command: z.string().min(1).optional(),
     oauth2: OAuth2ConfigSchema.optional(),
     imap: ImapConfigSchema,
     smtp: SmtpConfigSchema,
@@ -69,8 +84,11 @@ export const AccountConfigSchema = z
     // append_signature:false. Requires signature_path. Defaults to false.
     signature_default: z.boolean().optional(),
   })
-  .refine((data) => data.password ?? data.oauth2, {
-    message: 'Either password or oauth2 config is required',
+  .refine((data) => !(data.password && data.password_command), {
+    message: 'Set password or password_command, not both',
+  })
+  .refine((data) => data.password ?? data.password_command ?? data.oauth2, {
+    message: 'Either password, password_command or oauth2 config is required',
   });
 
 export const WatcherConfigSchema = z.object({

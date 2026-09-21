@@ -2,12 +2,53 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { configExists, generateTemplate, loadConfig, saveConfig } from './loader.js';
+import {
+  ACCOUNTS_FILTER_ENV,
+  configExists,
+  generateTemplate,
+  loadConfig,
+  saveConfig,
+} from './loader.js';
 
 const MINIMAL_TOML = `
 [[accounts]]
 name = "test"
 email = "test@example.com"
+password = "secret"
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+`;
+
+const THREE_ACCOUNTS_TOML = `
+[[accounts]]
+name = "first"
+email = "first@example.com"
+password = "secret"
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+
+[[accounts]]
+name = "second"
+email = "second@example.com"
+password = "secret"
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+
+[[accounts]]
+name = "third"
+email = "third@example.com"
 password = "secret"
 
 [accounts.imap]
@@ -296,6 +337,201 @@ read_only = true
     it('rejects an empty [database].url', async () => {
       const configPath = path.join(tmpDir, 'config.toml');
       await fs.writeFile(configPath, `${MINIMAL_TOML}\n[database]\nurl = ""\n`, 'utf-8');
+
+      await expect(loadConfig(configPath)).rejects.toThrow();
+    });
+  });
+
+  describe('filtre de comptes (MCP_EMAIL_ACCOUNTS)', () => {
+    /**
+     * Un client MCP n'a pas d'interrupteur par compte : il active ou coupe un
+     * serveur entier. Cette variable permet à un même config.toml d'alimenter
+     * plusieurs entrées de connecteur, chacune n'exposant que ses comptes.
+     */
+    afterEach(() => {
+      delete process.env[ACCOUNTS_FILTER_ENV];
+    });
+
+    it('expose tous les comptes quand la variable est absente', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, THREE_ACCOUNTS_TOML, 'utf-8');
+
+      const config = await loadConfig(configPath);
+
+      expect(config.accounts.map((a) => a.name)).toEqual(['first', 'second', 'third']);
+    });
+
+    it('ne garde que les comptes nommés', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, THREE_ACCOUNTS_TOML, 'utf-8');
+      process.env[ACCOUNTS_FILTER_ENV] = 'first,third';
+
+      const config = await loadConfig(configPath);
+
+      expect(config.accounts.map((a) => a.name)).toEqual(['first', 'third']);
+    });
+
+    it('tolère les espaces et les séparateurs vides', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, THREE_ACCOUNTS_TOML, 'utf-8');
+      process.env[ACCOUNTS_FILTER_ENV] = ' second , , third ';
+
+      const config = await loadConfig(configPath);
+
+      expect(config.accounts.map((a) => a.name)).toEqual(['second', 'third']);
+    });
+
+    it("garde l'ordre du fichier, pas celui de la variable", async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, THREE_ACCOUNTS_TOML, 'utf-8');
+      process.env[ACCOUNTS_FILTER_ENV] = 'third,first';
+
+      const config = await loadConfig(configPath);
+
+      // Le premier compte sert de défaut aux recherches enregistrées : il ne
+      // doit pas dépendre de la façon dont la liste est saisie.
+      expect(config.accounts.map((a) => a.name)).toEqual(['first', 'third']);
+    });
+
+    it('ignore une valeur vide', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, THREE_ACCOUNTS_TOML, 'utf-8');
+      process.env[ACCOUNTS_FILTER_ENV] = '   ';
+
+      const config = await loadConfig(configPath);
+
+      expect(config.accounts).toHaveLength(3);
+    });
+
+    it('refuse un nom inconnu au lieu de servir moins de comptes en silence', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, THREE_ACCOUNTS_TOML, 'utf-8');
+      process.env[ACCOUNTS_FILTER_ENV] = 'first,frist';
+
+      // Une faute de frappe dans la config du client réduirait sans bruit ce que
+      // l'instance dessert — l'erreur nomme le fautif et les comptes valides.
+      await expect(loadConfig(configPath)).rejects.toThrow(/frist/);
+      await expect(loadConfig(configPath)).rejects.toThrow(/first, second, third/);
+    });
+
+    it("s'applique aussi à une configuration issue des variables d'environnement", async () => {
+      process.env.MCP_EMAIL_ADDRESS = 'env@example.com';
+      process.env.MCP_EMAIL_PASSWORD = 'secret';
+      process.env.MCP_EMAIL_IMAP_HOST = 'imap.example.com';
+      process.env.MCP_EMAIL_SMTP_HOST = 'smtp.example.com';
+      process.env.MCP_EMAIL_ACCOUNT_NAME = 'envAccount';
+      process.env[ACCOUNTS_FILTER_ENV] = 'envAccount';
+
+      const config = await loadConfig();
+
+      expect(config.accounts.map((a) => a.name)).toEqual(['envAccount']);
+    });
+  });
+
+  describe('secrets par commande (password_command)', () => {
+    /**
+     * Le secret n'est plus dans le fichier : une commande l'imprime au
+     * chargement. Ces cas vérifient le bout en bout — schéma, filtre de
+     * comptes, résolution — pas seulement la résolution isolée.
+     */
+    afterEach(() => {
+      delete process.env[ACCOUNTS_FILTER_ENV];
+    });
+
+    /** Écrit un script Node et rend la commande qui l'exécute. */
+    async function script(name: string, body: string): Promise<string> {
+      const file = path.join(tmpDir, `${name}.cjs`);
+      await fs.writeFile(file, body, 'utf-8');
+      return `node "${file}"`;
+    }
+
+    it('remplace le mot de passe par la sortie de la commande', async () => {
+      const command = await script('pw', "process.stdout.write('depuis-le-coffre');");
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        `
+[[accounts]]
+name = "vault"
+email = "vault@example.com"
+password_command = '${command}'
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+`,
+        'utf-8',
+      );
+
+      const config = await loadConfig(configPath);
+
+      expect(config.accounts[0].password).toBe('depuis-le-coffre');
+    });
+
+    it("n'interroge pas le coffre pour un compte écarté par le filtre", async () => {
+      // Trois connecteurs pointant sur le même fichier ne doivent pas provoquer
+      // trois fois les demandes de déverrouillage : seuls les comptes servis
+      // par l'instance sont résolus.
+      const failing = await script('locked', 'process.exit(1);');
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        `
+[[accounts]]
+name = "served"
+email = "served@example.com"
+password = "literal"
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+
+[[accounts]]
+name = "hidden"
+email = "hidden@example.com"
+password_command = '${failing}'
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+`,
+        'utf-8',
+      );
+
+      // Sans filtre, la commande du second compte s'exécute et échoue.
+      await expect(loadConfig(configPath)).rejects.toThrow(/hidden/);
+
+      // Filtrée, elle n'est jamais lancée.
+      process.env[ACCOUNTS_FILTER_ENV] = 'served';
+      const config = await loadConfig(configPath);
+      expect(config.accounts.map((a) => a.name)).toEqual(['served']);
+    });
+
+    it('refuse un compte qui donne à la fois password et password_command', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        `
+[[accounts]]
+name = "ambigu"
+email = "ambigu@example.com"
+password = "literal"
+password_command = 'node --version'
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+`,
+        'utf-8',
+      );
 
       await expect(loadConfig(configPath)).rejects.toThrow();
     });

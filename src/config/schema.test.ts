@@ -88,8 +88,66 @@ describe('AccountConfigSchema', () => {
 
   it('rejects when neither password nor oauth2 provided', () => {
     expect(() => AccountConfigSchema.parse(validAccount({ password: undefined }))).toThrow(
-      'password or oauth2',
+      'password, password_command or oauth2',
     );
+  });
+
+  it('accepts password_command instead of password', () => {
+    const result = AccountConfigSchema.parse(
+      validAccount({ password: undefined, password_command: 'keepassxc-cli show …' }),
+    );
+    expect(result.password_command).toBe('keepassxc-cli show …');
+  });
+
+  it('rejects password and password_command together', () => {
+    // Ambigu plutôt qu'inoffensif : rien dans le fichier ne dirait lequel des
+    // deux le serveur a réellement utilisé.
+    expect(() =>
+      AccountConfigSchema.parse(validAccount({ password_command: 'echo hunter2' })),
+    ).toThrow('not both');
+  });
+
+  it('accepts oauth2 secrets supplied by command', () => {
+    const result = AccountConfigSchema.parse(
+      validAccount({
+        password: undefined,
+        oauth2: {
+          provider: 'microsoft',
+          client_id: 'id',
+          client_secret_command: 'op read op://vault/app/secret',
+          refresh_token_command: 'op read op://vault/app/refresh',
+        },
+      }),
+    );
+    expect(result.oauth2?.client_secret_command).toBe('op read op://vault/app/secret');
+  });
+
+  it('rejects an oauth2 secret given both literally and by command', () => {
+    expect(() =>
+      AccountConfigSchema.parse(
+        validAccount({
+          password: undefined,
+          oauth2: {
+            provider: 'microsoft',
+            client_id: 'id',
+            client_secret: 'secret',
+            client_secret_command: 'op read op://vault/app/secret',
+            refresh_token: 'token',
+          },
+        }),
+      ),
+    ).toThrow('exactly one');
+  });
+
+  it('rejects an oauth2 block with no refresh token at all', () => {
+    expect(() =>
+      AccountConfigSchema.parse(
+        validAccount({
+          password: undefined,
+          oauth2: { provider: 'microsoft', client_id: 'id', client_secret: 'secret' },
+        }),
+      ),
+    ).toThrow('exactly one');
   });
 
   it('rejects missing name', () => {
