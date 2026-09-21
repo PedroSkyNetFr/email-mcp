@@ -23,8 +23,8 @@ import path from 'node:path';
 import { SCHEDULED_DIR, SCHEDULED_SENT_DIR } from '../config/xdg.js';
 import { mcpLog } from '../logging.js';
 import type { ScheduledEmail, SendResult } from '../types/index.js';
-import type ImapService from './imap.service.js';
-import type SmtpService from './smtp.service.js';
+import type { IMailService } from './mail-service.types.js';
+import type { ISendService } from './send-service.types.js';
 
 /**
  * How long a send may hold its claim before it counts as interrupted. A stuck
@@ -88,9 +88,13 @@ async function renameWithRetry(from: string, to: string, attempt = 0): Promise<v
 export default class SchedulerService {
   private interval: ReturnType<typeof setInterval> | undefined;
 
+  /**
+   * Both services route per account: a Graph-backed account sends and keeps
+   * its draft mirror through Microsoft Graph, never through SMTP or IMAP.
+   */
   constructor(
-    private smtpService: SmtpService,
-    private imapService: ImapService,
+    private sendService: ISendService,
+    private mailService: IMailService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -136,9 +140,9 @@ export default class SchedulerService {
       references: options.references,
     };
 
-    // Save IMAP draft (best-effort)
+    // Mirror it as a draft (best-effort)
     try {
-      const draftResult = await this.imapService.saveDraft(account, {
+      const draftResult = await this.mailService.saveDraft(account, {
         to: options.to,
         subject: `[Scheduled: ${sendAtDate.toLocaleString()}] ${options.subject}`,
         body: options.body,
@@ -222,10 +226,10 @@ export default class SchedulerService {
         throw new Error(`Cannot cancel email with status "${scheduled.status}"`);
       }
 
-      // Delete IMAP draft (best-effort)
+      // Delete the draft mirror (best-effort)
       if (scheduled.draftMessageId && scheduled.draftMailbox) {
         try {
-          await this.imapService.deleteEmail(
+          await this.mailService.deleteEmail(
             scheduled.account,
             scheduled.draftMessageId,
             scheduled.draftMailbox,
@@ -382,7 +386,7 @@ export default class SchedulerService {
 
       let sendResult: SendResult;
       try {
-        sendResult = await this.smtpService.sendEmail(scheduled.account, {
+        sendResult = await this.sendService.sendEmail(scheduled.account, {
           to: scheduled.to,
           subject: scheduled.subject,
           body: scheduled.body,
@@ -430,7 +434,7 @@ export default class SchedulerService {
       // Delete draft (best-effort)
       if (scheduled.draftMessageId && scheduled.draftMailbox) {
         try {
-          await this.imapService.deleteEmail(
+          await this.mailService.deleteEmail(
             scheduled.account,
             scheduled.draftMessageId,
             scheduled.draftMailbox,

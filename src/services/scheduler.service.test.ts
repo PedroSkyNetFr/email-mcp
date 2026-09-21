@@ -15,9 +15,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SCHEDULED_DIR, SCHEDULED_SENT_DIR } from '../config/xdg.js';
 import { mcpLog } from '../logging.js';
 import type { ScheduledEmail } from '../types/index.js';
-import type ImapService from './imap.service.js';
+import type { IMailService } from './mail-service.types.js';
 import SchedulerService from './scheduler.service.js';
-import type SmtpService from './smtp.service.js';
+import type { ISendService } from './send-service.types.js';
 
 // Point the queue at a throwaway directory instead of ~/.local/state.
 vi.mock('../config/xdg.js', async () => {
@@ -58,7 +58,7 @@ const fakeImap = {
 };
 
 function createScheduler(smtp: ReturnType<typeof createFakeSmtp>): SchedulerService {
-  return new SchedulerService(smtp as unknown as SmtpService, fakeImap as unknown as ImapService);
+  return new SchedulerService(smtp as unknown as ISendService, fakeImap as unknown as IMailService);
 }
 
 /** Write a queue entry directly — `schedule()` refuses a date in the past. */

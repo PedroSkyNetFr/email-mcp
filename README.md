@@ -681,6 +681,8 @@ email-mcp scheduler uninstall
 
 Scheduled emails are stored as JSON files in `~/.local/state/email-mcp/scheduled/`. Each entry tracks attempts (max 3) and the last error, so you can inspect failures with `scheduler list`.
 
+A scheduled email goes out through its account's own backend — SMTP, or Microsoft Graph for an account with `backend = "graph"` — from the MCP server and from `scheduler check` alike. Its draft mirror (`[Scheduled: …]`) is kept in that account's Drafts and removed once the email is sent.
+
 Several processes can work on that queue at once — every MCP client conversation
 starts its own server, and the daemon runs `scheduler check` besides. Each email
 still goes out once: before sending, a process creates `<id>.claim` next to the

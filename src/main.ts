@@ -13,25 +13,17 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 import { loadConfig } from './config/loader.js';
-import ConnectionManager from './connections/manager.js';
 import { bindServer, markInitialized, mcpLog } from './logging.js';
 import registerAllPrompts from './prompts/register.js';
 import registerAllResources from './resources/register.js';
-import RateLimiter from './safety/rate-limiter.js';
 import createServer, { PKG_VERSION } from './server.js';
 import CalendarService from './services/calendar.service.js';
-import GraphClient from './services/graph/graph.client.js';
-import GraphService from './services/graph/graph.service.js';
-import GraphSendService from './services/graph/graph-send.service.js';
 import HooksService from './services/hooks.service.js';
-import ImapService from './services/imap.service.js';
 import LocalCalendarService from './services/local-calendar.service.js';
-import { createMailRouter, createSendRouter } from './services/mail-router.js';
-import OAuthService from './services/oauth.service.js';
+import createMailBackends from './services/mail-backends.js';
 import RemindersService from './services/reminders.service.js';
 import SchedulerService from './services/scheduler.service.js';
 import { SearchPresetRegistry } from './services/search-presets.js';
-import SmtpService from './services/smtp.service.js';
 import TemplateService from './services/template.service.js';
 import WatcherService from './services/watcher.service.js';
 import registerAllTools from './tools/register.js';
@@ -78,37 +70,14 @@ Examples:
 async function runServer(): Promise<void> {
   const config = await loadConfig();
 
-  const oauthService = new OAuthService();
-  const connections = new ConnectionManager(config.accounts, oauthService);
-  const rateLimiter = new RateLimiter(config.settings.rateLimit);
-  const imapService = new ImapService(connections);
-
-  // Accounts declared with backend = "graph" are served by Microsoft Graph
-  // instead of IMAP; the router dispatches per account so the tool layer sees a
-  // single IMailService either way.
-  const graphClients = new Map(
-    config.accounts
-      .filter((account) => account.backend === 'graph')
-      .map((account) => [account.name, new GraphClient(account, oauthService)]),
-  );
-  const findAccount = (name: string) => config.accounts.find((account) => account.name === name);
-  const requireAccount = (name: string) => {
-    const account = findAccount(name);
-    if (!account) throw new Error(`Unknown account "${name}"`);
-    return account;
-  };
-
-  const graphService = new GraphService(graphClients, requireAccount);
-  const mailService = createMailRouter(imapService, graphService, findAccount);
-
-  const smtpService = new SmtpService(connections, rateLimiter, imapService);
-  const graphSendService = new GraphSendService(graphClients, requireAccount);
-  const sendService = createSendRouter(smtpService, graphSendService, findAccount);
+  // IMAP/SMTP or Microsoft Graph, per account — the same wiring as the CLI.
+  const { connections, imapService, graphService, mailService, sendService } =
+    createMailBackends(config);
   const templateService = new TemplateService();
   const calendarService = new CalendarService();
   const localCalendarService = new LocalCalendarService();
   const remindersService = new RemindersService();
-  const schedulerService = new SchedulerService(smtpService, imapService);
+  const schedulerService = new SchedulerService(sendService, mailService);
   const watcherService = new WatcherService(config.settings.watcher, config.accounts);
   const hooksService = new HooksService(config.settings.hooks, imapService);
   const searchPresetRegistry = new SearchPresetRegistry(config.searches);
