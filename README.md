@@ -688,10 +688,14 @@ entry, and the filesystem lets only one process create it; the others leave that
 entry alone. Entries are written to a temporary file and renamed into place, so
 no process ever reads half of one.
 
-If a process is killed while sending, the entry stays in `sending` with its
-`.claim` file and is **not** retried automatically: the SMTP server may already
-have accepted the message, and a retry would send it twice. The claim file
-records which process took it and when.
+If a process is killed while sending, the email is **never** retried
+automatically: the SMTP server may already have accepted the message, and a
+retry would send it twice. Once its claim is 15 minutes old — longer than a
+stuck send lasts with the default timeouts — the next check marks it `failed`
+with `Interrupted while sending: it may have gone out`, so it shows up in
+`scheduler list`. Check the Sent folder before scheduling it again. An entry
+whose process died before its send began is marked `failed` the same way, as
+not sent.
 
 ### Real-time Watcher & AI Hooks
 

@@ -285,3 +285,96 @@ describe('SchedulerService.start', () => {
     expect(check).toHaveBeenCalledTimes(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Interrupted sends
+// ---------------------------------------------------------------------------
+
+describe('SchedulerService.checkAndSend — interrupted sends', () => {
+  /** Backdate a file, as if written that many minutes ago. */
+  async function age(filePath: string, minutes: number): Promise<void> {
+    const then = new Date(Date.now() - minutes * 60_000);
+    await fs.utimes(filePath, then, then);
+  }
+
+  const claimOf = (id: string) => path.join(SCHEDULED_DIR, `${id}.claim`);
+  const entryOf = (id: string) => path.join(SCHEDULED_DIR, `${id}.json`);
+
+  it('reports a send whose process died as failed, never sending it again', async () => {
+    const scheduled = await seed({ status: 'sending', attempts: 1 });
+    await fs.writeFile(claimOf(scheduled.id), '');
+    await age(claimOf(scheduled.id), 16);
+    const smtp = createFakeSmtp();
+
+    const result = await createScheduler(smtp).checkAndSend();
+
+    expect(smtp.sendEmail).not.toHaveBeenCalled();
+    expect(result.failed).toBe(1);
+    expect(await readEntry(SCHEDULED_DIR, scheduled.id)).toMatchObject({
+      status: 'failed',
+      attempts: 1,
+      lastError: expect.stringContaining('it may have gone out'),
+    });
+    expect(await leftovers()).toEqual([]);
+  });
+
+  it('leaves a send alone while its claim is recent, even on a retry', async () => {
+    // Formerly reset to "pending" at once: the age came from createdAt, so a
+    // retry running in another process looked stale and was sent twice.
+    const scheduled = await seed({
+      status: 'sending',
+      attempts: 2,
+      lastError: 'SMTP connection refused',
+      createdAt: new Date(Date.now() - 86_400_000).toISOString(),
+    });
+    await fs.writeFile(claimOf(scheduled.id), '');
+    await age(claimOf(scheduled.id), 14);
+    const smtp = createFakeSmtp();
+
+    const result = await createScheduler(smtp).checkAndSend();
+
+    expect(smtp.sendEmail).not.toHaveBeenCalled();
+    expect(result).toEqual({ sent: 0, failed: 0, errors: [] });
+    expect((await readEntry(SCHEDULED_DIR, scheduled.id))?.status).toBe('sending');
+  });
+
+  it('dates a "sending" entry without a claim from its last write', async () => {
+    const scheduled = await seed({ status: 'sending', attempts: 1 });
+    await age(entryOf(scheduled.id), 16);
+
+    const result = await createScheduler(createFakeSmtp()).checkAndSend();
+
+    expect(result.failed).toBe(1);
+    expect((await readEntry(SCHEDULED_DIR, scheduled.id))?.status).toBe('failed');
+  });
+
+  it('reports a due entry claimed by a process that died before sending as not sent', async () => {
+    const scheduled = await seed();
+    await fs.writeFile(claimOf(scheduled.id), '');
+    await age(claimOf(scheduled.id), 16);
+    const smtp = createFakeSmtp();
+
+    await createScheduler(smtp).checkAndSend();
+
+    expect(smtp.sendEmail).not.toHaveBeenCalled();
+    expect(await readEntry(SCHEDULED_DIR, scheduled.id)).toMatchObject({
+      status: 'failed',
+      lastError: expect.stringContaining('it did not go out'),
+    });
+    expect(await leftovers()).toEqual([]);
+  });
+
+  it('marks an interrupted send once and sends nothing, whatever the number of instances', async () => {
+    const scheduled = await seed({ status: 'sending', attempts: 1 });
+    await fs.writeFile(claimOf(scheduled.id), '');
+    await age(claimOf(scheduled.id), 16);
+    const smtp = createFakeSmtp();
+    const instances = Array.from({ length: 6 }, () => createScheduler(smtp));
+
+    await Promise.all(instances.map(async (s) => s.checkAndSend()));
+
+    expect(smtp.sendEmail).not.toHaveBeenCalled();
+    expect((await readEntry(SCHEDULED_DIR, scheduled.id))?.status).toBe('failed');
+    expect(await leftovers()).toEqual([]);
+  });
+});

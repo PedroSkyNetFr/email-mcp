@@ -26,8 +26,19 @@ import type { ScheduledEmail, SendResult } from '../types/index.js';
 import type ImapService from './imap.service.js';
 import type SmtpService from './smtp.service.js';
 
-/** Max age (ms) for "sending" status before resetting to "pending" */
-const STALE_LOCK_MS = 5 * 60 * 1000;
+/**
+ * How long a send may hold its claim before it counts as interrupted. A stuck
+ * send gives up well before: nodemailer's default timeouts (DNS 30 s,
+ * connection 2 min, 10 min of socket silence) end one within about 12.5 min,
+ * and a Graph request is bounded by fetch's 5-minute default plus one retry.
+ */
+const INTERRUPTED_AFTER_MS = 15 * 60 * 1000;
+
+const INTERRUPTED_WHILE_SENDING =
+  'Interrupted while sending: it may have gone out. ' +
+  'Check the Sent folder before scheduling it again.';
+const INTERRUPTED_BEFORE_SENDING =
+  'Interrupted before sending: it did not go out. Schedule it again if it is still needed.';
 
 /** Max retry attempts before marking as "failed" */
 const MAX_ATTEMPTS = 3;
@@ -333,12 +344,20 @@ export default class SchedulerService {
     // A first look without the claim, so entries that are not due do not take
     // one every minute in every process.
     const unclaimed = await SchedulerService.readEntry(filePath);
-    if (!unclaimed || SchedulerService.nextStep(unclaimed, now) === 'skip') {
-      return { outcome: 'skipped', errors };
+    if (!unclaimed) return { outcome: 'skipped', errors };
+    const firstLook = SchedulerService.nextStep(unclaimed, now);
+    if (firstLook === 'skip') return { outcome: 'skipped', errors };
+    if (firstLook === 'check-interrupted') {
+      const failed = await SchedulerService.failIfInterrupted(filePath, id, unclaimed, now);
+      return { outcome: failed ? 'failed' : 'skipped', errors };
     }
 
-    // Another process holds it: it is sending this email, or cancelling it.
-    if (!(await SchedulerService.claim(id))) return { outcome: 'skipped', errors };
+    // Another process holds it: normally it is sending this email, or
+    // cancelling it — unless it died before starting, leaving an old claim.
+    if (!(await SchedulerService.claim(id))) {
+      const failed = await SchedulerService.failIfInterrupted(filePath, id, unclaimed, now);
+      return { outcome: failed ? 'failed' : 'skipped', errors };
+    }
 
     let keepClaim = false;
     try {
@@ -347,7 +366,7 @@ export default class SchedulerService {
       const scheduled = await SchedulerService.readEntry(filePath);
       if (!scheduled) return { outcome: 'skipped', errors };
       const step = SchedulerService.nextStep(scheduled, now);
-      if (step === 'skip') return { outcome: 'skipped', errors };
+      if (step !== 'send' && step !== 'expire') return { outcome: 'skipped', errors };
 
       if (step === 'expire') {
         scheduled.status = 'failed';
@@ -390,7 +409,8 @@ export default class SchedulerService {
         await SchedulerService.writeEntry(filePath, scheduled);
       } catch (err) {
         // Still "sending" on disk. Keeping the claim stops every process from
-        // sending it again, exactly as if this one had crashed mid-send.
+        // sending it again, exactly as if this one had crashed mid-send: it is
+        // later reported as interrupted, never sent a second time.
         keepClaim = true;
         errors.push(
           `sent, but could not be marked as sent (${errorMessage(err)}); ` +
@@ -436,22 +456,50 @@ export default class SchedulerService {
   }
 
   /**
+   * Mark as failed an entry whose sending process died, so it shows up in
+   * `scheduler list` instead of sitting unseen. It is never sent again: the
+   * SMTP server may have accepted the message before the process died, and
+   * only the Sent folder can tell. Returns false while the send may still be
+   * running.
+   *
+   * Taking over another process's claim is safe here because nothing is sent:
+   * two processes doing it at once write the same "failed" entry.
+   */
+  private static async failIfInterrupted(
+    filePath: string,
+    id: string,
+    scheduled: ScheduledEmail,
+    now: number,
+  ): Promise<boolean> {
+    // When the send began: the claim's creation, or — for an entry left
+    // "sending" without one — the entry's last write.
+    const since =
+      (await SchedulerService.modifiedAt(SchedulerService.claimPath(id))) ??
+      (await SchedulerService.modifiedAt(filePath));
+    if (since === null || now - since <= INTERRUPTED_AFTER_MS) return false;
+
+    await SchedulerService.writeEntry(filePath, {
+      ...scheduled,
+      status: 'failed',
+      // "pending" under a claim means the process died before it started
+      lastError:
+        scheduled.status === 'sending' ? INTERRUPTED_WHILE_SENDING : INTERRUPTED_BEFORE_SENDING,
+    });
+    await SchedulerService.release(id);
+    return true;
+  }
+
+  /**
    * What a check should do with an entry, as last written.
    * "send" and "expire" are only acted on while holding the entry's claim.
    */
-  private static nextStep(scheduled: ScheduledEmail, now: number): 'skip' | 'send' | 'expire' {
-    // Reset stale locks. This only makes the entry eligible; the claim still
-    // decides, so an entry whose sender died holding it stays where it is.
-    // The rule itself is carried over from the former loop unchanged.
-    if (scheduled.status === 'sending' && scheduled.lastError !== undefined) {
-      const lockAge = now - new Date(scheduled.createdAt).getTime();
-      if (lockAge > STALE_LOCK_MS) {
-        scheduled.status = 'pending'; // eslint-disable-line no-param-reassign
-      }
-    } else if (scheduled.status === 'sending') {
-      // Check if it's been sending too long (use sendAt as reference)
-      return 'skip';
-    }
+  private static nextStep(
+    scheduled: ScheduledEmail,
+    now: number,
+  ): 'skip' | 'send' | 'expire' | 'check-interrupted' {
+    // Either a send in progress or one whose process died; only its age tells
+    // them apart. It is never sent again either way.
+    if (scheduled.status === 'sending') return 'check-interrupted';
 
     // Skip non-pending
     if (scheduled.status !== 'pending') return 'skip';
@@ -511,6 +559,16 @@ export default class SchedulerService {
 
   private static async release(id: string): Promise<void> {
     await fs.rm(SchedulerService.claimPath(id), { force: true, maxRetries: FS_RETRIES });
+  }
+
+  /** Last modification time of a file, or null when it does not exist. */
+  private static async modifiedAt(filePath: string): Promise<number | null> {
+    try {
+      return (await fs.stat(filePath)).mtimeMs;
+    } catch (err) {
+      if (errorCode(err) === 'ENOENT') return null;
+      throw err;
+    }
   }
 
   /** Read an entry; null when it no longer exists (sent or cancelled). */
