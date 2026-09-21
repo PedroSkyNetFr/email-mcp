@@ -2,12 +2,53 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { configExists, generateTemplate, loadConfig, saveConfig } from './loader.js';
+import {
+  ACCOUNTS_FILTER_ENV,
+  configExists,
+  generateTemplate,
+  loadConfig,
+  saveConfig,
+} from './loader.js';
 
 const MINIMAL_TOML = `
 [[accounts]]
 name = "test"
 email = "test@example.com"
+password = "secret"
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+`;
+
+const THREE_ACCOUNTS_TOML = `
+[[accounts]]
+name = "first"
+email = "first@example.com"
+password = "secret"
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+
+[[accounts]]
+name = "second"
+email = "second@example.com"
+password = "secret"
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+
+[[accounts]]
+name = "third"
+email = "third@example.com"
 password = "secret"
 
 [accounts.imap]
@@ -298,6 +339,92 @@ read_only = true
       await fs.writeFile(configPath, `${MINIMAL_TOML}\n[database]\nurl = ""\n`, 'utf-8');
 
       await expect(loadConfig(configPath)).rejects.toThrow();
+    });
+  });
+
+  describe('filtre de comptes (MCP_EMAIL_ACCOUNTS)', () => {
+    /**
+     * Un client MCP n'a pas d'interrupteur par compte : il active ou coupe un
+     * serveur entier. Cette variable permet à un même config.toml d'alimenter
+     * plusieurs entrées de connecteur, chacune n'exposant que ses comptes.
+     */
+    afterEach(() => {
+      delete process.env[ACCOUNTS_FILTER_ENV];
+    });
+
+    it('expose tous les comptes quand la variable est absente', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, THREE_ACCOUNTS_TOML, 'utf-8');
+
+      const config = await loadConfig(configPath);
+
+      expect(config.accounts.map((a) => a.name)).toEqual(['first', 'second', 'third']);
+    });
+
+    it('ne garde que les comptes nommés', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, THREE_ACCOUNTS_TOML, 'utf-8');
+      process.env[ACCOUNTS_FILTER_ENV] = 'first,third';
+
+      const config = await loadConfig(configPath);
+
+      expect(config.accounts.map((a) => a.name)).toEqual(['first', 'third']);
+    });
+
+    it('tolère les espaces et les séparateurs vides', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, THREE_ACCOUNTS_TOML, 'utf-8');
+      process.env[ACCOUNTS_FILTER_ENV] = ' second , , third ';
+
+      const config = await loadConfig(configPath);
+
+      expect(config.accounts.map((a) => a.name)).toEqual(['second', 'third']);
+    });
+
+    it("garde l'ordre du fichier, pas celui de la variable", async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, THREE_ACCOUNTS_TOML, 'utf-8');
+      process.env[ACCOUNTS_FILTER_ENV] = 'third,first';
+
+      const config = await loadConfig(configPath);
+
+      // Le premier compte sert de défaut aux recherches enregistrées : il ne
+      // doit pas dépendre de la façon dont la liste est saisie.
+      expect(config.accounts.map((a) => a.name)).toEqual(['first', 'third']);
+    });
+
+    it('ignore une valeur vide', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, THREE_ACCOUNTS_TOML, 'utf-8');
+      process.env[ACCOUNTS_FILTER_ENV] = '   ';
+
+      const config = await loadConfig(configPath);
+
+      expect(config.accounts).toHaveLength(3);
+    });
+
+    it('refuse un nom inconnu au lieu de servir moins de comptes en silence', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(configPath, THREE_ACCOUNTS_TOML, 'utf-8');
+      process.env[ACCOUNTS_FILTER_ENV] = 'first,frist';
+
+      // Une faute de frappe dans la config du client réduirait sans bruit ce que
+      // l'instance dessert — l'erreur nomme le fautif et les comptes valides.
+      await expect(loadConfig(configPath)).rejects.toThrow(/frist/);
+      await expect(loadConfig(configPath)).rejects.toThrow(/first, second, third/);
+    });
+
+    it("s'applique aussi à une configuration issue des variables d'environnement", async () => {
+      process.env.MCP_EMAIL_ADDRESS = 'env@example.com';
+      process.env.MCP_EMAIL_PASSWORD = 'secret';
+      process.env.MCP_EMAIL_IMAP_HOST = 'imap.example.com';
+      process.env.MCP_EMAIL_SMTP_HOST = 'smtp.example.com';
+      process.env.MCP_EMAIL_ACCOUNT_NAME = 'envAccount';
+      process.env[ACCOUNTS_FILTER_ENV] = 'envAccount';
+
+      const config = await loadConfig();
+
+      expect(config.accounts.map((a) => a.name)).toEqual(['envAccount']);
     });
   });
 });

@@ -550,8 +550,38 @@ For single-account setups (overrides config file):
 | `MCP_EMAIL_SMTP_POOL_MAX_MESSAGES` | `100` | Max messages per pooled connection |
 | `MCP_EMAIL_RATE_LIMIT` | `10` | Max sends per minute |
 | `MCP_EMAIL_SIGNATURE_PATH` | — | Path to an Outlook `.htm` signature for `append_signature` |
+| `MCP_EMAIL_ACCOUNTS` | — | Restrict this instance to these `config.toml` account names (see below) |
 | `MAIL_ALLOWED_SAVE_DIRS` | — | Extra directories where attachments, `.eml` messages and exports may be written (see below) |
 | `MAIL_ALLOW_ANY_SAVE_DIR` | `false` | `true` disables the allow-list entirely (any absolute path) |
+
+#### Restricting which accounts an instance exposes (`MCP_EMAIL_ACCOUNTS`)
+
+An MCP client toggles a whole server, never an account inside one — accounts are
+a parameter of the tools, not a protocol concept. A single server holding every
+mailbox is therefore all‑or‑nothing.
+
+`MCP_EMAIL_ACCOUNTS` narrows an instance to a comma‑separated list of account
+names from `config.toml`, so one config file can back several client entries,
+each exposing its own subset:
+
+```jsonc
+// claude_desktop_config.json → mcpServers
+"email":       { /* … */ "env": { "MCP_EMAIL_ACCOUNTS": "personal,work" } },
+"email-team":  { /* … */ "env": { "MCP_EMAIL_ACCOUNTS": "shared-inbox" } }
+```
+
+Toggling `email-team` off in the client now hides that mailbox and nothing else.
+
+- Unset or empty, every configured account is exposed (the default).
+- Whitespace around names is ignored; empty entries are skipped.
+- Account order comes from the config file, not from the variable, so the first
+  account — the default for saved searches — does not depend on how the list is
+  typed.
+- An unknown name is **refused** at startup, naming the culprit and the
+  configured accounts. A typo would otherwise silently shrink what the instance
+  serves, which is the failure mode hardest to notice.
+- The filter never touches the file: `email-mcp account edit` and friends still
+  see and save every account.
 
 #### Where files can be saved (`MAIL_ALLOWED_SAVE_DIRS`)
 

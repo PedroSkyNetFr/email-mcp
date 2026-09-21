@@ -147,6 +147,53 @@ async function loadFromFile(filePath: string = CONFIG_FILE): Promise<RawAppConfi
 }
 
 // ---------------------------------------------------------------------------
+// Account allow-list — `MCP_EMAIL_ACCOUNTS`
+// ---------------------------------------------------------------------------
+
+/** Env var restricting which of the configured accounts an instance exposes. */
+export const ACCOUNTS_FILTER_ENV = 'MCP_EMAIL_ACCOUNTS';
+
+/**
+ * Narrow the configured accounts to the comma-separated names in
+ * `MCP_EMAIL_ACCOUNTS`, leaving the config file untouched.
+ *
+ * An MCP client toggles a whole server, never an account inside one — accounts
+ * are a parameter of the tools, not a protocol concept. So a single server
+ * holding every mailbox is all-or-nothing. This var lets one config file back
+ * several server entries, each exposing its own subset, which restores a
+ * per-account switch on the client side: a second entry limited to the
+ * mailboxes that should stay off most of the time can be enabled on demand.
+ *
+ * An unknown name is refused rather than ignored: a typo in a client config
+ * would otherwise silently shrink what the instance serves, and a silently
+ * shorter result is the failure mode that is hardest to notice.
+ *
+ * Order comes from the config file, not from the variable, so the first account
+ * — the default for saved searches — does not depend on how the list is typed.
+ */
+function applyAccountFilter(raw: RawAppConfig): RawAppConfig {
+  const requested = (process.env[ACCOUNTS_FILTER_ENV] ?? '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+
+  if (requested.length === 0) {
+    return raw;
+  }
+
+  const configured = raw.accounts.map((account) => account.name);
+  const unknown = requested.filter((name) => !configured.includes(name));
+  if (unknown.length > 0) {
+    throw new Error(
+      `${ACCOUNTS_FILTER_ENV} names unknown account(s): ${unknown.join(', ')}.\n` +
+        `Configured accounts: ${configured.join(', ')}.`,
+    );
+  }
+
+  return { ...raw, accounts: raw.accounts.filter((account) => requested.includes(account.name)) };
+}
+
+// ---------------------------------------------------------------------------
 // Normalize raw config → typed AppConfig
 // ---------------------------------------------------------------------------
 
@@ -323,6 +370,10 @@ function normalizeConfig(raw: RawAppConfig): AppConfig {
  * Load raw (snake_case) config from TOML file without normalization.
  * Useful for read-modify-write operations in CLI commands.
  * Throws if no config file exists or validation fails.
+ *
+ * Deliberately NOT filtered by `MCP_EMAIL_ACCOUNTS`: its callers save the
+ * result back with `saveConfig`, so a filter here would erase from the file
+ * every account the current instance happens to hide.
  */
 export async function loadRawConfig(configPath?: string): Promise<RawAppConfig> {
   const filePath = configPath ?? CONFIG_FILE;
@@ -342,14 +393,14 @@ export async function loadConfig(configPath?: string): Promise<AppConfig> {
   const envConfig = loadFromEnv();
   if (envConfig) {
     const validated = AppConfigFileSchema.parse(envConfig);
-    return normalizeConfig(validated);
+    return normalizeConfig(applyAccountFilter(validated));
   }
 
   // 2. Fall back to TOML config file
   const fileConfig = await loadFromFile(configPath);
   if (fileConfig) {
     const validated = AppConfigFileSchema.parse(fileConfig);
-    return normalizeConfig(validated);
+    return normalizeConfig(applyAccountFilter(validated));
   }
 
   throw new Error(
