@@ -112,6 +112,13 @@ Point your MCP client at the local binary by replacing the
 }
 ```
 
+**Keep `dist/` in step with the code.** `dist/` is not versioned, so a `git pull`
+updates `src/` and leaves the build your client runs behind — a merged fix looks
+deployed and is not. Git hooks rebuild `dist/` after a pull, a branch switch or a
+rebase; `pnpm install` sets them up, or run `pnpm hooks:install`. A client loads
+`dist/` when it starts the server, so restart it afterwards; `check_health`
+reports which build is running.
+
 Configuration comes from **either** environment variables (the `env` block
 above, or a `.env` loaded via Node's `--env-file=.env`) **or** a
 `~/.config/email-mcp/config.toml` (`node dist/main.js config init` to scaffold
