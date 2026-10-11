@@ -368,7 +368,7 @@ export function findMimePartByFilename(
  * Date object, etc.) into an ISO-8601 string. Returns the fallback when the
  * input is missing or malformed. Never throws.
  */
-function safeIsoDate(raw: unknown, fallback?: string): string {
+export function safeIsoDate(raw: unknown, fallback?: string): string {
   if (raw == null) return fallback ?? new Date().toISOString();
   const d = raw instanceof Date ? raw : new Date(raw as string);
   if (Number.isNaN(d.getTime())) return fallback ?? new Date().toISOString();
@@ -859,12 +859,16 @@ export default class ImapService {
           messages: true,
           unseen: true,
         });
+        // `false` : le serveur a refusé STATUS sur un dossier existant (droits,
+        // dossier partagé…). Même repli à zéro que pour un dossier \Noselect
+        // ci-dessous : le dossier reste listé, seuls ses compteurs manquent.
+        const counts = status === false ? undefined : status;
         return {
           name: mb.name,
           path: mb.path,
           specialUse: mb.specialUse ?? undefined,
-          totalMessages: status.messages ?? 0,
-          unseenMessages: status.unseen ?? 0,
+          totalMessages: counts?.messages ?? 0,
+          unseenMessages: counts?.unseen ?? 0,
         };
       }),
     );

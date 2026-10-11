@@ -14,7 +14,7 @@ import { ImapFlow } from 'imapflow';
 import { mcpLog } from '../logging.js';
 import type { AccountConfig, EmailMeta, WatcherConfig } from '../types/index.js';
 import eventBus from './event-bus.js';
-import { hasAttachments as hasAttachmentsLenient } from './imap.service.js';
+import { hasAttachments as hasAttachmentsLenient, safeIsoDate } from './imap.service.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -290,7 +290,9 @@ export default class WatcherService {
       subject?: string;
       from?: { name?: string; address?: string }[];
       to?: { name?: string; address?: string }[];
-      date?: Date;
+      // imapflow garde la valeur brute (string) quand l'en-tête Date est
+      // illisible : ne jamais supposer un objet Date ici.
+      date?: Date | string;
     };
     bodyStructure?: unknown;
   }): EmailMeta {
@@ -305,7 +307,7 @@ export default class WatcherService {
       subject: msg.envelope?.subject ?? '(no subject)',
       from: { name: from?.name, address: from?.address ?? '' },
       to: to.map((a) => ({ name: a.name, address: a.address ?? '' })),
-      date: msg.envelope?.date?.toISOString() ?? new Date().toISOString(),
+      date: safeIsoDate(msg.envelope?.date),
       seen: flags.has('\\Seen'),
       flagged: flags.has('\\Flagged'),
       answered: flags.has('\\Answered'),

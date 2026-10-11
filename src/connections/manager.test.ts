@@ -9,6 +9,13 @@ import ConnectionManager from './manager.js';
 // reconnect yields a different object. The factory imports node:events itself
 // (an async factory, hoisted above imports) so it never closes over the
 // type-only EventEmitter import (which would TDZ when hoisted).
+// `list` / `status` partagés par toutes les instances, pour que les tests de
+// `testImap` (qui crée son propre client) puissent piloter leurs réponses.
+const imapCalls = vi.hoisted(() => ({
+  list: vi.fn(),
+  status: vi.fn(),
+}));
+
 vi.mock('imapflow', async () => {
   const { EventEmitter: NodeEventEmitter } = await import('node:events');
   class MockImapFlow extends NodeEventEmitter {
@@ -16,6 +23,8 @@ vi.mock('imapflow', async () => {
     connect = vi.fn().mockResolvedValue(undefined);
     close = vi.fn();
     logout = vi.fn().mockResolvedValue(undefined);
+    list = imapCalls.list;
+    status = imapCalls.status;
   }
   return { ImapFlow: MockImapFlow };
 });
@@ -149,5 +158,55 @@ describe('ConnectionManager — error logs redact secrets ([P2] codex)', () => {
     const joined = loggedImapErrorMessages().join(' | ');
     expect(joined).not.toContain('SuperSecretPw_8843');
     expect(joined).toMatch(/ephemeral/i);
+  });
+});
+
+describe('ConnectionManager.testImap — STATUS outcomes (imapflow 2)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('reports the INBOX message count', async () => {
+    imapCalls.list.mockResolvedValue([{ path: 'INBOX' }, { path: 'Sent' }]);
+    imapCalls.status.mockResolvedValue({ path: 'INBOX', messages: 42 });
+
+    const result = await ConnectionManager.testImap(account);
+
+    expect(result).toEqual({ success: true, details: { messages: 42, folders: 2 } });
+  });
+
+  it('falls back to the first folder when STATUS on INBOX resolves false', async () => {
+    // imapflow renvoie `false` (sans rejeter) quand le serveur refuse STATUS.
+    imapCalls.list.mockResolvedValue([{ path: 'All Mail' }]);
+    imapCalls.status
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce({ path: 'All Mail', messages: 7 });
+
+    const result = await ConnectionManager.testImap(account);
+
+    expect(imapCalls.status).toHaveBeenNthCalledWith(2, 'All Mail', { messages: true });
+    expect(result).toEqual({ success: true, details: { messages: 7, folders: 1 } });
+  });
+
+  it('falls back to the first folder when INBOX does not exist (NotFound)', async () => {
+    imapCalls.list.mockResolvedValue([{ path: 'All Mail' }]);
+    imapCalls.status
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Mailbox doesn't exist: INBOX"), { code: 'NotFound' }),
+      )
+      .mockResolvedValueOnce({ path: 'All Mail', messages: 3 });
+
+    const result = await ConnectionManager.testImap(account);
+
+    expect(result).toEqual({ success: true, details: { messages: 3, folders: 1 } });
+  });
+
+  it('still reports success with a zero count when no STATUS answers', async () => {
+    imapCalls.list.mockResolvedValue([{ path: 'INBOX' }]);
+    imapCalls.status.mockResolvedValue(false);
+
+    const result = await ConnectionManager.testImap(account);
+
+    expect(result).toEqual({ success: true, details: { messages: 0, folders: 1 } });
   });
 });

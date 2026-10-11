@@ -105,6 +105,28 @@ describe('ImapService', () => {
       });
       expect(client.status).toHaveBeenCalledTimes(2);
     });
+
+    it('keeps a folder listed with zero counts when STATUS resolves false', async () => {
+      // imapflow renvoie `false` (sans rejeter) quand le serveur refuse STATUS
+      // sur un dossier existant : le dossier doit rester listé.
+      client.list.mockResolvedValue([
+        { name: 'INBOX', path: 'INBOX', specialUse: '\\Inbox' },
+        { name: 'Shared', path: 'Shared' },
+      ]);
+      client.status.mockResolvedValueOnce({ messages: 10, unseen: 3 }).mockResolvedValueOnce(false);
+
+      const result = await service.listMailboxes('test');
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toMatchObject({ path: 'INBOX', totalMessages: 10, unseenMessages: 3 });
+      expect(result[1]).toEqual({
+        name: 'Shared',
+        path: 'Shared',
+        specialUse: undefined,
+        totalMessages: 0,
+        unseenMessages: 0,
+      });
+    });
   });
 
   // -----------------------------------------------------------------------

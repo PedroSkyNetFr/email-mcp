@@ -84,7 +84,7 @@
   "dependencies": {
     "@clack/prompts": "^1.8.1",
     "@modelcontextprotocol/sdk": "^1.32.1",
-    "imapflow": "^1.2.9",
+    "imapflow": "^2.4.0",
     "mailparser": "^3.9.38",
     "node-ical": "^0.25.6",
     "nodemailer": "^10.1.0",
