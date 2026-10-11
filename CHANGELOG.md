@@ -6,6 +6,41 @@ The format follows [Conventional Commits](https://www.conventionalcommits.org/) 
 
 <!-- next-header -->
 
+## Unreleased — PedroSkyNetFr fork, since v0.4.0
+
+Changes made in [this fork](https://github.com/PedroSkyNetFr/email-mcp) since
+v0.4.0, summarised by theme. The package version is still 0.4.0.
+
+#### ✨ Features
+
+- (**graph**) Microsoft Graph backend for Exchange Online / Outlook.com accounts (`backend = "graph"`): reading, search, categories, bulk actions, threads, drafts, sending, export and attachments to disk, routed per account behind one mail contract - ([dc9c461](https://github.com/PedroSkyNetFr/email-mcp/commit/dc9c461), [d88b3e1](https://github.com/PedroSkyNetFr/email-mcp/commit/d88b3e1), [19e1ac9](https://github.com/PedroSkyNetFr/email-mcp/commit/19e1ac9), [20647ed](https://github.com/PedroSkyNetFr/email-mcp/commit/20647ed), [b2c179a](https://github.com/PedroSkyNetFr/email-mcp/commit/b2c179a))
+- (**exchange**) server-side inbox rules, automatic reply and large attachments on Graph accounts - ([312f729](https://github.com/PedroSkyNetFr/email-mcp/commit/312f729))
+- (**oauth**) interactive OAuth2 setup helper with provider profiles, mailbox listing diagnostic and Graph folder probe - ([e7e278e](https://github.com/PedroSkyNetFr/email-mcp/commit/e7e278e), [585a9e9](https://github.com/PedroSkyNetFr/email-mcp/commit/585a9e9), [7d0cd82](https://github.com/PedroSkyNetFr/email-mcp/commit/7d0cd82))
+- (**send**) inline `cid` images, and Outlook signatures appended with their logo (`signature_path`, `signature_default`, `append_signature`) - ([be7f519](https://github.com/PedroSkyNetFr/email-mcp/commit/be7f519), [499e7ed](https://github.com/PedroSkyNetFr/email-mcp/commit/499e7ed), [bcfe8df](https://github.com/PedroSkyNetFr/email-mcp/commit/bcfe8df))
+- (**export**) `save_email` / `save_emails_from_search` write `.eml` files; `get_email_headers` returns the full Internet headers with Received chain and SPF/DKIM/DMARC analysis - ([f114123](https://github.com/PedroSkyNetFr/email-mcp/commit/f114123))
+- (**health**) `check_health` reports which build is actually running - ([853571b](https://github.com/PedroSkyNetFr/email-mcp/commit/853571b))
+- (**config**) `MCP_EMAIL_ACCOUNTS` restricts an instance to some accounts; `*_command` fields fetch credentials from a password manager - ([b95ecd4](https://github.com/PedroSkyNetFr/email-mcp/commit/b95ecd4), [15ce5f1](https://github.com/PedroSkyNetFr/email-mcp/commit/15ce5f1))
+- (**scheduler**) periodic check installed on Windows with Task Scheduler - ([08f402e](https://github.com/PedroSkyNetFr/email-mcp/commit/08f402e))
+
+#### 🐛 Bug Fixes
+
+- (**search**) client-side filters (attachments, `*_contains`) applied before pagination on IMAP and Graph; partial scans reported with a `before` continuation; relative dates on Graph; cross-account searches spanning IMAP and Graph; partial exports no longer reported as complete - ([74d93f3](https://github.com/PedroSkyNetFr/email-mcp/commit/74d93f3), [d030630](https://github.com/PedroSkyNetFr/email-mcp/commit/d030630), [d3bf156](https://github.com/PedroSkyNetFr/email-mcp/commit/d3bf156), [54dcbfb](https://github.com/PedroSkyNetFr/email-mcp/commit/54dcbfb), [13781e9](https://github.com/PedroSkyNetFr/email-mcp/commit/13781e9), [bb778cb](https://github.com/PedroSkyNetFr/email-mcp/commit/bb778cb), [022fa91](https://github.com/PedroSkyNetFr/email-mcp/commit/022fa91))
+- (**scheduler**) each scheduled email sent once, through its account's own backend, never from a read-only server; interrupted sends marked failed; entries of unserved accounts left alone - ([9a42c5b](https://github.com/PedroSkyNetFr/email-mcp/commit/9a42c5b), [1aa2c0d](https://github.com/PedroSkyNetFr/email-mcp/commit/1aa2c0d), [334a39e](https://github.com/PedroSkyNetFr/email-mcp/commit/334a39e), [3023d68](https://github.com/PedroSkyNetFr/email-mcp/commit/3023d68), [e9f6c3f](https://github.com/PedroSkyNetFr/email-mcp/commit/e9f6c3f))
+- (**read-only**) `MCP_EMAIL_READ_ONLY` applies over `config.toml`; `configure_alerts` registered only when writes are allowed - ([c86beaf](https://github.com/PedroSkyNetFr/email-mcp/commit/c86beaf), [b406fdf](https://github.com/PedroSkyNetFr/email-mcp/commit/b406fdf))
+- (**drafts**) `update_draft` no longer appends the account signature implicitly; Graph draft ids accepted - ([bc90bc9](https://github.com/PedroSkyNetFr/email-mcp/commit/bc90bc9), [5c634df](https://github.com/PedroSkyNetFr/email-mcp/commit/5c634df))
+- (**graph**) sending with attachments, OAuth scopes, health probe and API error messages on Graph accounts - ([146d653](https://github.com/PedroSkyNetFr/email-mcp/commit/146d653), [57c53da](https://github.com/PedroSkyNetFr/email-mcp/commit/57c53da), [f182599](https://github.com/PedroSkyNetFr/email-mcp/commit/f182599), [19c94f5](https://github.com/PedroSkyNetFr/email-mcp/commit/19c94f5), [373d3ca](https://github.com/PedroSkyNetFr/email-mcp/commit/373d3ca))
+- (**imap**) calendar invitations read without hanging; empty attachment downloads fail instead of writing 0-byte files; refused search queries reported as input errors - ([94d18d4](https://github.com/PedroSkyNetFr/email-mcp/commit/94d18d4), [3e164a0](https://github.com/PedroSkyNetFr/email-mcp/commit/3e164a0), [b0c7701](https://github.com/PedroSkyNetFr/email-mcp/commit/b0c7701))
+- (**save**) save-directory allow-list (`MAIL_ALLOWED_SAVE_DIRS`) with a cross-platform containment check - ([8151838](https://github.com/PedroSkyNetFr/email-mcp/commit/8151838))
+- (**cli**) `test` checks each account over the transport it actually uses - ([d6dda40](https://github.com/PedroSkyNetFr/email-mcp/commit/d6dda40))
+- (**signature**) windows-1252 signatures decoded reliably - ([a9f0c3e](https://github.com/PedroSkyNetFr/email-mcp/commit/a9f0c3e))
+
+#### 📦 Build
+
+- (**deps**) imapflow 2.4, nodemailer 10, node-ical 0.27 and dev dependency updates - ([2ef0501](https://github.com/PedroSkyNetFr/email-mcp/commit/2ef0501), [2e4106d](https://github.com/PedroSkyNetFr/email-mcp/commit/2e4106d), [d70a1b4](https://github.com/PedroSkyNetFr/email-mcp/commit/d70a1b4), [3e43084](https://github.com/PedroSkyNetFr/email-mcp/commit/3e43084))
+- (**hooks**) `dist/` rebuilt after a pull, a branch switch or a rebase, with locked dependencies reinstalled when the lockfile changes; commit-msg check runs on Windows - ([7317cd7](https://github.com/PedroSkyNetFr/email-mcp/commit/7317cd7), [ecaff1e](https://github.com/PedroSkyNetFr/email-mcp/commit/ecaff1e), [b8e54f4](https://github.com/PedroSkyNetFr/email-mcp/commit/b8e54f4))
+
+- - -
+
 ## Unreleased ([3886bac..4e6910c](https://github.com/codefuturist/email-mcp/compare/3886bac..4e6910c))
 
 #### ✨ Features
