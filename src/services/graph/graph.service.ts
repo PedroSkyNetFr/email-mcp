@@ -29,6 +29,7 @@ import type {
   LabelInfo,
   Mailbox,
   PaginatedResult,
+  SearchCoverage,
 } from '../../types/index.js';
 import { normalizeDate } from '../../utils/date.js';
 import type { HeaderEntry } from '../../utils/headers.js';
@@ -49,6 +50,8 @@ import {
   sanitizeFilename,
 } from '../file-paths.js';
 import type ImapService from '../imap.service.js';
+import type { BeforeGranularity, CoverageStop } from '../search-coverage.js';
+import { buildCoverage, MAX_SCANNED_MESSAGES, SEARCH_SCAN_BUDGET_MS } from '../search-coverage.js';
 import { applyLiteralFilters } from '../search-criteria.js';
 import { applyAccountSignature } from '../signature-loader.js';
 import type GraphClient from './graph.client.js';
@@ -84,6 +87,13 @@ interface GraphMessage {
   internetMessageHeaders?: { name: string; value: string }[];
 }
 
+/** Page d'une collection de messages. */
+interface GraphPage {
+  value: GraphMessage[];
+  '@odata.nextLink'?: string;
+  '@odata.count'?: number;
+}
+
 interface GraphAttachment {
   id: string;
   name?: string;
@@ -102,6 +112,19 @@ const META_SELECT =
 // compte Graph, là où le backend IMAP le remplit. Graph ne sert cette propriété
 // que sur la lecture d'UN message avec `$select` explicite — d'où son absence
 // de `META_SELECT`, qui sert aux listes.
+
+/**
+ * Sélection d'un parcours de pages : celle des listes, SANS `toRecipients`.
+ *
+ * Mesuré sur Outlook.com (3 902 messages, pages de 500) : avec
+ * `toRecipients`, ~2,8 s par page et 23 s pour la boîte entière ; sans, ~0,15 s
+ * par page et 1,3 s en tout. Le destinataire n'est donc lu que lorsqu'il sert
+ * (`to_contains`, ou l'export, dont le CSV peut avoir une colonne `to`).
+ */
+const SCAN_SELECT =
+  'id,subject,from,receivedDateTime,sentDateTime,isRead,flag,hasAttachments,bodyPreview,categories';
+const SCAN_SELECT_WITH_TO = `${SCAN_SELECT},toRecipients`;
+
 const FULL_SELECT = `${META_SELECT},ccRecipients,bccRecipients,sentDateTime,internetMessageId,body,internetMessageHeaders`;
 
 /**
@@ -209,6 +232,238 @@ export function toEmailMeta(message: GraphMessage): EmailMeta {
     hasAttachments: message.hasAttachments ?? false,
     labels: message.categories ?? [],
     preview: message.bodyPreview,
+  };
+}
+
+/** Options de recherche comprises par le backend Graph. */
+interface GraphSearchOptions extends DateFilters {
+  mailbox?: string;
+  page?: number;
+  pageSize?: number;
+  from?: string;
+  to?: string;
+  subject?: string;
+  seen?: boolean;
+  flagged?: boolean;
+  hasAttachment?: boolean;
+  fromContains?: string;
+  toContains?: string;
+  subjectContains?: string;
+  // Reçus du routeur comme pour IMAP, sans traduction Graph fidèle (voir
+  // unsupportedFilters) :
+  [key: string]: unknown;
+}
+
+/**
+ * Filtres de l'outil sans équivalent Graph fidèle. Ils étaient ignorés en
+ * silence — une recherche `attachment_filename: "bail"` rendait alors TOUTE la
+ * boîte. Ils restent ignorés, mais la réponse le dit.
+ */
+const UNSUPPORTED_ON_GRAPH: [key: string, label: string][] = [
+  ['cc', 'cc'],
+  ['bcc', 'bcc'],
+  ['text', 'text'],
+  ['body', 'body'],
+  ['answered', 'answered'],
+  ['draft', 'draft'],
+  ['deleted', 'deleted'],
+  ['keyword', 'keyword'],
+  ['notKeyword', 'not_keyword'],
+  ['header', 'header'],
+  ['uids', 'uids'],
+  ['largerThan', 'larger_than'],
+  ['smallerThan', 'smaller_than'],
+  ['attachmentFilename', 'attachment_filename'],
+  ['attachmentMimetype', 'attachment_mimetype'],
+  ['gmailRaw', 'gmail_raw'],
+];
+
+function unsupportedFilterWarning(options: GraphSearchOptions): string | undefined {
+  const ignored = UNSUPPORTED_ON_GRAPH.filter(([key]) => {
+    const value = options[key];
+    return value !== undefined && value !== null && value !== '';
+  }).map(([, label]) => label);
+  return ignored.length > 0
+    ? `Not supported on this Microsoft Graph account and IGNORED: ${ignored.join(', ')}`
+    : undefined;
+}
+
+/** Vrai quand un filtre littéral `*_contains` est demandé. */
+function hasLiteralFilters(options: GraphSearchOptions): boolean {
+  return [options.fromContains, options.toContains, options.subjectContains].some(
+    (value) => typeof value === 'string' && value.length > 0,
+  );
+}
+
+/** Texte envoyé à `$search` : requête libre + sujet / expéditeur / destinataire. */
+function searchText(query: string, options: GraphSearchOptions): string {
+  return [query, options.subject, options.from, options.to].filter(Boolean).join(' ').trim();
+}
+
+/** Messages lus par requête lors d'un parcours `$filter` (Graph accepte 1 à 1000). */
+const GRAPH_SCAN_PAGE = 500;
+/** Messages lus par requête lors d'un parcours `$search`. */
+const GRAPH_SEARCH_PAGE = 250;
+/** Graph ne rend pas plus de 1 000 résultats pour un `$search` sur des messages. */
+const GRAPH_SEARCH_RESULT_CAP = 1000;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Bornes de date exactes, en millisecondes (bornes basses incluses, hautes exclues). */
+interface DateWindow {
+  receivedFrom?: number;
+  receivedTo?: number;
+  sentFrom?: number;
+  sentTo?: number;
+}
+
+/** Même sémantique que dateFilterClauses, sous forme numérique. */
+function dateWindow(options: DateFilters): DateWindow {
+  const ms = (value: string): number => normalizeDate(value).getTime();
+  const window: DateWindow = {};
+  const lower = (current: number | undefined, value: number): number =>
+    current === undefined ? value : Math.max(current, value);
+  const upper = (current: number | undefined, value: number): number =>
+    current === undefined ? value : Math.min(current, value);
+
+  if (options.since) window.receivedFrom = ms(options.since);
+  if (options.before) window.receivedTo = ms(options.before);
+  if (options.on) {
+    const parsed = normalizeDate(options.on);
+    const dayStart = Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate());
+    window.receivedFrom = lower(window.receivedFrom, dayStart);
+    window.receivedTo = upper(window.receivedTo, dayStart + DAY_MS);
+  }
+  if (options.sentSince) window.sentFrom = ms(options.sentSince);
+  if (options.sentBefore) window.sentTo = ms(options.sentBefore);
+  return window;
+}
+
+function isoDay(time: number): string {
+  return new Date(time).toISOString().slice(0, 10);
+}
+
+/**
+ * Clauses KQL de date pour `$search`, qui refuse `$filter`.
+ *
+ * KQL ne compare que des jours, dans un fuseau que Graph ne précise pas : les
+ * bornes sont donc ÉLARGIES d'un jour de chaque côté pour ne rien perdre, et
+ * la borne exacte est réappliquée sur chaque résultat (matchesSearchFilters).
+ * Sans ces clauses, `$search` ignorait toute date — `since: "30d"` rendait des
+ * messages de 2018 — et une reprise par `before` relisait sans fin la même
+ * tranche.
+ */
+function kqlDateClauses(window: DateWindow): string[] {
+  const clauses: string[] = [];
+  if (window.receivedFrom !== undefined) {
+    clauses.push(`received>=${isoDay(window.receivedFrom - DAY_MS)}`);
+  }
+  if (window.receivedTo !== undefined) {
+    clauses.push(`received<${isoDay(window.receivedTo + 2 * DAY_MS)}`);
+  }
+  if (window.sentFrom !== undefined) clauses.push(`sent>=${isoDay(window.sentFrom - DAY_MS)}`);
+  if (window.sentTo !== undefined) clauses.push(`sent<${isoDay(window.sentTo + 2 * DAY_MS)}`);
+  return clauses;
+}
+
+function inWindow(value: string | undefined, from?: number, to?: number): boolean {
+  if (from === undefined && to === undefined) return true;
+  const time = value ? Date.parse(value) : Number.NaN;
+  if (Number.isNaN(time)) return false;
+  return (from === undefined || time >= from) && (to === undefined || time < to);
+}
+
+/**
+ * Filtres appliqués à chaque résultat d'un `$search`, faute de `$filter` :
+ * dates exactes, état lu / suivi / pièce jointe, filtres littéraux. Ces
+ * critères étaient jusqu'ici IGNORÉS dès qu'un texte de recherche était donné.
+ */
+function matchesSearchFilters(
+  message: GraphMessage,
+  options: GraphSearchOptions,
+  window: DateWindow,
+): boolean {
+  const meta = toEmailMeta(message);
+  if (!inWindow(message.receivedDateTime, window.receivedFrom, window.receivedTo)) return false;
+  if (!inWindow(message.sentDateTime, window.sentFrom, window.sentTo)) return false;
+  if (options.seen !== undefined && meta.seen !== options.seen) return false;
+  if (options.flagged !== undefined && meta.flagged !== options.flagged) return false;
+  if (options.hasAttachment !== undefined && meta.hasAttachments !== options.hasAttachment) {
+    return false;
+  }
+  return applyLiteralFilters([meta], options).length > 0;
+}
+
+/** Clauses `$filter` des filtres structurés, receivedDateTime en tête. */
+function structuredFilterClauses(options: GraphSearchOptions): string[] {
+  // Dates analysées avant tout appel réseau : une date illisible échoue tout
+  // de suite avec « Invalid date: … ».
+  const dates = dateFilterClauses(options);
+
+  // Graph filters are OData; only the subset with a faithful translation is
+  // applied here, so a filter is never silently reinterpreted.
+  const others: string[] = [];
+  if (options.seen !== undefined) others.push(`isRead eq ${options.seen ? 'true' : 'false'}`);
+  if (options.flagged !== undefined) {
+    others.push(`flag/flagStatus ${options.flagged ? 'eq' : 'ne'} 'flagged'`);
+  }
+  if (options.hasAttachment !== undefined) {
+    others.push(`hasAttachments eq ${options.hasAttachment ? 'true' : 'false'}`);
+  }
+  if (options.from) {
+    others.push(`from/emailAddress/address eq '${options.from.replace(/'/g, "''")}'`);
+  }
+  others.push(...dates.sent);
+
+  // Règle Graph pour $filter + $orderby sur les messages : la propriété de
+  // tri doit figurer dans $filter, EN PREMIER, avant toute autre propriété ;
+  // sinon 400 InefficientFilter (« The restriction or sort order is too
+  // complex for this operation »). Voir
+  // https://learn.microsoft.com/graph/api/user-list-messages, section « Using
+  // filter and orderby in the same query ». Les clauses receivedDateTime
+  // passent donc en tête ; sans filtre de date, une borne basse neutre (1900)
+  // est ajoutée — technique documentée — pour satisfaire la règle sans
+  // restreindre le résultat.
+  const received = [...dates.received];
+  if (received.length === 0 && others.length > 0) {
+    received.push(`receivedDateTime ge ${RECEIVED_LOWER_BOUND}`);
+  }
+  return [...received, ...others];
+}
+
+/** Résultat d'un parcours de pages Graph. */
+interface GatherResult {
+  /** Messages retenus, du plus récent au plus ancien. */
+  matched: EmailMeta[];
+  /** Présent quand une borne a interrompu le parcours. */
+  coverage?: SearchCoverage;
+  /** Vrai quand le parcours s'est arrêté parce que `limit` messages étaient retenus. */
+  limited: boolean;
+}
+
+/** Trie du plus récent au plus ancien (date de réception). */
+function byDateDesc(a: EmailMeta, b: EmailMeta): number {
+  return (Date.parse(b.date) || 0) - (Date.parse(a.date) || 0);
+}
+
+/** Découpe un jeu retenu en page de résultat, bilan de couverture compris. */
+function paginateGathered(
+  gathered: GatherResult,
+  page: number,
+  pageSize: number,
+  warnings: string[],
+): PaginatedResult<EmailMeta> {
+  const total = gathered.matched.length;
+  const start = (page - 1) * pageSize;
+  const allWarnings = gathered.coverage ? [...warnings, gathered.coverage.hint] : warnings;
+  return {
+    items: gathered.matched.slice(start, start + pageSize),
+    total,
+    page,
+    pageSize,
+    hasMore: start + pageSize < total,
+    ...(allWarnings.length > 0 ? { warning: allWarnings.join('; ') } : {}),
+    ...(gathered.coverage ? { totalApprox: true, coverage: gathered.coverage } : {}),
   };
 }
 
@@ -322,51 +577,33 @@ export default class GraphService {
 
   async listEmails(
     accountName: string,
-    options: {
-      mailbox?: string;
-      page?: number;
-      pageSize?: number;
-      seen?: boolean;
-      flagged?: boolean;
-      hasAttachment?: boolean;
-      from?: string;
-      subject?: string;
-    } & DateFilters = {},
+    options: GraphSearchOptions = {},
   ): Promise<PaginatedResult<EmailMeta>> {
+    // `$filter` ne sait exprimer ni le sujet ni le destinataire (contains()
+    // n'est pas fiable sur les messages, voir gather) : ils passent par le
+    // chemin `$search`, comme dans searchEmails, au lieu d'être ignorés.
+    if (options.subject || options.to) return this.searchEmails(accountName, '', options);
+
     const page = options.page ?? 1;
     const pageSize = options.pageSize ?? 25;
-    // Dates analysées avant tout appel réseau : une date illisible échoue tout
-    // de suite avec « Invalid date: … ».
-    const dates = dateFilterClauses(options);
+    const deadline = Date.now() + SEARCH_SCAN_BUDGET_MS;
+    const filters = structuredFilterClauses(options);
+    const unsupported = unsupportedFilterWarning(options);
+    const warnings = unsupported ? [unsupported] : [];
+
+    // Filtres littéraux : ils ne filtraient que la page déjà lue (« No emails
+    // found » alors que la boîte en contient, total de la boîte entière).
+    // Le jeu filtré est désormais constitué AVANT la pagination.
+    if (hasLiteralFilters(options)) {
+      const gathered = await this.gather(accountName, '', options, {
+        limit: Number.POSITIVE_INFINITY,
+        deadline,
+      });
+      return paginateGathered(gathered, page, pageSize, warnings);
+    }
+
+    // Sans filtre côté client : inchangé, seule la page demandée est lue.
     const folderId = await this.resolveFolderId(accountName, options.mailbox ?? 'INBOX');
-
-    // Graph filters are OData; only the subset with a faithful translation is
-    // applied here, so a filter is never silently reinterpreted.
-    const others: string[] = [];
-    if (options.seen !== undefined) others.push(`isRead eq ${options.seen ? 'true' : 'false'}`);
-    if (options.hasAttachment !== undefined) {
-      others.push(`hasAttachments eq ${options.hasAttachment ? 'true' : 'false'}`);
-    }
-    if (options.from) {
-      others.push(`from/emailAddress/address eq '${options.from.replace(/'/g, "''")}'`);
-    }
-    others.push(...dates.sent);
-
-    // Règle Graph pour $filter + $orderby sur les messages : la propriété de
-    // tri doit figurer dans $filter, EN PREMIER, avant toute autre propriété ;
-    // sinon 400 InefficientFilter (« The restriction or sort order is too
-    // complex for this operation »). Voir
-    // https://learn.microsoft.com/graph/api/user-list-messages, section « Using
-    // filter and orderby in the same query ». Les clauses receivedDateTime
-    // passent donc en tête ; sans filtre de date, une borne basse neutre (1900)
-    // est ajoutée — technique documentée — pour satisfaire la règle sans
-    // restreindre le résultat.
-    const received = [...dates.received];
-    if (received.length === 0 && others.length > 0) {
-      received.push(`receivedDateTime ge ${RECEIVED_LOWER_BOUND}`);
-    }
-    const filters = [...received, ...others];
-
     const query = [
       `$select=${META_SELECT}`,
       `$orderby=${ORDER_BY}`,
@@ -389,6 +626,7 @@ export default class GraphService {
       page,
       pageSize,
       hasMore: page * pageSize < total,
+      ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
     };
   }
 
@@ -457,68 +695,176 @@ export default class GraphService {
   /**
    * Full-text search. Graph's `$search` covers the whole message (subject, body,
    * participants) and, unlike IMAP SEARCH, cannot be combined with `$filter` or
-   * with `$orderby` — so a free-text query is served by `$search` alone, and the
-   * structured filters are applied only when no query text is given. Mixing them
-   * silently would drop half the criteria.
+   * with `$orderby`. Dates are therefore pushed into the KQL query (widened by a
+   * day) and every other criterion — exact dates, read / flagged / attachment
+   * state, `*_contains` — is checked on each result (see matchesSearchFilters),
+   * so no criterion is silently dropped when a query text is given.
    */
   async searchEmails(
     accountName: string,
     query: string,
-    options: {
-      mailbox?: string;
-      page?: number;
-      pageSize?: number;
-      from?: string;
-      to?: string;
-      subject?: string;
-      seen?: boolean;
-      flagged?: boolean;
-      hasAttachment?: boolean;
-      fromContains?: string;
-      toContains?: string;
-      subjectContains?: string;
-    } & DateFilters = {},
+    options: GraphSearchOptions = {},
   ): Promise<PaginatedResult<EmailMeta>> {
-    const text = [query, options.subject, options.from, options.to]
-      .filter(Boolean)
-      .join(' ')
-      .trim();
-
-    if (!text) {
-      const listed = await this.listEmails(accountName, options);
-      return { ...listed, items: applyLiteralFilters(listed.items, options) };
-    }
+    const text = searchText(query, options);
+    if (!text) return this.listEmails(accountName, options);
 
     const page = options.page ?? 1;
     const pageSize = options.pageSize ?? 25;
+    const deadline = Date.now() + SEARCH_SCAN_BUDGET_MS;
+    const unsupported = unsupportedFilterWarning(options);
+    const gathered = await this.gather(accountName, text, options, {
+      limit: Number.POSITIVE_INFINITY,
+      deadline,
+    });
+    return paginateGathered(gathered, page, pageSize, unsupported ? [unsupported] : []);
+  }
+
+  /**
+   * Constitue le jeu de messages qui satisfont TOUS les critères, du plus
+   * récent au plus ancien, en suivant `@odata.nextLink`.
+   *
+   * Deux chemins, selon que `text` est vide ou non :
+   *  - `$filter` + `$orderby=receivedDateTime desc` : les filtres structurés
+   *    sont appliqués par Graph, les `*_contains` ici sur chaque page. Ils ne
+   *    sont pas confiés à Graph : `contains(from/emailAddress/address,'edf')`
+   *    est accepté mais ne rend RIEN (constaté sur Outlook.com, 2026-10-11),
+   *    et la documentation de `$filter` sur les messages ne le couvre pas — un
+   *    zéro silencieux, exactement le défaut à corriger.
+   *  - `$search` (KQL) : voir searchEmails.
+   *
+   * Bornes communes avec IMAP : `MAX_SCANNED_MESSAGES` messages examinés et
+   * l'échéance `deadline` ; la page 1 est toujours lue. `limit` arrête la
+   * lecture dès que ce nombre de messages est retenu (export).
+   */
+  private async gather(
+    accountName: string,
+    text: string,
+    options: GraphSearchOptions,
+    opts: { limit: number; deadline: number; withRecipients?: boolean },
+  ): Promise<GatherResult> {
+    const select = opts.withRecipients || options.toContains ? SCAN_SELECT_WITH_TO : SCAN_SELECT;
+    if (text) {
+      const window = dateWindow(options);
+      const kql = [text, ...kqlDateClauses(window)].join(' AND ');
+      const folderId = await this.resolveFolderId(accountName, options.mailbox ?? 'INBOX');
+      const url =
+        `/me/mailFolders/${folderId}/messages?$select=${select}` +
+        `&$search=${encodeURIComponent(`"${kql}"`)}` +
+        `&$top=${GRAPH_SEARCH_PAGE}`;
+      const gathered = await this.walkMessages(accountName, url, {
+        keep: (message) => matchesSearchFilters(message, options, window),
+        cap: MAX_SCANNED_MESSAGES,
+        serverCap: GRAPH_SEARCH_RESULT_CAP,
+        limit: opts.limit,
+        deadline: opts.deadline,
+        // `$search` trie par date d'ENVOI : c'est elle qui borne les messages
+        // non examinés. La reprise se fait au jour (KQL), avec la marge de
+        // continuationBefore, qui absorbe un délai d'acheminement de quelques
+        // heures entre envoi et réception.
+        dateOf: (message) => message.sentDateTime ?? message.receivedDateTime,
+        granularity: 'day',
+        before: options.before,
+      });
+      gathered.matched.sort(byDateDesc);
+      return gathered;
+    }
+
+    const filters = structuredFilterClauses(options);
     const folderId = await this.resolveFolderId(accountName, options.mailbox ?? 'INBOX');
+    const query = [
+      `$select=${select}`,
+      `$orderby=${ORDER_BY}`,
+      `$top=${GRAPH_SCAN_PAGE}`,
+      '$count=true',
+      ...(filters.length ? [`$filter=${encodeURIComponent(filters.join(' and '))}`] : []),
+    ].join('&');
+    return this.walkMessages(accountName, `/me/mailFolders/${folderId}/messages?${query}`, {
+      keep: (message) => applyLiteralFilters([toEmailMeta(message)], options).length > 0,
+      // Sans filtre côté client (export), rien n'est « examiné » au sens du
+      // tri : seul le budget de temps borne la lecture.
+      cap: hasLiteralFilters(options) ? MAX_SCANNED_MESSAGES : Number.POSITIVE_INFINITY,
+      limit: opts.limit,
+      deadline: opts.deadline,
+      dateOf: (message) => message.receivedDateTime,
+      // `receivedDateTime lt …` compare l'instant exact.
+      granularity: 'instant',
+      before: options.before,
+    });
+  }
 
-    // $search rejects $skip (Graph answers 400), so paging is done by taking the
-    // first page*pageSize matches and keeping the last slice. $top is capped at
-    // 250 for a search, which bounds how deep paging can go.
-    const wanted = Math.min(page * pageSize, 250);
-    const response = await this.client(accountName).request<{
-      value: GraphMessage[];
-    }>(
-      'GET',
-      `/me/mailFolders/${folderId}/messages?$select=${META_SELECT}` +
-        `&$search=${encodeURIComponent(`"${text}"`)}` +
-        `&$top=${wanted}`,
-    );
+  /** Suit les pages d'une requête Graph en appliquant `keep` à chaque message. */
+  private async walkMessages(
+    accountName: string,
+    firstUrl: string,
+    opts: {
+      keep: (message: GraphMessage) => boolean;
+      cap: number;
+      serverCap?: number;
+      limit: number;
+      deadline: number;
+      dateOf: (message: GraphMessage) => string | undefined;
+      granularity: BeforeGranularity;
+      before?: string;
+    },
+  ): Promise<GatherResult> {
+    const client = this.client(accountName);
+    const matched: EmailMeta[] = [];
+    let next: string | undefined = firstUrl;
+    let examined = 0;
+    let candidates: number | undefined;
+    let oldest: string | undefined;
+    let stoppedBy: CoverageStop | undefined;
+    let limited = false;
 
-    // `$search` matches indexed tokens, exactly like the IMAP full-text case, so
-    // the literal filters are applied here too — same result on both backends.
-    const all = applyLiteralFilters(response.value.map(toEmailMeta), options);
-    const items = all.slice((page - 1) * pageSize, page * pageSize);
+    /* eslint-disable no-await-in-loop -- la pagination Graph est séquentielle */
+    while (next) {
+      if (matched.length >= opts.limit) {
+        limited = true;
+        break;
+      }
+      if (examined >= opts.cap) {
+        stoppedBy = 'message_cap';
+        break;
+      }
+      // La première page est toujours lue : jamais de page vide par manque de temps.
+      if (examined > 0 && Date.now() > opts.deadline) {
+        stoppedBy = 'time_budget';
+        break;
+      }
+      const response: GraphPage = await client.request<GraphPage>('GET', next);
+      if (candidates === undefined && typeof response['@odata.count'] === 'number') {
+        candidates = response['@odata.count'];
+      }
+      const batch = response.value.slice(0, opts.cap - examined);
+      matched.push(...batch.filter(opts.keep).map(toEmailMeta));
+      const last = batch.at(-1);
+      oldest = (last ? opts.dateOf(last) : undefined) ?? oldest;
+      examined += batch.length;
+      next = response['@odata.nextLink'];
+      if (batch.length < response.value.length) {
+        stoppedBy = 'message_cap';
+        break;
+      }
+    }
+    /* eslint-enable no-await-in-loop */
+
+    if (!stoppedBy && !limited && opts.serverCap !== undefined && examined >= opts.serverCap) {
+      stoppedBy = 'server_cap';
+    }
+    if (!stoppedBy) return { matched, limited };
+
     return {
-      items,
-      total: all.length,
-      page,
-      pageSize,
-      hasMore: all.length >= wanted && wanted < 250,
-      // Graph reports no match count alongside $search, and the 250 cap means a
-      // deeper result set is invisible — the total is a floor, not a count.
-      totalApprox: true,
+      matched,
+      limited,
+      coverage: buildCoverage({
+        stoppedBy,
+        examined,
+        candidates: candidates ?? examined,
+        ...(candidates === undefined ? { candidatesApprox: true } : {}),
+        oldestExamined: oldest ? new Date(oldest) : undefined,
+        granularity: opts.granularity,
+        currentBefore: opts.before,
+      }),
     };
   }
 
@@ -1175,39 +1521,47 @@ export default class GraphService {
     accountName: string | null,
     query: string,
     options: { maxRows: number; mailbox?: string; [key: string]: unknown },
-  ): Promise<{ items: EmailMeta[]; truncated: boolean }> {
+  ): Promise<{ items: EmailMeta[]; truncated: boolean; coverage?: SearchCoverage[] }> {
     const names = accountNames ?? (accountName ? [accountName] : []);
     if (names.length === 0) {
       throw new Error('searchForExport requires at least one account name');
     }
 
-    const { maxRows } = options;
+    const { maxRows, ...searchOptions } = options;
+    const deadline = Date.now() + SEARCH_SCAN_BUDGET_MS;
     const collected: EmailMeta[] = [];
+    const coverage: SearchCoverage[] = [];
     let truncated = false;
 
     /* eslint-disable no-restricted-syntax, no-await-in-loop -- one account at a time, Graph throttles */
     for (const name of names) {
-      let page = 1;
-      // Graph caps a page at 1000; walk pages until the row budget is reached.
-      while (collected.length < maxRows) {
-        const pageSize = Math.min(100, maxRows - collected.length);
-        const result = await this.searchEmails(name, query, {
-          ...options,
-          page,
-          pageSize,
-        });
-        collected.push(...result.items.map((item) => ({ ...item, account: name })));
-        if (!result.hasMore || result.items.length === 0) break;
-        page += 1;
-      }
-      if (collected.length >= maxRows) {
+      const remaining = maxRows - collected.length;
+      if (remaining <= 0) {
         truncated = true;
         break;
       }
+      // Un seul parcours par compte, filtres appliqués AVANT la coupe à
+      // maxRows — l'ancienne boucle page par page de searchEmails aurait
+      // relu toute la boîte à chaque page.
+      const gathered = await this.gather(
+        name,
+        searchText(query, searchOptions as GraphSearchOptions),
+        searchOptions as GraphSearchOptions,
+        { limit: remaining, deadline, withRecipients: true },
+      );
+      if (gathered.limited || gathered.matched.length > remaining) truncated = true;
+      collected.push(
+        ...gathered.matched.slice(0, remaining).map((item) => ({ ...item, account: name })),
+      );
+      if (gathered.coverage) coverage.push({ ...gathered.coverage, account: name });
     }
     /* eslint-enable no-restricted-syntax, no-await-in-loop */
 
-    return { items: collected.slice(0, maxRows), truncated };
+    return {
+      items: collected,
+      truncated,
+      ...(coverage.length > 0 ? { coverage } : {}),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -1554,7 +1908,7 @@ export default class GraphService {
     assertSafeDestination(input.destinationFolder);
     await mkdir(input.destinationFolder, { recursive: true });
 
-    const { items, truncated } = await this.searchForExport(
+    const { items, truncated, coverage } = await this.searchForExport(
       input.accountNames,
       input.accountName,
       input.query,
@@ -1601,6 +1955,7 @@ export default class GraphService {
       folder: input.destinationFolder,
       matched: items.length,
       truncated,
+      ...(coverage ? { coverage } : {}),
       files_saved: filesSaved,
       total_size: totalSize,
       errors,
