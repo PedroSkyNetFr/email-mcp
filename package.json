@@ -89,7 +89,7 @@
     "node-ical": "^0.25.2",
     "nodemailer": "^8.0.1",
     "postgres": "^3.4.5",
-    "smol-toml": "^1.6.0",
+    "smol-toml": "^1.9.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
