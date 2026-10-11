@@ -30,6 +30,7 @@ import type {
   Mailbox,
   PaginatedResult,
 } from '../../types/index.js';
+import { normalizeDate } from '../../utils/date.js';
 import type { HeaderEntry } from '../../utils/headers.js';
 import {
   analyzeHeaders,
@@ -128,6 +129,48 @@ function toAddresses(
   input?: { emailAddress?: { name?: string; address?: string } }[],
 ): EmailAddress[] {
   return (input ?? []).map((entry) => toAddress(entry));
+}
+
+/** Filtres de date acceptés par les outils de recherche, communs à IMAP et Graph. */
+interface DateFilters {
+  since?: string;
+  before?: string;
+  on?: string;
+  sentSince?: string;
+  sentBefore?: string;
+}
+
+/**
+ * Traduit les filtres de date en clauses OData.
+ *
+ * Les valeurs passent par `normalizeDate`, le même parseur que le backend
+ * IMAP : ISO 8601, `AAAA-MM-JJ`, `7d` / `2w` / `1m`, `today`, `yesterday`. Un
+ * `new Date("60d")` donnait une date invalide et `toISOString()` levait
+ * « Invalid time value ». Sémantique alignée sur SEARCH IMAP :
+ *   - `since` / `before` portent sur la réception (`receivedDateTime`) ;
+ *   - `on` couvre le jour civil UTC entier de la date donnée ;
+ *   - `sentSince` / `sentBefore` portent sur l'en-tête Date (`sentDateTime`).
+ */
+function dateFilterClauses(options: DateFilters): { received: string[]; sent: string[] } {
+  const iso = (value: string): string => normalizeDate(value).toISOString();
+  const received: string[] = [];
+  const sent: string[] = [];
+
+  if (options.since) received.push(`receivedDateTime ge ${iso(options.since)}`);
+  if (options.before) received.push(`receivedDateTime lt ${iso(options.before)}`);
+  if (options.on) {
+    const parsed = normalizeDate(options.on);
+    const dayStart = new Date(
+      Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate()),
+    );
+    const nextDay = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+    received.push(`receivedDateTime ge ${dayStart.toISOString()}`);
+    received.push(`receivedDateTime lt ${nextDay.toISOString()}`);
+  }
+  if (options.sentSince) sent.push(`sentDateTime ge ${iso(options.sentSince)}`);
+  if (options.sentBefore) sent.push(`sentDateTime lt ${iso(options.sentBefore)}`);
+
+  return { received, sent };
 }
 
 /** Map the Graph well-known folder name onto the IMAP special-use flag. */
@@ -280,12 +323,13 @@ export default class GraphService {
       hasAttachment?: boolean;
       from?: string;
       subject?: string;
-      since?: string;
-      before?: string;
-    } = {},
+    } & DateFilters = {},
   ): Promise<PaginatedResult<EmailMeta>> {
     const page = options.page ?? 1;
     const pageSize = options.pageSize ?? 25;
+    // Dates analysées avant tout appel réseau : une date illisible échoue tout
+    // de suite avec « Invalid date: … ».
+    const dates = dateFilterClauses(options);
     const folderId = await this.resolveFolderId(accountName, options.mailbox ?? 'INBOX');
 
     // Graph filters are OData; only the subset with a faithful translation is
@@ -295,13 +339,11 @@ export default class GraphService {
     if (options.hasAttachment !== undefined) {
       filters.push(`hasAttachments eq ${options.hasAttachment ? 'true' : 'false'}`);
     }
-    if (options.since) filters.push(`receivedDateTime ge ${new Date(options.since).toISOString()}`);
-    if (options.before) {
-      filters.push(`receivedDateTime lt ${new Date(options.before).toISOString()}`);
-    }
+    filters.push(...dates.received);
     if (options.from) {
       filters.push(`from/emailAddress/address eq '${options.from.replace(/'/g, "''")}'`);
     }
+    filters.push(...dates.sent);
 
     const query = [
       `$select=${META_SELECT}`,
@@ -407,15 +449,13 @@ export default class GraphService {
       from?: string;
       to?: string;
       subject?: string;
-      since?: string;
-      before?: string;
       seen?: boolean;
       flagged?: boolean;
       hasAttachment?: boolean;
       fromContains?: string;
       toContains?: string;
       subjectContains?: string;
-    } = {},
+    } & DateFilters = {},
   ): Promise<PaginatedResult<EmailMeta>> {
     const text = [query, options.subject, options.from, options.to]
       .filter(Boolean)
