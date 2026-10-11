@@ -1063,7 +1063,7 @@ Invalid regex patterns raise a `Invalid attachment_mimetype pattern: …` tool e
 
 ### Facets
 
-`search_emails` (only — not `list_emails`) accepts a `facets` array to return bucketed counts across the **full match set** (up to the 5000-UID cap) alongside the paginated page:
+`search_emails` (only — not `list_emails`) accepts a `facets` array to return bucketed counts across the **full match set** alongside the paginated page:
 
 ```jsonc
 {
@@ -1081,17 +1081,45 @@ The response appends a `📊 Facets` block with the top 10 senders and year buck
   By year:   2025 (52), 2024 (20)
 ```
 
-Facets are computed via a single envelope-only IMAP fetch in 500-UID chunks. When the match set exceeds **10000 UIDs** facets are skipped with a warning — narrow the query (date range, sender, subject) to unlock them. In `search_emails`, `"mailbox"` is a single-entry bucket for the current mailbox. In `search_all_accounts`, the `mailbox` facet is re-keyed by account name, giving a per-account breakdown (e.g. `{ "wgs-usa": 42, "all-pedal": 10 }`).
+Facets are computed via a single envelope-only IMAP fetch in 500-UID chunks. When the match set exceeds **10000 UIDs** facets cover only the 10000 most recent matches, with a warning — narrow the query (date range, sender, subject) for exact facets. In `search_emails`, `"mailbox"` is a single-entry bucket for the current mailbox. In `search_all_accounts`, the `mailbox` facet is re-keyed by account name, giving a per-account breakdown (e.g. `{ "wgs-usa": 42, "all-pedal": 10 }`).
 
 ### Performance Notes
 
-- **UID cap**: large result sets are capped at **5000 UIDs** before pagination. When truncation happens the response includes a `warning` and the rendered count is prefixed with `~` to indicate `totalApprox`. Narrow the query with more filters (dates, sender, subject) to drop below the cap.
-- **`has_attachment` / `attachment_*` / `*_contains` are client-side, before pagination**: IMAP has no native attachment search, so the server SEARCH runs with the other criteria and the result (capped at 5000 UIDs) is then checked by fetching `BODYSTRUCTURE` + envelope (never bodies) in 200-UID chunks. Pages and totals therefore count only matching messages. The scan has a **20 s budget**: past it (typically the first scan of a large Dovecot folder whose index cache lacks body structures) the most recent matches found so far are returned with a `warning` and `totalApprox` — add `since`/`before` to keep the scan small.
-- **Relative date tokens** (`7d`, `2w`, `1m`, `yesterday`, `today`) are evaluated in UTC at call time.
+- **No cap without client-side filters**: when every filter is evaluated by the server, only the requested page is fetched, whatever the number of matches — the total is exact and every page is reachable.
+- **`has_attachment` / `attachment_*` / `*_contains` are client-side, before pagination**: IMAP has no native attachment search, so the server SEARCH runs with the other criteria and its candidates are then checked by fetching `BODYSTRUCTURE` + envelope (never bodies) in 200-UID chunks, **newest first by arrival date** (`INTERNALDATE`, not UID order — a message moved into a folder gets a new UID but keeps its date). Pages and totals therefore count only matching messages. See [Searching the whole mailbox](#searching-the-whole-mailbox-partial-scans-and-continuation) for the bounds of that scan.
+- **Relative date tokens** (`7d`, `2w`, `1m`, `yesterday`, `today`) are evaluated in UTC at call time, and accepted by every search tool (`list_emails`, `search_emails`, `search_all_accounts`, `export_search`, `save_*_from_search`) on both backends.
+
+### Searching the whole mailbox: partial scans and continuation
+
+A client-side filter (`has_attachment`, `attachment_*` and `*_contains` on IMAP; `*_contains` on Graph) means each candidate message has to be read. One call examines candidates from the newest to the oldest and stops at the first of two bounds:
+
+- a **45 s time budget**, counted from the start of the call — the MCP client gives up on a call after about 60 s, and the first scan of a large Dovecot folder whose index cache lacks body structures can take over a minute;
+- **5000 examined messages**.
+
+The scan is never truncated silently. When a bound stops it, the response says so in its `warning` (the total is shown as `~N`) and, on IMAP and Graph alike, carries a `coverage` object — also in the JSON output of `export_search`, `save_emails_from_search` and `save_all_attachments_from_search`, one entry per account:
+
+```jsonc
+{
+  "stoppedBy": "time_budget",        // or "message_cap", or "server_cap" (Graph $search ceiling)
+  "examined": 1200,                  // messages actually checked (the most recent ones)
+  "candidates": 2199,                // messages matching the server-side criteria
+  "oldestExamined": "2025-03-14T22:10:05.000Z",
+  "continueBefore": "2025-03-16",
+  "hint": "Partial scan: examined the 1200 most recent of 2199 candidate messages (time budget of 45 s reached). … re-run the same call with before: \"2025-03-16\" …"
+}
+```
+
+Results and total then cover only the examined messages. **Re-run the same call with `before: <continueBefore>`** to scan the next slice; repeating covers the whole mailbox. Consecutive slices may overlap slightly (a message can appear twice), never leave a gap: on IMAP `before` compares dates only, so the value is the day after the oldest examined message with a margin for the server's timezone; on Graph's `$filter` path it is the exact instant plus one second. When even a single day holds more than one call can examine, `continueBefore` is omitted and the hint asks for another server-side filter.
+
+### Microsoft Graph accounts
+
+- `$filter` path (no query text): `*_contains` filters walk the `@odata.nextLink` pages (500 messages each, `receivedDateTime desc`) and are applied before pagination, with the same budget, cap and `coverage` as IMAP. They are not pushed to Graph: `contains(from/emailAddress/address, …)` is accepted but returned no message on Outlook.com, and the `$filter` documentation does not cover it for messages.
+- `$search` path (query text, or `subject` / `from` / `to`): Graph rejects `$filter` and `$orderby` alongside `$search`, so date filters are pushed into the KQL query (`received>=…`, widened by a day) and every other criterion — exact dates, `seen`, `flagged`, `has_attachment`, `*_contains` — is checked on each result. Graph returns at most 1000 `$search` results; reaching that ceiling is reported as `coverage.stoppedBy: "server_cap"`.
+- Filters with no faithful Graph translation (`cc`, `bcc`, `text`, `body`, `answered`, `keyword`, `header`, `uids`, sizes, `attachment_filename`, `attachment_mimetype`) are ignored, and the response now says which ones.
 
 ### Cross-account search
 
-`search_all_accounts` fans a single query out across multiple accounts in parallel (Promise.allSettled), merges results sorted by date, and tags each item with the originating account name. Partial failures are surfaced as `warnings` — a single bad account does not fail the entire call. Omit the `accounts` field to default to every configured account.
+`search_all_accounts` fans a single query out across multiple accounts in parallel (Promise.allSettled), merges results sorted by date, and tags each item with the originating account name. IMAP and Graph accounts can be mixed in one call; each account is searched by its own backend. Partial failures are surfaced as `warnings` — a single bad account does not fail the entire call. Omit the `accounts` field to default to every configured account.
 
 ```jsonc
 // Find every "Pines Rd" message across all configured accounts
