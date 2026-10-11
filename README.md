@@ -1,603 +1,316 @@
-# Email MCP Server
+# email-mcp
 
-[![standard-readme compliant](https://img.shields.io/badge/readme%20style-standard-brightgreen.svg?style=flat-square)](https://github.com/RichardLitt/standard-readme)
-[![license](https://img.shields.io/github/license/codefuturist/email-mcp.svg?style=flat-square)](LICENSE)
-[![npm version](https://img.shields.io/npm/v/@codefuturist/email-mcp.svg?style=flat-square)](https://www.npmjs.com/package/@codefuturist/email-mcp)
-[![npm downloads](https://img.shields.io/npm/dm/@codefuturist/email-mcp.svg?style=flat-square)](https://www.npmjs.com/package/@codefuturist/email-mcp)
-[![CI](https://img.shields.io/github/actions/workflow/status/codefuturist/email-mcp/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/codefuturist/email-mcp/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/PedroSkyNetFr/email-mcp.svg?style=flat-square)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/PedroSkyNetFr/email-mcp/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/PedroSkyNetFr/email-mcp/actions/workflows/ci.yml)
 
-An MCP (Model Context Protocol) server providing comprehensive email capabilities via IMAP and SMTP, or via Microsoft Graph for Exchange / Outlook.com accounts.
+**English** · [Français](README.fr.md)
 
-Enables AI assistants to read, search, send, manage, schedule, export and analyze emails across multiple accounts. Exposes 64 tools, 7 prompts, and 6 resources over the MCP protocol with OAuth2 support _(experimental)_, email scheduling, calendar extraction, analytics, provider-aware label management, real-time IMAP IDLE watcher with AI-powered triage, customizable presets and static rules, `.eml` export, full Internet-header inspection, and a guided setup wizard.
+An MCP (Model Context Protocol) server that gives an AI assistant — Claude
+Desktop or any other MCP client — a full email client: read, search, export,
+compose, send, schedule and organise mail across several accounts. Mailboxes are
+reached over **IMAP + SMTP**, or over **Microsoft Graph** for Exchange Online and
+Outlook.com accounts, whose IMAP endpoint hides part of the mailbox.
+
+The server exposes **64 tools** (35 when it runs read-only), **7 prompts** and
+**6 resources**.
+
+> **About this fork.** This repository is a fork maintained by
+> [@PedroSkyNetFr](https://github.com/PedroSkyNetFr). The npm package
+> `@codefuturist/email-mcp` and the `ghcr.io/codefuturist/email-mcp` /
+> `codefuturist/email-mcp` Docker images are published by the **original**
+> project and do **not** contain this fork's changes (Microsoft Graph backend,
+> `.eml` export, secret commands, search coverage reports, …). Install this fork
+> from source, as described below.
+
+## Contents
+
+- [Highlights](#highlights)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Connecting an MCP client](#connecting-an-mcp-client)
+- [Command line](#command-line)
+- [Tools reference](#tools-reference)
+- [Prompts and resources](#prompts-and-resources)
+- [Searching](#searching)
+- [Exporting and saving to disk](#exporting-and-saving-to-disk)
+- [Drafts, attachments and signatures](#drafts-attachments-and-signatures)
+- [Internet headers](#internet-headers)
+- [Calendar and reminders](#calendar-and-reminders)
+- [Watcher, notifications and AI hooks](#watcher-notifications-and-ai-hooks)
+- [Scheduled sending](#scheduled-sending)
+- [Mailbox management](#mailbox-management)
+- [Security](#security)
+- [Troubleshooting](#troubleshooting)
+- [Architecture](#architecture)
+- [Development and contributing](#development-and-contributing)
+- [Maintainer](#maintainer)
+- [History and credits](#history-and-credits)
+- [License](#license)
 
 ## Highlights
 
-| Feature | email-mcp | Typical MCP email |
-|---------|:---------:|:-----------------:|
-| Multi-account | ✅ | ❌ |
-| Send / reply / forward | ✅ | ✅ |
-| Drafts & templates | ✅ | ❌ |
-| Labels & bulk ops | ✅ provider-aware | ❌ |
-| Schedule future emails | ✅ | ❌ |
-| Real-time IMAP IDLE watcher | ✅ | ❌ |
-| AI triage with presets | ✅ | ❌ |
-| Desktop & webhook alerts | ✅ | ❌ |
-| Calendar (ICS) extraction | ✅ | ❌ |
-| Email analytics | ✅ | ❌ |
-| `.eml` export (verbatim RFC822) | ✅ | ❌ |
-| Full Internet headers + Received/SPF/DKIM/DMARC analysis | ✅ | ❌ |
-| OAuth2 (Gmail / M365) | ✅ _experimental_ | ❌ |
-| Guided setup wizard | ✅ auto-detect | ❌ |
+- **Multi-account**, IMAP and Microsoft Graph accounts side by side; each tool
+  call names the account it acts on.
+- **Search that says when it is incomplete**: server-side filters, literal
+  `*_contains` filters, attachment filters, relative dates (`7d`, `yesterday`),
+  facets, Gmail native syntax, search across all accounts. A scan cut short by
+  its time budget reports what it covered and how to continue — never a silent
+  partial result.
+- **Export**: search results to CSV/NDJSON, messages to `.eml` (exact source),
+  attachments straight to disk.
+- **Compose**: send, reply, forward, drafts that keep their attachments,
+  templates, inline (`cid`) images, automatic Outlook signature with its logo.
+- **Forensics**: complete Internet headers with the Received chain,
+  SPF/DKIM/DMARC verdicts and domain alignment.
+- **Organise**: move, delete, flag, labels (Gmail, ProtonMail, IMAP keywords,
+  Exchange categories), folders, bulk actions, cross-account move, Exchange
+  server-side rules and automatic reply.
+- **Automate**: scheduled sending (with an OS-level task on macOS, Linux and
+  Windows), IMAP IDLE watcher with static rules, AI triage and desktop/webhook
+  alerts, calendar and reminders extraction.
+- **Safety**: read-only mode, credentials fetched from a password manager,
+  disk-write allow-list, send rate limit, audit log.
 
-## Table of Contents
+## Installation
 
-- [Highlights](#highlights)
-- [Security](#security)
-- [Background](#background)
-- [Install](#install)
-- [Usage](#usage)
-- [API](#api)
-- [Maintainers](#maintainers)
-- [Contributing](#contributing)
-- [License](#license)
+### Requirements
 
-## Security
+- **Node.js ≥ 24** (`engines` in `package.json`).
+- **pnpm** — the repository pins `pnpm@9.15.0` through `packageManager`;
+  `corepack enable` provides it.
+- **git**, to clone and to receive updates.
 
-- All connections use TLS/STARTTLS encryption
-- Passwords are never logged; audit trail records operations without credentials
-- Token-bucket rate limiter prevents abuse (configurable per account)
-- OAuth2 XOAUTH2 authentication for Gmail and Microsoft 365 _(experimental)_
-- Attachment downloads capped at 5 MB with base64 encoding
-
-## Background
-
-Most MCP email implementations provide only basic read/send. This server aims to be a full-featured email client for AI assistants, covering the entire lifecycle: reading, composing, managing, scheduling, and analyzing email — all from a single MCP server.
-
-Key design decisions:
-
-- **XDG-compliant config** — TOML at `~/.config/email-mcp/config.toml`
-- **Multi-account** — Operate across multiple IMAP/SMTP accounts simultaneously
-- **Layered services** — Business logic is decoupled from MCP wiring for testability
-- **Provider auto-detection** — Gmail, Outlook, Yahoo, iCloud, Fastmail, ProtonMail, Zoho, GMX
-
-## Install
-
-Requires Node.js ≥ 22.
+### From source
 
 ```bash
-# Run directly (no install needed)
-npx @codefuturist/email-mcp setup
-# or
-pnpm dlx @codefuturist/email-mcp setup
-
-# Or install globally
-npm install -g @codefuturist/email-mcp
-# or
-pnpm add -g @codefuturist/email-mcp
+git clone https://github.com/PedroSkyNetFr/email-mcp.git
+cd email-mcp
+pnpm install      # also installs the git hooks (lefthook)
+pnpm build        # compiles src/ to dist/ — dist/main.js is what clients run
+node dist/main.js --help
 ```
 
-### Run your local build (fork)
+Then [configure an account](#configuration) and
+[register the server with your MCP client](#connecting-an-mcp-client).
 
-To run a locally-built copy of this fork instead of the published npm package:
+### Updating
 
 ```bash
-# 1. Install + build (Node ≥ 22)
-pnpm install
-pnpm build              # compiles to dist/main.js (the `email-mcp` bin)
-
-# 2. Run the local binary directly
-node dist/main.js        # MCP server over stdio (default)
-node dist/main.js test   # test IMAP/SMTP connections
+git pull
 ```
 
-Point your MCP client at the local binary by replacing the
-`npx @codefuturist/email-mcp` command with an absolute `node dist/main.js`:
+`dist/` is not versioned: a pull changes `src/` but the client keeps running the
+old compiled code. The git hooks installed by `pnpm install` take care of it —
+after a `git pull`, a branch switch or a rebase they rebuild `dist/`, and first
+reinstall the locked dependencies when `pnpm-lock.yaml` changed
+(`scripts/rebuild-after-update.mjs`). If the hooks are missing, run
+`pnpm hooks:install`, or `pnpm install && pnpm build` by hand.
 
-```jsonc
-{
-  "mcpServers": {
-    "email": {
-      "command": "node",
-      "args": ["/abs/path/to/email-mcp/dist/main.js", "stdio"],
-      "env": {
-        "MCP_EMAIL_ACCOUNT_NAME": "work",
-        "MCP_EMAIL_ADDRESS": "you@example.com",
-        "MCP_EMAIL_FULL_NAME": "Your Name",
-        "MCP_EMAIL_PASSWORD": "your-password",
-        "MCP_EMAIL_IMAP_HOST": "imap.example.com",
-        "MCP_EMAIL_SMTP_HOST": "smtp.example.com"
-      }
-    }
-  }
-}
-```
+**Then restart the MCP client.** A stdio server is a process the client starts
+once; it keeps serving the code it was started with. `check_health` reports which
+build is actually running (version, `dist` or `src`, build date) — check it first
+when a documented tool seems to be missing.
 
-**Keep `dist/` in step with the code.** `dist/` is not versioned, so a `git pull`
-updates `src/` and leaves the build your client runs behind — a merged fix looks
-deployed and is not. Git hooks rebuild `dist/` after a pull, a branch switch or a
-rebase — first reinstalling the locked dependencies when `pnpm-lock.yaml` changed,
-since new code on old `node_modules/` may not start at all; `pnpm install` sets
-them up, or run `pnpm hooks:install`. A client loads
-`dist/` when it starts the server, so restart it afterwards; `check_health`
-reports which build is running.
+### Docker (build it yourself)
 
-Configuration comes from **either** environment variables (the `env` block
-above, or a `.env` loaded via Node's `--env-file=.env`) **or** a
-`~/.config/email-mcp/config.toml` (`node dist/main.js config init` to scaffold
-one). **No PostgreSQL is required** to send or draft mail — the optional
-`[database]` section is used only by the cross-account routing engine and stays
-inactive when unset.
-
-### Docker
-
-No Node.js required — just Docker.
+The repository contains a `Dockerfile` (Node 24, multi-stage) and a
+`Dockerfile.alpine`. CI builds the image as a smoke test, but no image of this
+fork is published — build your own:
 
 ```bash
-# Latest stable release
-docker pull ghcr.io/codefuturist/email-mcp:latest
-
-# Pin to an exact version (immutable)
-docker pull ghcr.io/codefuturist/email-mcp:0.2.3
-
-# Auto-update patches within a minor version
-docker pull ghcr.io/codefuturist/email-mcp:0.2
-
-# Track a major version (won't cross breaking-change boundary)
-docker pull ghcr.io/codefuturist/email-mcp:0
-
-# Pin to an exact git commit (immutable, CI traceability)
-docker pull ghcr.io/codefuturist/email-mcp:sha-abc1234
-
-# Or build from source
-docker build -t ghcr.io/codefuturist/email-mcp .
-```
-
-> **Tag convention:** Tags follow bare semver (no `v` prefix), matching Docker ecosystem standards (e.g. `node:24`, `nginx:1.25`). The `latest` tag is only updated on stable releases, never pre-releases.
-
-> **Note:** The server uses stdio transport. Config must be created on the host first
-> (via `npx @codefuturist/email-mcp setup` or manually) and mounted into the container.
-
-## Usage
-
-### Setup
-
-```bash
-# Add an email account interactively (recommended)
-email-mcp account add
-
-# Or use the legacy alias
-email-mcp setup
-
-# Or create a template config manually
-email-mcp config init
-```
-
-The setup wizard auto-detects server settings, tests connections, saves config, and outputs the MCP client config snippet.
-
-### Test Connections
-
-```bash
-email-mcp test            # all accounts
-email-mcp test personal   # specific account
-```
-
-### Configure Your MCP Client
-
-**Recommended — use the guided installer** (auto-detects Claude Desktop, VS Code, Cursor, Windsurf):
-
-```bash
-email-mcp install
-```
-
-Or add manually using the snippets below.
-
-<details>
-<summary><strong>Claude Desktop</strong></summary>
-
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
-
-```json
-{
-  "mcpServers": {
-    "email": {
-      "command": "npx",
-      "args": ["-y", "@codefuturist/email-mcp", "stdio"]
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><strong>VS Code (GitHub Copilot)</strong></summary>
-
-**Option 1 — Extensions gallery (easiest):**
-1. Open the Extensions view (<kbd>⇧⌘X</kbd> / <kbd>Ctrl+Shift+X</kbd>)
-2. Search `@mcp email-mcp`
-3. Click **Install** (user-wide) or right-click → **Install in Workspace**
-
-**Option 2 — Workspace config** (`.vscode/mcp.json`, committed to source control):
-
-```json
-{
-  "servers": {
-    "email": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@codefuturist/email-mcp", "stdio"]
-    }
-  }
-}
-```
-
-**Option 3 — User config** (`settings.json`, applies to all workspaces):
-
-Open the Command Palette → **Preferences: Open User Settings (JSON)** and add:
-
-```json
-{
-  "mcp": {
-    "servers": {
-      "email": {
-        "type": "stdio",
-        "command": "npx",
-        "args": ["-y", "@codefuturist/email-mcp", "stdio"]
-      }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><strong>Cursor</strong></summary>
-
-Edit `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "email": {
-      "command": "npx",
-      "args": ["-y", "@codefuturist/email-mcp", "stdio"]
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><strong>Windsurf</strong></summary>
-
-Edit `~/.codeium/windsurf/mcp_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "email": {
-      "command": "npx",
-      "args": ["-y", "@codefuturist/email-mcp", "stdio"]
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><strong>Zed</strong></summary>
-
-Edit `~/.config/zed/settings.json`:
-
-```json
-{
-  "context_servers": {
-    "email": {
-      "command": {
-        "path": "npx",
-        "args": ["-y", "@codefuturist/email-mcp", "stdio"]
-      }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><strong>Mistral Vibe</strong></summary>
-
-Add to `~/.vibe/config.toml`:
-
-```toml
-[[mcp_servers]]
-name = "email-mcp"
-transport = "stdio"
-command = "npx"
-args = ["-y", "@codefuturist/email-mcp", "stdio"]
-```
-
-To pass credentials directly instead of using a config file, use the `env` field:
-
-```toml
-[[mcp_servers]]
-name = "email-mcp"
-transport = "stdio"
-command = "npx"
-args = ["-y", "@codefuturist/email-mcp", "stdio"]
-env = { "EMAIL_ACCOUNTS" = "<your-accounts-json>" }
-```
-
-MCP tools are exposed as `email-mcp_<tool_name>` (e.g. `email-mcp_list_emails`). Restart Vibe after editing the config.
-
-</details>
-
-<details>
-<summary><strong>Docker (any MCP client)</strong></summary>
-
-Run the server in a container — mount your config directory read-only:
-
-```bash
+docker build -t email-mcp-fork .
 docker run --rm -i \
   -v ~/.config/email-mcp:/home/node/.config/email-mcp:ro \
-  ghcr.io/codefuturist/email-mcp
+  email-mcp-fork
 ```
 
-For MCP client configuration (e.g. Claude Desktop):
+The container runs `node dist/main.js stdio` and reads its configuration from the
+mounted directory. Keep in mind that inside a container `*_command` secrets,
+`signature_path`, the save directories and desktop notifications refer to the
+container's filesystem and tools, not the host's.
 
-```json
-{
-  "mcpServers": {
-    "email": {
-      "command": "docker",
-      "args": [
-        "run", "--rm", "-i",
-        "-v", "~/.config/email-mcp:/home/node/.config/email-mcp:ro",
-        "ghcr.io/codefuturist/email-mcp"
-      ]
-    }
-  }
-}
-```
-</details>
+## Configuration
 
-<details>
-<summary><strong>Single-account via environment variables (no config file needed)</strong></summary>
+### Where the configuration lives
 
-```json
-{
-  "mcpServers": {
-    "email": {
-      "command": "npx",
-      "args": ["-y", "@codefuturist/email-mcp", "stdio"],
-      "env": {
-        "MCP_EMAIL_ADDRESS": "you@gmail.com",
-        "MCP_EMAIL_PASSWORD": "your-app-password",
-        "MCP_EMAIL_IMAP_HOST": "imap.gmail.com",
-        "MCP_EMAIL_SMTP_HOST": "smtp.gmail.com"
-      }
-    }
-  }
-}
-```
-</details>
+The configuration file is `config.toml` in the XDG config directory:
+`$XDG_CONFIG_HOME/email-mcp/config.toml`, by default
+`~/.config/email-mcp/config.toml` — on Windows too
+(`C:\Users\<you>\.config\email-mcp\config.toml`). `node dist/main.js config path`
+prints it.
 
-### CLI Commands
+Other locations, also XDG-based:
 
-```
-email-mcp [command]
+| Path | Contents |
+|------|----------|
+| `~/.config/email-mcp/templates/` | email templates (`*.toml`) |
+| `~/.local/state/email-mcp/scheduled/` | scheduled-email queue (JSON) |
+| `~/.local/state/email-mcp/calendar-processed.json` | emails already added to the calendar |
+| `~/.local/share/email-mcp/audit.log` | audit log of write operations (JSON Lines) |
+| `~/.local/share/email-mcp/calendar-attachments/` | attachments linked from calendar events |
 
-Commands:
-  stdio                     Run as MCP server over stdio (default)
-  account list              List all configured accounts
-  account add               Add a new email account interactively
-  account edit [name]       Edit an existing account
-  account delete [name]     Remove an account
-  setup                     Alias for 'account add'
-  test                      Test connections for all or a specific account
-  install                   Register email-mcp with MCP clients interactively
-  install status            Show registration status for detected clients
-  install remove            Unregister email-mcp from MCP clients
-  config show               Show config (passwords masked)
-  config edit               Edit global settings (rate limit, read-only)
-  config path               Print config file path
-  config init               Create template config
-  scheduler check           Process pending scheduled emails
-  scheduler list            Show all scheduled emails
-  scheduler install         Install OS-level scheduler (launchd/crontab/Task Scheduler)
-  scheduler uninstall       Remove OS-level scheduler
-  scheduler status          Show scheduler installation status
-  help                      Show help
-```
-
-### Configuration
-
-Located at `$XDG_CONFIG_HOME/email-mcp/config.toml` (default: `~/.config/email-mcp/config.toml`).
-
-```toml
-[settings]
-rate_limit = 10  # max emails per minute per account
-
-[[accounts]]
-name = "personal"
-email = "you@gmail.com"
-full_name = "Your Name"
-password = "your-app-password"
-
-[accounts.imap]
-host = "imap.gmail.com"
-port = 993
-tls = true
-
-[accounts.smtp]
-host = "smtp.gmail.com"
-port = 465
-tls = true
-starttls = false
-verify_ssl = true
-
-[accounts.smtp.pool]
-enabled = true
-max_connections = 1
-max_messages = 100
-```
-
-#### OAuth2 _(experimental)_
-
-> **Note:** OAuth2 support is experimental. Token refresh and provider-specific flows may require additional testing in your environment.
-
-```toml
-[[accounts]]
-name = "work"
-email = "you@company.com"
-full_name = "Your Name"
-
-[accounts.oauth2]
-provider = "google"            # or "microsoft"
-client_id = "your-client-id"
-client_secret = "your-client-secret"
-refresh_token = "your-refresh-token"
-
-[accounts.imap]
-host = "imap.gmail.com"
-port = 993
-tls = true
-
-[accounts.smtp]
-host = "smtp.gmail.com"
-port = 465
-tls = true
-
-[accounts.smtp.pool]
-enabled = true
-max_connections = 1
-max_messages = 100
-```
-
-**Getting the refresh token.** The server refreshes the access token on its own,
-but the initial refresh token has to be obtained once, interactively:
+### First account
 
 ```bash
-pnpm oauth:setup --provider microsoft --client-id <id> --client-secret <secret>
+node dist/main.js account add     # interactive wizard (alias: setup)
+node dist/main.js test            # test every account
 ```
 
-It opens the provider's consent page, captures the redirect on
-`http://localhost:3000/callback` (register that exact URI with your provider),
-exchanges the code, and prints the token plus a ready-to-paste env block. Pass
-`--port` to use another port, or `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` to keep
-credentials out of your shell history.
+The wizard detects the server settings from the address domain, tests the
+connection and writes `config.toml`. It handles password accounts; OAuth2 and
+Microsoft Graph accounts are written by hand (see
+[OAuth2 and Microsoft Graph](#oauth2-and-microsoft-graph)).
+`config init` writes a commented template instead, and `config.example.toml` in
+the repository shows cPanel, Gmail and iCloud accounts.
 
-Any option you omit is prompted for interactively (the client secret is masked),
-so `pnpm oauth:setup` on its own works too — it opens a menu of profiles:
+Detected providers:
+
+| Provider | Domains |
+|----------|---------|
+| Gmail | gmail.com, googlemail.com |
+| Outlook / Hotmail | outlook.com, hotmail.com, live.com, outlook.de, outlook.co.uk |
+| Yahoo Mail | yahoo.com, yahoo.co.uk, yahoo.de, ymail.com |
+| iCloud | icloud.com, me.com, mac.com |
+| Fastmail | fastmail.com, fastmail.fm |
+| ProtonMail Bridge | proton.me, protonmail.com, protonmail.ch, pm.me |
+| Zoho Mail | zoho.com, zohomail.com |
+| GMX | gmx.com, gmx.de, gmx.net, gmx.at, gmx.ch |
+
+### Accounts (`[[accounts]]`)
+
+```toml
+[[accounts]]
+name = "personal"                 # the name tools use in their `account` parameter
+email = "you@example.com"
+full_name = "Your Name"
+password_command = 'op read "op://Private/mail/password"'   # or: password = "..."
+signature_path = "C:\\Users\\You\\AppData\\Roaming\\Microsoft\\Signatures\\Main.htm"
+signature_default = true
+
+[accounts.imap]
+host = "imap.example.com"
+port = 993
+tls = true
+
+[accounts.smtp]
+host = "smtp.example.com"
+port = 465
+tls = true
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `name` | *required* | Account name used by every tool. |
+| `email` | *required* | Address of the account. |
+| `full_name` | — | Display name on sent mail. |
+| `username` | `email` | Login, when it differs from the address. |
+| `password` | — | Password or app password. |
+| `password_command` | — | Command printing the password ([secrets](#keeping-credentials-out-of-the-file)). Exactly one of `password`, `password_command` or an `oauth2` block is required. |
+| `oauth2` | — | OAuth2 block (below). |
+| `backend` | `"imap"` | `"graph"` serves the account through Microsoft Graph. |
+| `sent_folder` | auto | Folder receiving the copy of sent mail (auto-detected through SPECIAL-USE). |
+| `save_to_sent` | `true` | `false` stops appending a copy of each SMTP-sent message to the Sent folder. |
+| `gmail_auto_save` | `true` | Gmail files sent mail itself, so the append is skipped on Gmail; `false` appends anyway. |
+| `signature_path` | — | Outlook `.htm` signature appended on request ([signatures](#outlook-signature)). |
+| `signature_default` | `false` | Append the signature to every composed message unless a call says otherwise. |
+| `imap.host` / `smtp.host` | *required* | Server host names — required by the schema even for a Graph account, where they are unused. |
+| `imap.port` | `993` | |
+| `smtp.port` | `465` | |
+| `imap.tls` / `smtp.tls` | `true` | Implicit TLS. |
+| `imap.starttls` / `smtp.starttls` | `false` | STARTTLS (for SMTP on port 587: `tls = false`, `starttls = true`). |
+| `imap.verify_ssl` / `smtp.verify_ssl` | `true` | Verify the server certificate. |
+| `smtp.pool.enabled` | `true` | Reuse SMTP connections. |
+| `smtp.pool.max_connections` | `1` | |
+| `smtp.pool.max_messages` | `100` | Messages per pooled connection. |
+
+### OAuth2 and Microsoft Graph
+
+```toml
+[accounts.oauth2]
+provider = "google"               # "google" | "microsoft" | "custom"
+client_id = "…"
+client_secret_command = "…"       # or client_secret = "…"
+refresh_token_command = "…"       # or refresh_token = "…"
+# provider = "custom" only:
+# token_url = "https://…/token"
+# auth_url  = "https://…/authorize"
+# scopes    = ["…"]
+```
+
+The server refreshes the access token by itself, but the first refresh token is
+obtained once, interactively, with the helper script:
+
+```bash
+pnpm oauth:setup                  # menu of profiles; asks for whatever is missing
+pnpm oauth:setup --provider microsoft-graph --client-id <id>
+```
+
+It opens the provider's consent page, receives the redirect on
+`http://localhost:3000/callback` (register that exact URI with the provider;
+`--port` changes it), and prints the refresh token. Pass the client secret
+through `OAUTH_CLIENT_SECRET` (and the id through `OAUTH_CLIENT_ID`) to keep it
+out of your shell history; it is asked masked otherwise. On Windows,
+`scripts/oauth-setup.cmd` can be double-clicked.
 
 | Profile | Scopes | Use |
 |---------|--------|-----|
-| `microsoft` | IMAP + SMTP | legacy path; Exchange hides folders over IMAP |
-| `microsoft-graph` | `Mail.ReadWrite`, `Mail.Send`, `MailboxSettings.ReadWrite` | **Exchange / Outlook.com accounts** — full mailbox |
-| `microsoft-graph-readonly` | `Mail.Read` | diagnostics only — **never** put it in the config |
-| `google` | Gmail IMAP + SMTP | Gmail accounts |
-| `custom` | your own | supply `--auth-url`, `--token-url`, `--scopes` |
+| `microsoft` | `IMAP.AccessAsUser.All`, `SMTP.Send` | Microsoft over IMAP/SMTP — custom folders may be missing |
+| `microsoft-graph` | `Mail.ReadWrite`, `Mail.Send`, `MailboxSettings.ReadWrite` | **Exchange / Outlook.com accounts with `backend = "graph"`** |
+| `microsoft-graph-readonly` | `Mail.Read` | diagnostics only (`pnpm probe:graph`) — never in the configuration |
+| `google` | `https://mail.google.com/` | Gmail over IMAP/SMTP |
+| `custom` | your own | `--auth-url`, `--token-url`, `--scopes` |
 
-`Mail.Read` alone is not enough to run an account: changing flags, moving,
-deleting, drafts and folder edits need `Mail.ReadWrite`, sending needs
-`Mail.Send`, and the master category list behind `list_labels` / `create_label`
-/ `delete_label` sits outside the Mail scope entirely, under
-`MailboxSettings.ReadWrite`. The `microsoft-graph` profile requests exactly
-those — nothing is asked for that the code does not call — and its output
-includes `MCP_EMAIL_BACKEND=graph`, without which the account would still be
-served over IMAP.
+**Why Graph.** Exchange Online and Outlook.com publish only a legacy subset of
+the mailbox over IMAP: custom folders can be absent from `LIST` altogether, so
+`list_mailboxes` simply does not show them. `pnpm diagnose:mailboxes` compares
+the raw IMAP listings to prove it; `pnpm probe:graph` checks what Graph exposes.
+An account with `backend = "graph"` is read, written and sent through Graph
+only — it never falls back to IMAP, which would return quietly incomplete
+results.
 
-Capabilities that Graph could add but this backend does not implement yet
-(calendar, contacts, server-side rules, automatic replies) each need their own
-scope — `Calendars.ReadWrite`, `Contacts.ReadWrite` — and would require a fresh
-consent when added.
+A Graph account in `config.toml`, using the endpoints and scopes of the
+`microsoft-graph` profile:
 
-On Windows you can simply double-click **`scripts/oauth-setup.cmd`**, which opens
-a console, shows that menu, asks for the values and keeps the window open so you
-can copy the token.
+```toml
+[[accounts]]
+name = "outlook"
+email = "you@outlook.com"
+full_name = "Your Name"
+backend = "graph"
 
-**Exchange and Outlook.com caveat.** Their IMAP endpoint only exposes a legacy
-subset of the mailbox — custom folders can be missing from `LIST` entirely, so
-`list_mailboxes` will not show them. That is a server-side limitation, not a
-filter applied here: `pnpm diagnose:mailboxes --server <name>` compares the raw
-`LIST` and `LSUB` responses to prove it, and `pnpm probe:graph` checks whether
-Microsoft Graph exposes the missing folders (using the `microsoft-graph` profile
-above).
+[accounts.oauth2]
+provider = "custom"
+client_id = "<application id>"
+client_secret_command = "…"
+refresh_token_command = "…"
+auth_url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+scopes = [
+  "https://graph.microsoft.com/Mail.ReadWrite",
+  "https://graph.microsoft.com/Mail.Send",
+  "https://graph.microsoft.com/MailboxSettings.ReadWrite",
+  "offline_access",
+]
 
-The same values map to environment variables — `MCP_EMAIL_OAUTH2_PROVIDER`,
-`MCP_EMAIL_OAUTH2_CLIENT_ID`, `MCP_EMAIL_OAUTH2_CLIENT_SECRET` and
-`MCP_EMAIL_OAUTH2_REFRESH_TOKEN` — in which case `MCP_EMAIL_PASSWORD` is omitted.
+# Required by the schema, unused by a Graph account.
+[accounts.imap]
+host = "outlook.office365.com"
 
-**Microsoft / Outlook.** Basic (password) authentication is disabled on personal
-Outlook.com accounts, so OAuth2 is the supported path. Register an app in Entra ID
-(Azure) whose *supported account types* include personal Microsoft accounts, add a
-**Web** platform with the redirect URI above (the token exchange sends a client
-secret, so a confidential client is required), and grant the delegated Office 365
-Exchange Online permissions `IMAP.AccessAsUser.All` and `SMTP.Send`. Use
-`outlook.office365.com:993` (TLS) for IMAP and `smtp-mail.outlook.com:587` with
-STARTTLS for SMTP — on port 587 set `tls = false` and `starttls = true`.
-
-#### Environment Variables
-
-For single-account setups (overrides config file):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MCP_EMAIL_ADDRESS` | *required* | Email address |
-| `MCP_EMAIL_PASSWORD` | *required* | Password or app password |
-| `MCP_EMAIL_IMAP_HOST` | *required* | IMAP server hostname |
-| `MCP_EMAIL_SMTP_HOST` | *required* | SMTP server hostname |
-| `MCP_EMAIL_ACCOUNT_NAME` | `default` | Account name |
-| `MCP_EMAIL_FULL_NAME` | — | Display name |
-| `MCP_EMAIL_USERNAME` | *email* | Login username |
-| `MCP_EMAIL_IMAP_PORT` | `993` | IMAP port |
-| `MCP_EMAIL_IMAP_TLS` | `true` | IMAP TLS |
-| `MCP_EMAIL_SMTP_PORT` | `465` | SMTP port |
-| `MCP_EMAIL_SMTP_TLS` | `true` | SMTP TLS |
-| `MCP_EMAIL_SMTP_STARTTLS` | `false` | SMTP STARTTLS |
-| `MCP_EMAIL_SMTP_VERIFY_SSL` | `true` | Verify SSL certificates |
-| `MCP_EMAIL_SMTP_POOL_ENABLED` | `true` | Enable SMTP transport pooling |
-| `MCP_EMAIL_SMTP_POOL_MAX_CONNECTIONS` | `1` | Max pooled SMTP connections |
-| `MCP_EMAIL_SMTP_POOL_MAX_MESSAGES` | `100` | Max messages per pooled connection |
-| `MCP_EMAIL_READ_ONLY` | `false` | `true` makes this instance read-only: it sends no email — scheduled ones included — and changes neither the mailboxes nor the alert settings. Also applies over `config.toml`, where it can only turn read-only on, never off |
-| `MCP_EMAIL_RATE_LIMIT` | `10` | Max sends per minute |
-| `MCP_EMAIL_SIGNATURE_PATH` | — | Path to an Outlook `.htm` signature for `append_signature` |
-| `MCP_EMAIL_PASSWORD_COMMAND` | — | Command printing the password, instead of `MCP_EMAIL_PASSWORD` (see below) |
-| `MCP_EMAIL_ACCOUNTS` | — | Restrict this instance to these `config.toml` account names (see below) |
-| `MAIL_ALLOWED_SAVE_DIRS` | — | Extra directories where attachments, `.eml` messages and exports may be written (see below) |
-| `MAIL_ALLOW_ANY_SAVE_DIR` | `false` | `true` disables the allow-list entirely (any absolute path) |
-
-#### Restricting which accounts an instance exposes (`MCP_EMAIL_ACCOUNTS`)
-
-An MCP client toggles a whole server, never an account inside one — accounts are
-a parameter of the tools, not a protocol concept. A single server holding every
-mailbox is therefore all‑or‑nothing.
-
-`MCP_EMAIL_ACCOUNTS` narrows an instance to a comma‑separated list of account
-names from `config.toml`, so one config file can back several client entries,
-each exposing its own subset:
-
-```jsonc
-// claude_desktop_config.json → mcpServers
-"email":       { /* … */ "env": { "MCP_EMAIL_ACCOUNTS": "personal,work" } },
-"email-team":  { /* … */ "env": { "MCP_EMAIL_ACCOUNTS": "shared-inbox" } }
+[accounts.smtp]
+host = "smtp-mail.outlook.com"
 ```
 
-Toggling `email-team` off in the client now hides that mailbox and nothing else.
+Register the application in Microsoft Entra ID with *supported account types*
+that include personal Microsoft accounts if you use an outlook.com address, and
+a **Web** platform with the redirect URI above (the token exchange sends a client
+secret, so the client must be confidential). Prefer `config.toml` for Graph
+accounts: the single-account environment variables have no equivalent of
+`token_url` / `auth_url`.
 
-- Unset or empty, every configured account is exposed (the default).
-- Whitespace around names is ignored; empty entries are skipped.
-- Account order comes from the config file, not from the variable, so the first
-  account — the default for saved searches — does not depend on how the list is
-  typed.
-- An unknown name is **refused** at startup, naming the culprit and the
-  configured accounts. A typo would otherwise silently shrink what the instance
-  serves, which is the failure mode hardest to notice.
-- The filter never touches the file: `email-mcp account edit` and friends still
-  see and save every account.
+### Keeping credentials out of the file
 
-#### Keeping credentials out of the config file (`*_command`)
-
-`config.toml` holds credentials in plain text. Three fields let a command supply
-them instead, so the secret lives in a password manager and the file only names
+`config.toml` holds credentials in clear text. Three fields let a command supply
+them instead, so the secret stays in a password manager and the file only says
 where to fetch it:
 
 | Field | Replaces |
@@ -607,1070 +320,943 @@ where to fetch it:
 | `oauth2.refresh_token_command` | `oauth2.refresh_token` |
 
 ```toml
-[[accounts]]
-name = "work"
-email = "you@example.com"
 password_command = 'keepassxc-cli show -q -s -a Password --no-password -k "C:\keys\mail.keyx" "C:\keys\mail.kdbx" "mail/you@example.com"'
 ```
 
-The command runs through the platform shell (`cmd.exe` on Windows, `sh`
-elsewhere), which is what makes the published one-liners of these tools work
-unchanged:
+Other one-liners work unchanged, because the command runs through the platform
+shell (`cmd.exe` on Windows, `sh` elsewhere): `bw get password …` (Bitwarden),
+`op read "op://…"` (1Password), `pass show …`, `secret-tool lookup …`,
+`security find-generic-password … -w` (macOS keychain).
 
-```sh
-# Bitwarden          bw get password you@example.com
-# 1Password          op read "op://Private/mail/password"
-# pass               pass show mail/you@example.com
-# GNOME keyring      secret-tool lookup service mail account you@example.com
-# macOS keychain     security find-generic-password -s mail -a you@example.com -w
+- Give the literal field **or** its `_command`, never both.
+- The secret is read from standard output; only trailing newlines are removed.
+  Empty output is an error, not an empty password.
+- The command must be **non-interactive**: the server has no terminal, so a vault
+  that prompts would wait forever. It is killed after 30 seconds with an
+  explicit error. With KeePassXC this means a key-file database
+  (`--no-password -k`).
+- Commands run one at a time, only for the accounts the instance serves (see
+  [`MCP_EMAIL_ACCOUNTS`](#several-connectors-on-one-configuration)).
+- `email-mcp account edit` never writes the resolved secret back into the file.
+
+This keeps the secret out of backups and synced folders; it is not a defence
+against code running as the same user, which can run the same command.
+
+### Global settings (`[settings]`)
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `rate_limit` | `10` | Max messages sent per minute and per account (SMTP sends). |
+| `read_only` | `false` | Read-only mode: write tools are not registered and the scheduled queue is not processed ([details](#read-only-mode)). |
+| `watcher.enabled` | `false` | IMAP IDLE watcher. |
+| `watcher.folders` | `["INBOX"]` | Folders watched in each account. |
+| `watcher.idle_timeout` | `1740` | IDLE renewal, in seconds (60–1740). |
+| `hooks.*`, `hooks.alerts.*`, `hooks.rules` | | See [watcher and hooks](#watcher-notifications-and-ai-hooks). |
+
+Optional sections: `[[searches]]` ([saved searches](#saved-searches)) and
+`[database]` ([cross-account move](#cross-account-move)).
+
+### Environment variables
+
+**Single-account mode.** When `MCP_EMAIL_ADDRESS`, `MCP_EMAIL_IMAP_HOST`,
+`MCP_EMAIL_SMTP_HOST` and one of `MCP_EMAIL_PASSWORD`,
+`MCP_EMAIL_PASSWORD_COMMAND` or `MCP_EMAIL_OAUTH2_PROVIDER` are all set, the
+server builds one account from the environment and **does not read
+`config.toml` at all** (no other account, no `[[searches]]`).
+
+| Variable | Default | TOML equivalent |
+|----------|---------|-----------------|
+| `MCP_EMAIL_ADDRESS` | *required* | `email` |
+| `MCP_EMAIL_IMAP_HOST` / `MCP_EMAIL_SMTP_HOST` | *required* | `imap.host` / `smtp.host` |
+| `MCP_EMAIL_PASSWORD` / `MCP_EMAIL_PASSWORD_COMMAND` | | `password` / `password_command` |
+| `MCP_EMAIL_OAUTH2_PROVIDER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_REFRESH_TOKEN` | | `oauth2.*` |
+| `MCP_EMAIL_ACCOUNT_NAME` | `default` | `name` |
+| `MCP_EMAIL_FULL_NAME`, `MCP_EMAIL_USERNAME` | | `full_name`, `username` |
+| `MCP_EMAIL_BACKEND` | `imap` | `backend` (`graph`) |
+| `MCP_EMAIL_SIGNATURE_PATH`, `MCP_EMAIL_SIGNATURE_DEFAULT` | | `signature_path`, `signature_default` |
+| `MCP_EMAIL_IMAP_PORT`, `_TLS`, `_STARTTLS`, `_VERIFY_SSL` | `993`, `true`, `false`, `true` | `imap.*` |
+| `MCP_EMAIL_SMTP_PORT`, `_TLS`, `_STARTTLS`, `_VERIFY_SSL` | `465`, `true`, `false`, `true` | `smtp.*` |
+| `MCP_EMAIL_SMTP_POOL_ENABLED`, `_MAX_CONNECTIONS`, `_MAX_MESSAGES` | `true`, `1`, `100` | `smtp.pool.*` |
+| `MCP_EMAIL_RATE_LIMIT` | `10` | `settings.rate_limit` |
+| `MCP_EMAIL_WATCHER_ENABLED`, `_FOLDERS` (comma-separated), `_IDLE_TIMEOUT` | `false`, `INBOX`, `1740` | `settings.watcher.*` |
+| `MCP_EMAIL_HOOK_ON_NEW_EMAIL`, `_PRESET`, `_AUTO_LABEL`, `_AUTO_FLAG`, `_BATCH_DELAY`, `_CUSTOM_INSTRUCTIONS` | | `settings.hooks.*` |
+| `MCP_EMAIL_HOOK_AUTO_CALENDAR`, `_CALENDAR_NAME`, `_CALENDAR_ALARM_MINUTES`, `_CALENDAR_CONFIRM` | | `settings.hooks.*` |
+| `MCP_EMAIL_ALERT_DESKTOP`, `_SOUND`, `_URGENCY_THRESHOLD`, `_WEBHOOK_URL` | | `settings.hooks.alerts.*` |
+
+**Variables that also apply on top of `config.toml`:**
+
+| Variable | Effect |
+|----------|--------|
+| `MCP_EMAIL_ACCOUNTS` | Comma-separated account names this instance exposes ([below](#several-connectors-on-one-configuration)). |
+| `MCP_EMAIL_READ_ONLY` | `true` makes the instance read-only. It can only tighten: it never lifts a `read_only = true` set in the file. |
+| `EMAIL_MCP_DATABASE_URL` | Postgres URL for `cross_account_move`; wins over `[database].url`. |
+| `MAIL_ALLOWED_SAVE_DIRS` | Extra directories (`;`-separated) where files may be written ([details](#where-files-may-be-written)). |
+| `MAIL_ALLOW_ANY_SAVE_DIR` | `true` disables the save-directory allow-list. |
+| `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | Move the directories listed [above](#where-the-configuration-lives). |
+
+## Connecting an MCP client
+
+### Claude Desktop
+
+Edit the client configuration file, then **quit Claude Desktop completely and
+start it again**:
+
+| OS | File |
+|----|------|
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
+Windows:
+
+```json
+{
+  "mcpServers": {
+    "email": {
+      "command": "node",
+      "args": ["C:\\path\\to\\email-mcp\\dist\\main.js", "stdio"]
+    }
+  }
+}
 ```
 
-Rules, and what they exist for:
+macOS / Linux:
 
-- Give **either** the literal field **or** its `_command`, never both — nothing
-  in the file would otherwise say which one the server actually used.
-- The secret is read from standard output; trailing newlines are stripped, but
-  nothing else is, so a password ending in a space survives.
-- Empty output is an error rather than an empty credential, which would fail
-  later as an unexplained authentication rejection.
-- The command **must be non-interactive**. The server is started by an MCP
-  client with no terminal, so a vault that decides to prompt has no one to
-  answer it; after 30 seconds the command is killed and the error says so.
-  With KeePassXC this means a key-file-protected database (`--no-password -k`),
-  since `keepassxc-cli` otherwise reads the passphrase from standard input.
-- Commands run one at a time, and only for the accounts the instance actually
-  serves — combined with `MCP_EMAIL_ACCOUNTS`, three client entries pointing at
-  the same file do not mean three times the vault lookups.
-- `MCP_EMAIL_PASSWORD_COMMAND` does the same for the single-account
-  environment-variable setup.
+```json
+{
+  "mcpServers": {
+    "email": {
+      "command": "node",
+      "args": ["/path/to/email-mcp/dist/main.js", "stdio"]
+    }
+  }
+}
+```
 
-What this does and does not buy: the credential no longer sits in a file that a
-backup, a synced folder or a copied disk would carry off. It is **not** a
-defence against code running as the same user — that code can run the very same
-command. Scoped, revocable credentials (OAuth2) and rotation are what limit the
-damage there.
+If `node` is not on the client's `PATH`, give its absolute path in `command`.
+Environment variables (`MCP_EMAIL_ACCOUNTS`, `MAIL_ALLOWED_SAVE_DIRS`, …) go in an
+`"env": { … }` object next to `args`.
 
-#### Where files can be saved (`MAIL_ALLOWED_SAVE_DIRS`)
+### Several connectors on one configuration
 
-`save_attachment`, `save_all_attachments_from_search`, `save_email`,
-`save_emails_from_search` and the CSV/NDJSON export tool refuse to write outside
-an allow‑list of root directories, as a guard‑rail against path‑traversal. By
-default the allow‑list is:
+An MCP client switches a whole server on or off, never one account inside it. To
+get one switch per account, declare several entries pointing at the same
+`dist/main.js` and the same `config.toml`, each restricted with
+`MCP_EMAIL_ACCOUNTS`:
 
-- the user's home directory, and
-- the OS temp directory.
+```json
+{
+  "mcpServers": {
+    "email-personal": {
+      "command": "node",
+      "args": ["C:\\path\\to\\email-mcp\\dist\\main.js", "stdio"],
+      "env": { "MCP_EMAIL_ACCOUNTS": "personal" }
+    },
+    "email-work": {
+      "command": "node",
+      "args": ["C:\\path\\to\\email-mcp\\dist\\main.js", "stdio"],
+      "env": { "MCP_EMAIL_ACCOUNTS": "work,outlook", "MCP_EMAIL_READ_ONLY": "true" }
+    }
+  }
+}
+```
 
-To save into other locations (e.g. a project folder on `D:\`), add them via the
-`MAIL_ALLOWED_SAVE_DIRS` environment variable — an absolute‑path list separated
-by `;`:
+- Unset or empty: every account is exposed.
+- An unknown name is **refused at startup**, with the list of configured
+  accounts — a typo would otherwise silently shrink what the instance serves.
+- Account order comes from the file, not from the variable.
+- The filter never touches the file; secret commands run only for the accounts
+  the instance serves; a scheduled email is sent only by an instance that serves
+  its account.
+
+### Guided registration and other clients
+
+`node dist/main.js install` detects Claude Desktop, Cursor (`~/.cursor/mcp.json`)
+and Windsurf (`~/.codeium/windsurf/mcp_config.json`) and writes an `email` entry.
+**Choose "Direct node (current dist/main.js)"**: the `npx`, `pnpm dlx` and global
+options launch the original npm package, not this fork. `install status` and
+`install remove` show or undo the registration.
+
+Any other MCP client works the same way: a stdio server whose command is
+`node <path>/dist/main.js stdio`.
+
+## Command line
+
+`node dist/main.js <command>` (or `email-mcp <command>` if you link the package):
+
+| Command | Effect |
+|---------|--------|
+| `stdio` | Run the MCP server over stdio (default when no command is given). |
+| `account list` / `add` / `edit [name]` / `delete [name]` | Manage accounts interactively (`ls`, `new`, `rm`, `remove` are aliases). |
+| `setup` | Alias of `account add`. |
+| `test [name]` | Test every account, or one, over the transport it really uses (Graph for a Graph account, IMAP + SMTP otherwise). |
+| `install` / `install status` / `install remove` | Register / show / remove the server in MCP clients. |
+| `config show` | Show the configuration, passwords masked. |
+| `config edit` | Edit global settings (rate limit, read-only). |
+| `config path` | Print the configuration file path. |
+| `config init` | Write a commented template. |
+| `scheduler check` | Send the scheduled emails that are due. |
+| `scheduler list` | Show pending, sent and failed scheduled emails. |
+| `scheduler install` / `uninstall` / `status` | Manage the OS-level periodic check. |
+| `notify test` / `notify status` | Send a test desktop notification / diagnose support. |
+| `--version`, `help` | |
+
+Developer scripts (`pnpm <script>`): `oauth:setup`, `diagnose:mailboxes`,
+`probe:graph`, `verify:graph` (Graph smoke test), `mcp:call` (call tools of the
+built server the way a client does), `db:migrate`.
+
+## Tools reference
+
+**64 tools.** *Backend* says which accounts a tool serves: **both** (IMAP and
+Graph), **IMAP** only (a Graph account gets an explicit "not supported yet"
+error), **Graph** only (the tool refuses an IMAP account), or **local** (no
+mailbox involved). *Read-only* says whether the tool is still registered when the
+server is [read-only](#read-only-mode).
+
+### Reading
+
+| Tool | What it does | Backend | Read-only |
+|------|--------------|---------|-----------|
+| `list_accounts` | Configured accounts — call it first to learn the names. | local | ✅ |
+| `list_mailboxes` | Folders with unread counts and special-use flags. | both | ✅ |
+| `list_emails` | Paginated listing with filters. | both | ✅ |
+| `get_email` | One message (`format`: `full`, `text`, `stripped`; `maxLength`); does not mark it read unless `markRead`. | both | ✅ |
+| `get_emails` | Up to 20 messages in one call (text by default). | both | ✅ |
+| `get_email_status` | Read / flag / label state without the body. | both | ✅ |
+| `get_thread` | Conversation rebuilt from `References` / `In-Reply-To`. | both | ✅ |
+| `get_email_headers` | Complete Internet headers and their analysis ([details](#internet-headers)). | both | ✅ |
+| `find_email_folder` | Real folder(s) of a message seen in a virtual folder (Gmail "All Mail"). | IMAP | ✅ |
+| `extract_contacts` | Frequent correspondents from recent headers. | IMAP | ✅ |
+| `get_email_stats` | Volume, top senders, daily trend over a day / week / month. | IMAP | ✅ |
+| `check_health` | Running build, connection, latency, quota and capabilities per account. | both | ✅ |
+
+### Searching
+
+| Tool | What it does | Backend | Read-only |
+|------|--------------|---------|-----------|
+| `search_emails` | Free text and filters, facets, Gmail syntax ([details](#searching)). | both | ✅ |
+| `search_all_accounts` | Same search across several accounts, merged by date; IMAP and Graph accounts can be mixed. | both | ✅ |
+| `run_preset` | Run a saved search from `[[searches]]`. | both | ✅ |
+| `list_presets` | List AI triage presets and saved searches. | local | ✅ |
+
+### Export and saving to disk
+
+| Tool | What it does | Backend | Read-only |
+|------|--------------|---------|-----------|
+| `export_search` | Search results to a CSV or NDJSON file. | both (mixable) | ✅ |
+| `save_email` | One message as an `.eml` file (exact source). | both | ✅ |
+| `save_emails_from_search` | Every message of a search as `.eml` files. | both (one backend per call) | ✅ |
+| `download_attachment` | One attachment, returned base64 (≤ 5 MB). | both | ✅ |
+| `save_attachment` | One attachment written to disk, no size cap. | both | ✅ |
+| `save_all_attachments_from_search` | Every attachment of a search to a folder. | IMAP | ✅ |
+
+### Composing and sending
+
+| Tool | What it does | Backend | Read-only |
+|------|--------------|---------|-----------|
+| `send_email` | New message: text or HTML, cc/bcc, attachments, inline images, signature. | both | — |
+| `reply_email` | Threaded reply (`replyAll`, `includeAttachments`, `appendSignature`). | both | — |
+| `forward_email` | Forward with the original quoted. | both | — |
+| `save_draft` | Save a draft (attachments, `in_reply_to`, signature). | both | — |
+| `update_draft` | Rewrite a draft, keeping or changing its attachments. | both | — |
+| `send_draft` | Send a draft and remove it from Drafts. | both | — |
+| `list_templates` | Templates found in `~/.config/email-mcp/templates/`. | local | ✅ |
+| `apply_template` | Fill a template: `preview`, `draft` or `send`. | both | — |
+| `schedule_email` | Queue a message for a later time. | both | — |
+| `list_scheduled` | Scheduled emails by status. | local | — |
+| `cancel_scheduled` | Cancel a scheduled email and delete its draft mirror. | both | — |
+
+### Organising
+
+| Tool | What it does | Backend | Read-only |
+|------|--------------|---------|-----------|
+| `move_email` | Move to another folder of the same account. | both | — |
+| `delete_email` | To Trash, or permanently with `permanent: true`. | both | — |
+| `mark_email` | Read / unread / flag / unflag. | both | — |
+| `bulk_action` | Same action on up to 100 messages. | both | — |
+| `list_labels` | Labels of the account. | both | — |
+| `add_label` / `remove_label` | Label a message / remove the label. | both | — |
+| `create_label` / `delete_label` | Create / delete a label. | both | — |
+| `create_mailbox` / `rename_mailbox` / `delete_mailbox` | Folder management (`delete_mailbox` deletes the content too). | both | — |
+| `cross_account_move` | Move messages to another account, keeping headers, flags and date. Needs Postgres. | IMAP | — |
+| `list_mail_rules` | Server-side inbox rules. | Graph | — |
+| `create_mail_rule` / `delete_mail_rule` | Create / delete a server-side rule. | Graph | — |
+| `get_auto_reply` / `set_auto_reply` | Read / set the automatic reply (out of office). | Graph | — |
+
+### Calendar and reminders
+
+| Tool | What it does | Backend | Read-only |
+|------|--------------|---------|-----------|
+| `extract_calendar` | Events (ICS) carried by a message. | IMAP | ✅ |
+| `analyze_email_for_scheduling` | Detect an event or a reminder-worthy request in a message. | IMAP | ✅ |
+| `add_to_calendar` | Add the message's event to the local calendar. | IMAP | ✅ |
+| `create_reminder` | Create a macOS Reminders item from a message. | both | ✅ |
+| `list_calendars` / `list_events` | Local calendars and events (macOS). | local | ✅ |
+| `list_reminders` | Reminders (macOS). | local | ✅ |
+| `check_calendar_permissions` | Check calendar access and explain how to grant it. | local | ✅ |
+
+### Watcher and alerts
+
+| Tool | What it does | Backend | Read-only |
+|------|--------------|---------|-----------|
+| `get_watcher_status` | IDLE connections and recent activity. | IMAP | ✅ |
+| `get_hooks_config` | Current hooks configuration (preset, rules, instructions). | local | ✅ |
+| `check_notification_setup` | Diagnose desktop notifications on this OS. | local | ✅ |
+| `test_notification` | Send a test notification. | local | ✅ |
+| `configure_alerts` | Change alert settings at runtime, optionally saved to `config.toml`. | local | — |
+
+### IMAP and Exchange at a glance
+
+| Capability | IMAP | Microsoft Graph |
+|------------|:----:|:---------------:|
+| Read, threads, headers, status | ✅ | ✅ |
+| Search, list, export, `.eml`, single attachments | ✅ | ✅ (some filters ignored, [see below](#on-microsoft-graph-accounts)) |
+| Facets, `gmail_raw` | ✅ (Gmail for `gmail_raw`) | — |
+| Send, reply, forward, drafts, templates, scheduling | ✅ | ✅ |
+| Move, delete, flags, bulk, folders | ✅ | ✅ |
+| Labels | Gmail labels, ProtonMail label folders, IMAP keywords | Outlook categories |
+| `save_all_attachments_from_search`, `extract_contacts`, `get_email_stats`, `find_email_folder` | ✅ | — |
+| Calendar extraction (`extract_calendar`, `analyze_email_for_scheduling`, `add_to_calendar`) | ✅ | — |
+| `cross_account_move` | ✅ | — |
+| Watcher (IMAP IDLE) and per-account resources (`mailboxes`, `unread`, `stats`) | ✅ | — (they go through IMAP) |
+| Server-side rules, automatic reply | — | ✅ |
+
+## Prompts and resources
+
+**Prompts (7)** — ready-made instructions the client can offer the user:
+
+| Prompt | Arguments | Purpose |
+|--------|-----------|---------|
+| `triage_inbox` | `account`, `mailbox`, `limit` | Sort unread mail by urgency, with suggested actions. |
+| `summarize_thread` | `account`, `message_id`, `mailbox` | Participants, timeline, decisions, action items. |
+| `compose_reply` | `account`, `email_id`, `mailbox`, `intent`, `tone` | Draft a reply with the thread as context. |
+| `draft_from_context` | `account`, `topic`, `to`, `tone` | Write a new email, searching past mail for context. |
+| `extract_action_items` | `account`, `mailbox`, `limit` | Tasks, deadlines and commitments from recent mail. |
+| `summarize_meetings` | `account`, `days` | Meeting overview from recent invitations. |
+| `cleanup_inbox` | `account`, `older_than_days`, `dry_run` | Suggest — or carry out — archiving and deletions. |
+
+**Resources (6)** — read-only data the client can attach:
+
+| URI | Contents |
+|-----|----------|
+| `email://accounts` | Configured accounts. |
+| `email://scheduled` | Pending scheduled emails. |
+| `email://{account}/mailboxes` | Folder tree with message counts. |
+| `email://{account}/unread` | Unread counts by folder. |
+| `email://{account}/stats` | Daily statistics snapshot and quota. |
+| `email://templates/{name}` | One template. |
+
+The three per-account resources query IMAP directly, so they are meant for IMAP
+accounts.
+
+## Searching
+
+`list_emails`, `search_emails`, `search_all_accounts`, `export_search`,
+`save_emails_from_search` and `save_all_attachments_from_search` share one set of
+filters. Filters combine with AND. Results are paginated (`page`, `pageSize` up
+to 100, default 20).
+
+### Filters
+
+| Parameter | Matches |
+|-----------|---------|
+| `query` | Free text across subject, sender and body (`search_emails` and the multi-account / export tools). |
+| `from`, `to`, `cc`, `bcc`, `subject` | Header, **matched by the mail server** (see below). |
+| `from_contains`, `to_contains`, `subject_contains` | Literal, case-insensitive substring of the decoded header, checked by email-mcp. |
+| `body`, `text` | Body / headers + body. |
+| `since`, `before`, `on` | Arrival date — on or after, strictly before, on. |
+| `sent_since`, `sent_before` | `Date:` header. |
+| `seen`, `flagged`, `answered`, `draft`, `deleted` | `true` / `false`. |
+| `keyword`, `not_keyword` | IMAP keyword(s) — custom flags, used as labels by keyword-based servers. |
+| `header` | `{ "X-Header": "value" }`. |
+| `uids` | UID list or range (`"1:100"`) — `list_emails` and `search_emails`. |
+| `larger_than`, `smaller_than` | Size in KB. |
+| `has_attachment` | Has at least one attachment. |
+| `attachment_filename` | Substring of an attachment file name. |
+| `attachment_mimetype` | Case-insensitive regular expression on `type/subtype` (`"application/pdf"`, `"image/.*"`). |
+| `facets` | `["sender", "year", "mailbox"]` — counts over the whole match set (`search_emails`, `search_all_accounts`). |
+| `gmail_raw` | Gmail native search syntax (`from:x has:attachment older_than:30d`), Gmail accounts only. |
+
+**Dates** accept ISO 8601, `YYYY-MM-DD`, relative tokens `Nd`, `Nw`, `Nm`
+(days, weeks, months ago) and `today` / `yesterday`, evaluated in UTC — on every
+search tool and both backends.
 
 ```jsonc
-// claude_desktop_config.json → mcpServers.email.env
-"MAIL_ALLOWED_SAVE_DIRS": "D:\\CC_Dossiers\\Affaires;D:\\Exports"
+// search_emails
+{ "account": "work", "subject": "invoice", "since": "60d", "has_attachment": true }
 ```
 
-A destination is accepted only if its resolved path is the same as, or nested
-under, one of the allowed roots. Literal `..` traversal segments are always
-rejected, and the comparison is OS‑aware (correct path separator, and
-case‑insensitive on Windows), so a sibling like `D:\Exports-evil` is **not**
-treated as inside `D:\Exports`.
+### Server-matched filters and `*_contains`
 
-To disable the allow‑list entirely (any absolute path accepted), set
-`MAIL_ALLOW_ANY_SAVE_DIR=true`. This is a deliberate opt‑out for trusted,
-single‑user setups; the default keeps the allow‑list because the server is
-driven by an LLM that reads untrusted email content (prompt‑injection surface).
+`from`, `to` and `subject` are handed to the mail server, and its index decides.
+RFC 3501 defines a substring match, but a server with a full-text index (Dovecot
+FTS, as used by OVH for instance) matches indexed **tokens**: `example.com` then
+misses `news.example.com`, and a fragment that starts mid-word finds nothing —
+with nothing in the answer to tell it apart from an empty mailbox. When the
+result must be exhaustive, use `from_contains`, `to_contains`,
+`subject_contains`: they are checked here on the decoded header and give the same
+result on IMAP and Graph. They do not narrow the server query, so pair them with
+`since` / `before` or a coarse filter on a large folder.
 
-### Database & Routing Migrations
+### Partial scans and continuation
 
-The cross-account routing engine (`cross_account_move`, `apply_routing_rules`,
-`routing_rules_*`) is backed by a dedicated Postgres database. **Everything else in
-email-mcp runs without it** — if the database is unset or unreachable, only the
-routing tools are affected (they report `database_unavailable`), and the server
-boots and serves all other tools normally.
+Some filters require reading each candidate message: `has_attachment` and
+`attachment_*` on IMAP, `*_contains` on both backends. They are applied
+**before pagination** — pages and totals count only matching messages — newest
+first, within two bounds per call:
 
-**Connection string.** Provide it one of two ways (the env var wins if both are set):
+- a **45-second time budget** (MCP clients give up on a call after about 60 s);
+- **5000 examined messages**.
+
+When a bound stops the scan, the answer says so — the warning shows the total as
+`~N`, and a `coverage` object (also in the JSON output of the export tools, per
+account) gives what was covered and how to continue:
+
+```jsonc
+{
+  "stoppedBy": "time_budget",            // or "message_cap", or "server_cap" (Graph)
+  "examined": 1200,
+  "candidates": 2199,
+  "oldestExamined": "2025-03-14T22:10:05.000Z",
+  "continueBefore": "2025-03-16",
+  "hint": "Partial scan: … re-run the same call with before: \"2025-03-16\" …"
+}
+```
+
+Re-run the same call with `before: <continueBefore>` to scan the next slice;
+repeating covers the whole mailbox. Slices may overlap slightly (a message can
+appear twice) but never leave a gap. When a single day holds more than one call
+can examine, no continuation is offered and the hint asks for another filter.
+
+A search the server rejects or times out is reported as a failure
+(`searchFailed` and a warning), never as zero results. On a very large folder
+without a full-text index, a body search runs on a bounded connection and comes
+with a cost warning.
+
+### On Microsoft Graph accounts
+
+- Without query text, Graph's `$filter` handles dates, `seen`, `flagged` and
+  `has_attachment`; `*_contains` filters then walk the folder page by page,
+  newest first, and are applied before pagination with the same budget, cap and
+  `coverage` as IMAP.
+- With query text, `subject`, `from` or `to`, Graph's `$search` is used. It
+  refuses date filters alongside, so dates are pushed into the query and every
+  other criterion is checked on each result. Graph returns at most 1000 `$search`
+  results; reaching that ceiling is reported as `stoppedBy: "server_cap"`.
+- Filters with no faithful Graph translation — `cc`, `bcc`, `text`, `body`,
+  `answered`, `draft`, `deleted`, `keyword`, `not_keyword`, `header`, `uids`,
+  `larger_than`, `smaller_than`, `attachment_filename`, `attachment_mimetype`,
+  `gmail_raw` — are ignored, and the answer lists them
+  (`Not supported on this Microsoft Graph account and IGNORED: …`). `facets` are
+  not computed on Graph.
+
+### Searching across accounts
+
+`search_all_accounts` runs the same search on several accounts in parallel
+(`accounts`, every account when omitted), merges by date and prefixes each result
+with its account. One failing account becomes a warning instead of failing the
+call. When the requested `mailbox` does not exist in an account, its equivalent
+is found through the server's SPECIAL-USE flags (`\All`, `\Archive`, `\Sent`,
+`\Trash`, `\Drafts`, `\Junk`), and the remapping is reported. With `facets`, the
+`mailbox` facet is keyed by account.
+
+### Gmail native search
+
+On an account whose IMAP host is `imap.gmail.com`, `gmail_raw` passes Gmail's own
+search syntax to the server (`X-GM-RAW`) — much faster on large mailboxes. The
+other filters are then ignored, with a warning; on any other account it is an
+error.
+
+### Saved searches
 
 ```toml
-# config.toml
-[database]
-url = "postgresql://email_mcp:PASSWORD@HOST:5433/email_mcp"
+[[searches]]
+name = "lease-2024"
+description = "Lease paperwork for 2024"
+accounts = ["personal", "work"]      # or account = "…"; neither = first account
+subject = "lease"
+since = "2024-01-01"
+before = "2025-01-01"
+has_attachment = true
+attachment_filename = "lease"
+facets = ["sender", "year"]
 ```
 
-```bash
-# or environment variable (takes precedence over config.toml)
-export EMAIL_MCP_DATABASE_URL="postgresql://email_mcp:PASSWORD@HOST:5433/email_mcp"
+A preset accepts `query`, `mailbox`, the header, date, state, size and
+attachment filters, `keyword` / `not_keyword`, `header`, `facets` and
+`gmail_raw` (not `*_contains` nor `uids`). Run it with
+`run_preset { "name": "lease-2024", "pageSize": 20 }`; `list_presets` lists them.
+
+## Exporting and saving to disk
+
+| You want | Tool | Writes |
+|----------|------|--------|
+| Metadata of many messages | `export_search` | one CSV or NDJSON file |
+| The messages themselves | `save_email`, `save_emails_from_search` | one `.eml` per message |
+| The attached files | `save_attachment`, `save_all_attachments_from_search` | the attachments |
+
+The answer carries a short summary — path, counts, `truncated`, `coverage` —
+while the data stays on disk, so large exports do not fill the conversation.
+
+- **`export_search`** — `format`: `csv` (default) or `ndjson`; `max_rows` 5000 by
+  default, 50 000 at most. Default CSV columns: `id`, `account`, `date`, `from`,
+  `subject`, `labels`, `attachments`, `has_attachments`, `seen`, `flagged`;
+  `columns` picks among `id`, `account`, `date`, `from`, `to`, `subject`, `flags`,
+  `labels`, `attachments`, `preview`, `size`. NDJSON writes the full record. Default
+  file: `~/Downloads/email-export-<timestamp>.csv`.
+- **`save_email`** — the exact RFC 822 source, so attachments, formatting, DKIM
+  signatures and the Received chain survive, and the file reopens in any mail
+  client. Default name: `~/Downloads/<date>_<subject>_<id>.eml`.
+- **`save_emails_from_search`** — `max_emails` (500 by default),
+  `organize_by`: `flat`, `date` (`YYYY-MM/`), `sender` (sender domain) or
+  `account`. A failing message is listed in `errors` and the batch goes on. The
+  answer gives `matched` (what the search returned) next to `files_saved`: a low
+  `matched` points at the query, a gap between the two points at the writes.
+- **`save_attachment`** — streams the file to disk with no size cap (unlike
+  `download_attachment`, base64 and 5 MB). `open: true` opens it afterwards
+  (macOS). An existing file gets a `-1`, `-2` suffix unless `overwrite: true`.
+- **`save_all_attachments_from_search`** — every attachment of the matches,
+  optionally narrowed by `attachment_filename` / `attachment_mimetype`, into
+  `~/Downloads/email-attachments-<timestamp>/`, with the same `organize_by`
+  values; `max_emails` 1000 by default.
+
+### Where files may be written
+
+Every destination must be an absolute path under an allowed root: your home
+directory and the OS temp directory by default. Literal `..` segments are
+refused and the comparison is OS-aware (case-insensitive on Windows, so
+`D:\Exports-evil` is not inside `D:\Exports`). Add roots with
+`MAIL_ALLOWED_SAVE_DIRS` (`;`-separated):
+
+```json
+"env": { "MAIL_ALLOWED_SAVE_DIRS": "D:\\Archives;D:\\Exports" }
 ```
 
-`config.toml` is gitignored, so the credential is never committed. Use a dedicated,
-least-privilege Postgres role that can only reach the `email_mcp` database.
+`MAIL_ALLOW_ANY_SAVE_DIR=true` removes the allow-list. It exists because the
+server is driven by a model that reads untrusted email: a prompt-injection must
+not be able to steer a write into a startup folder.
 
-**Provisioning (one-time, as a Postgres superuser):**
+## Drafts, attachments and signatures
 
-```sql
--- Run while connected to the maintenance database (e.g. `postgres`):
-CREATE ROLE email_mcp WITH LOGIN PASSWORD 'CHOOSE_A_STRONG_PASSWORD';
-CREATE DATABASE email_mcp WITH OWNER email_mcp ENCODING 'UTF8';
-REVOKE ALL ON DATABASE email_mcp FROM PUBLIC;
-GRANT CONNECT ON DATABASE email_mcp TO email_mcp;
+### Attachments
+
+`send_email`, `save_draft` and `update_draft` take attachments in three forms:
+
+```jsonc
+"attachments": [
+  { "path": "C:\\Docs\\quote.pdf" },                                     // local file
+  { "content_base64": "JVBERi0…", "filename": "note.pdf" },             // bytes
+  { "source_email_id": "4711", "source_mailbox": "INBOX", "filename": "plan.pdf" } // from a message, server side
+]
 ```
 
-```sql
--- Then RECONNECT to the email_mcp database and run this there.
--- Required on hardened clusters (PG15+, or PG14 with template1 locked down):
--- being the *database* owner does NOT grant CREATE on the pre-existing
--- `public` *schema*, which is owned by `postgres`. Without this the first
--- migration fails with "permission denied for schema public".
--- DOUBLE-CHECK the Query Tool / psql is connected to `email_mcp`, NOT
--- `postgres` — running it on the wrong database mis-owns that DB's schema.
-ALTER SCHEMA public OWNER TO email_mcp;
+The third form copies an attachment from an existing message without the bytes
+travelling through the conversation. `reply_email` can re-attach the original's
+files with `includeAttachments: true`. On Graph accounts, attachments over 3 MB
+go through an upload session.
+
+### Inline images (`cid`)
+
+Any attachment carrying a `cid` becomes an inline image (`multipart/related`),
+referenced from the HTML body:
+
+```jsonc
+{
+  "account": "work", "to": ["someone@example.com"], "subject": "Hello",
+  "html": true,
+  "body": "<p>Hi!</p><img src=\"cid:logo\">",
+  "attachments": [{ "path": "/abs/logo.png", "cid": "logo" }]
+}
 ```
 
-**Applying migrations:**
+### Outlook signature
 
-```bash
-pnpm db:migrate            # apply all pending migrations
-pnpm db:migrate --status   # show applied + pending, change nothing
-pnpm db:migrate --dry-run  # list pending, apply nothing
+With `signature_path` pointing at an Outlook `.htm` signature (on Windows under
+`%APPDATA%\Microsoft\Signatures\`), the server reads the file, embeds the images
+of its sibling folder as inline `cid` images, appends it below the body and
+switches the message to HTML. The server must run on the machine where that file
+exists.
+
+| Tool | Parameter | Omitted means |
+|------|-----------|---------------|
+| `send_email`, `save_draft` | `append_signature` | the account's `signature_default` |
+| `reply_email`, `forward_email` | `appendSignature` | the account's `signature_default` |
+| `update_draft` | `append_signature` | **no signature** |
+
+`update_draft` never signs implicitly, so rewriting a draft cannot stack a
+second signature: a new `body` replaces the old one as given, an omitted `body`
+is kept as is (with its signature and inline images). Pass
+`append_signature: true` with a new `body` to sign it; without a new body it is
+ignored with a warning.
+
+### Drafts
+
+- `save_draft` saves to the Drafts folder; `send_draft` sends it and removes it,
+  keeping its attachments.
+- `update_draft` rewrites a draft. Omitted fields (subject, body, recipients)
+  keep their value; `attachments_keep` (all by default, `[]` drops them),
+  `attachments_add` and `attachments_remove` handle files. On IMAP, which has no
+  in-place edit, the new copy is appended first and the old one deleted only
+  afterwards; the tool returns the **new** id. Inline images referenced by the
+  body are kept; a `cid:` with no matching image produces a warning.
+
+### Templates
+
+A template is a TOML file in `~/.config/email-mcp/templates/`:
+
+```toml
+name = "follow-up"
+description = "Polite follow-up"
+subject = "Following up on {{topic}}"
+body = "Hello {{name}},\n\nI am following up on {{topic}}."
+variables = ["name", "topic"]
 ```
 
-Migrations are **forward-only** — there is no `down`. Applied filenames are tracked
-in a `schema_migrations` table, so re-running is idempotent and safe. Each migration
-is applied atomically (it either fully applies and is recorded, or rolls back).
-Dev reset: `DROP DATABASE email_mcp; CREATE DATABASE email_mcp OWNER email_mcp;`
-then re-run `pnpm db:migrate`. Production rollback is a Postgres backup plus a
-forward fix. Run `pnpm db:migrate` after pulling code that adds new
-`migrations/NNN_*.sql` files; the routing tools assume the schema is current.
+`apply_template { "account": "work", "template": "follow-up", "variables": {…},
+"action": "preview" | "draft" | "send", "to": […] }`.
 
-### Email Scheduling
+## Internet headers
 
-The scheduler enables future email delivery with a layered architecture:
+`get_email` exposes a flattened header map — one value per name, enough for a
+`List-Unsubscribe`, useless for tracing a message that crossed several relays.
+`get_email_headers` returns:
 
-1. **MCP auto-check** — Processes the queue on server startup and every 60 seconds while the MCP server is running — **except in read-only mode**, where the server sends nothing at all, scheduled emails included, and logs `Scheduler disabled` at startup
-2. **CLI** — `email-mcp scheduler check` for manual or cron-based processing
-3. **OS-level daemon** — `email-mcp scheduler install` sets up launchd (macOS), crontab (Linux) or a Task Scheduler task (Windows) to run every minute, independently of the MCP server
+- **`analysis`** — the `Received` chain in chronological order with the delay at
+  each hop, SPF / DKIM / DMARC verdicts from `Authentication-Results` (the
+  topmost one, added by your own server, wins), DKIM signatures, and
+  From / Return-Path / SPF / DKIM domain alignment;
+- **`headers`** — every occurrence, unfolded, in message order
+  (`include_all_headers: false` drops it);
+- **`raw`** — the header block as received (`include_raw: true`).
 
-> **Important — the daemon must be installed for reliable delivery.**
-> Without it, scheduled emails only fire while an AI client is actively connected
-> to a server that is not read-only.
-> Your machine also needs to be running at the scheduled time; if it's asleep or
-> off, the daemon will process overdue emails on next wake/startup. Failed sends
-> are retried up to **3 times** before being marked `failed`.
+`format: "json"` returns the structured dump instead of the readable report. Only
+the header block is fetched and the message is not marked read. On Graph accounts
+the list comes from `internetMessageHeaders` and the raw block is rebuilt from it
+(`rawReconstructed: true`). The verdicts are claims made by relays, not checks
+re-run locally — see [SECURITY.md](SECURITY.md).
 
-#### Setting up the daemon
+## Calendar and reminders
 
-```bash
-# Install (macOS launchd / Linux crontab / Windows Task Scheduler — runs every minute)
-email-mcp scheduler install
+- `extract_calendar` returns the events of the ICS parts of a message (inline
+  `text/calendar` or `.ics` attachment).
+- `analyze_email_for_scheduling` tells the model whether a message holds an
+  event, a reminder-worthy request, both or neither — the first step before
+  creating anything.
+- `add_to_calendar` adds the event to the local calendar with the meeting link
+  (Zoom, Teams, Meet), dial-in details, attendees, an excerpt and links to the
+  saved attachments (`calendar_name`, `alarm_minutes`, `save_attachments`).
+  On **macOS** it writes to Calendar.app after a native confirmation dialog
+  (`confirm`) and skips duplicates; on **Linux** it opens a generated `.ics` with
+  `xdg-open`. Windows has no calendar integration.
+- `create_reminder`, `list_reminders`, `list_calendars`, `list_events` use macOS
+  Reminders and Calendar. `check_calendar_permissions` explains how to grant
+  access (System Settings → Privacy & Security).
 
-# Verify it's running
-email-mcp scheduler status
+These tools stay available in read-only mode: they write to the local calendar,
+never to the mailbox.
 
-# View pending / sent / failed scheduled emails
-email-mcp scheduler list
+## Watcher, notifications and AI hooks
 
-# Trigger a manual check immediately
-email-mcp scheduler check
+With `settings.watcher.enabled = true`, the server keeps an IMAP IDLE connection
+per watched folder (separate from tool connections, reconnecting with a backoff
+from 1 s up to 60 s). New messages go through:
 
-# Remove the daemon
-email-mcp scheduler uninstall
-```
-
-**Windows.** The task, named `email-mcp scheduler`, runs without a console window. Run from an
-**administrator** terminal, `install` registers it to run in the background whether you are signed
-in or not (no password is stored). From a normal terminal Windows refuses that, and the task runs
-only while you are signed in; `install` says which one you got, and `status` shows it along with
-the last run and its result. The task records the paths of `node` and of email-mcp as they are at
-install time — including the `tsx` loader when you run from source — so reinstall after moving
-the folder or changing Node versions.
-
-Scheduled emails are stored as JSON files in `~/.local/state/email-mcp/scheduled/`. Each entry tracks attempts (max 3) and the last error, so you can inspect failures with `scheduler list`.
-
-A scheduled email goes out through its account's own backend — SMTP, or Microsoft Graph for an account with `backend = "graph"` — from the MCP server and from `scheduler check` alike. Its draft mirror (`[Scheduled: …]`) is kept in that account's Drafts and removed once the email is sent. A server only sends the scheduled emails of the accounts it serves; the others wait, without using up an attempt, for a server or a `scheduler check` that serves them — `scheduler list` shows them as overdue meanwhile.
-
-Several processes can work on that queue at once — every MCP client conversation
-starts its own server, and the daemon runs `scheduler check` besides. Each email
-still goes out once: before sending, a process creates `<id>.claim` next to the
-entry, and the filesystem lets only one process create it; the others leave that
-entry alone. Entries are written to a temporary file and renamed into place, so
-no process ever reads half of one.
-
-If a process is killed while sending, the email is **never** retried
-automatically: the SMTP server may already have accepted the message, and a
-retry would send it twice. Once its claim is 15 minutes old — longer than a
-stuck send lasts with the default timeouts — the next check marks it `failed`
-with `Interrupted while sending: it may have gone out`, so it shows up in
-`scheduler list`. Check the Sent folder before scheduling it again. An entry
-whose process died before its send began is marked `failed` the same way, as
-not sent.
-
-### Real-time Watcher & AI Hooks
-
-The IMAP IDLE watcher monitors configured mailboxes in real-time using persistent IDLE connections (separate from tool connections). When new emails arrive:
-
-1. **Static rules** — Pattern-match on from/to/subject → apply labels, flag, or mark read instantly (no AI)
-2. **AI triage** — Remaining emails are analyzed via MCP sampling with a customizable preset prompt
-3. **Notify mode** — Falls back to logging if AI triage is disabled
-
-Configure in `config.toml`:
+1. **Static rules** — patterns on from / to / subject; the first matching rule
+   applies its actions and the message skips AI triage.
+2. **AI triage** — when `on_new_email = "triage"` and the client supports MCP
+   *sampling*, messages are batched (`batch_delay`) and sent to the model with
+   the chosen preset (at most 10 sampling calls a minute). Without sampling
+   support it falls back to notification.
+3. **Notify** — logs the arrival, and raises an alert when the priority reaches
+   the threshold.
 
 ```toml
 [settings.watcher]
 enabled = true
 folders = ["INBOX"]
-idle_timeout = 1740     # 29 minutes (IMAP spec max is 30)
 
 [settings.hooks]
-on_new_email = "triage" # "triage" | "notify" | "none"
-preset = "inbox-zero"   # "inbox-zero" | "gtd" | "priority-focus" | "notification-only" | "custom"
-auto_label = true       # apply AI-suggested labels
-auto_flag = true        # flag urgent emails
-batch_delay = 5         # seconds to batch before triage
+on_new_email = "triage"           # "triage" | "notify" | "none"
+preset = "priority-focus"         # "inbox-zero" | "gtd" | "priority-focus" | "notification-only" | "custom"
+auto_label = false                # apply labels suggested by the AI
+auto_flag = false                 # flag urgent messages
+batch_delay = 5                   # seconds (1–60)
+custom_instructions = "Mail from @mycompany.com is high priority."
+# system_prompt = "…"             # full prompt, with preset = "custom"
+auto_calendar = false             # add detected events to the calendar
+calendar_name = ""
+calendar_alarm_minutes = 15
+calendar_confirm = true
 
-# User context — appended to preset's AI prompt
-custom_instructions = """
-I'm a software engineer. Emails from @mycompany.com are always high priority.
-Newsletters I read: TL;DR, Hacker Newsletter.
-"""
-
-# Static rules — run BEFORE AI, skip AI if matched
 [[settings.hooks.rules]]
-name = "GitHub Notifications"
-match = { from = "*@github.com" }
+name = "GitHub"
+match = { from = "*@github.com|*@gitlab.com" }
 actions = { labels = ["Dev"], mark_read = true }
 
 [[settings.hooks.rules]]
-name = "Newsletter Archive"
-match = { from = "*@substack.com|*@buttondown.email" }
-actions = { labels = ["Newsletter"] }
+name = "VIP"
+match = { from = "ceo@company.com" }
+actions = { flag = true, alert = true, labels = ["VIP"] }
 
-[[settings.hooks.rules]]
-name = "VIP Contacts"
-match = { from = "ceo@company.com|cto@company.com" }
-actions = { flag = true, labels = ["VIP"] }
-```
-
-#### Presets
-
-| Preset | Focus | Suggested Labels |
-|--------|-------|------------------|
-| `inbox-zero` | Aggressive categorization + archiving | Newsletter, Notification, Updates, Finance, Social, Promo |
-| `gtd` | Getting Things Done contexts | @Action, @Waiting, @Reference, @Someday, @Delegated |
-| `priority-focus` | Simple priority classification (default) | _(none — just priority + flag)_ |
-| `notification-only` | No AI triage, just log | _(none)_ |
-| `custom` | User defines full system prompt | User-defined |
-
-#### Static Rules
-
-Static rules use glob-style patterns (`*@github.com`) with `|` as OR separator (`*@github.com|*@gitlab.com`). All conditions within a match are AND'd. First matching rule wins.
-
-Available actions: `labels` (string array), `flag` (boolean), `mark_read` (boolean), `alert` (boolean — forces desktop notification).
-
-#### Alerts
-
-Urgency-based multi-channel notification routing — grab attention for important emails even when you're not looking at the chat. All channels are **opt-in** and disabled by default.
-
-| Priority | Desktop | Sound | MCP Log Level | Webhook |
-|----------|---------|-------|---------------|---------|
-| `urgent` | ✅ Banner | 🔊 Alert | `alert` | ✅ |
-| `high` | ✅ Banner | 🔇 Silent | `warning` | ✅ |
-| `normal` | ❌ | ❌ | `info` | ❌ |
-| `low` | ❌ | ❌ | `debug` | ❌ |
-
-```toml
 [settings.hooks.alerts]
-desktop = true              # OS-level notifications (macOS/Linux/Windows)
-sound = true                # play sound for urgent emails
-urgency_threshold = "high"  # minimum priority to trigger desktop alert
-webhook_url = "https://ntfy.sh/my-email-alerts"  # optional: Slack, Discord, ntfy.sh, etc.
+desktop = true
+sound = false
+urgency_threshold = "high"        # "urgent" | "high" | "normal" | "low"
+webhook_url = "https://ntfy.sh/my-mail"
 webhook_events = ["urgent", "high"]
 ```
 
-**Supported platforms:** macOS (Notification Center via `osascript`), Linux (`notify-send`), Windows (PowerShell toast). Zero npm dependencies — uses native OS commands.
+- **Patterns**: `*` wildcard, `|` for alternatives, case-insensitive; conditions
+  of one rule are combined with AND.
+- **Rule actions**: `labels`, `flag`, `mark_read`, `alert` (desktop
+  notification whatever the threshold), `add_to_calendar`.
+- **Presets**: `inbox-zero` (aggressive categorisation), `gtd` (`@Action`,
+  `@Waiting`, …), `priority-focus` (priority only, default), `notification-only`,
+  `custom`.
+- **Desktop notifications**: macOS (`osascript`), Linux (`notify-send`, plus
+  `paplay` for sound), Windows (PowerShell). `check_notification_setup` diagnoses,
+  `test_notification` or `email-mcp notify test` verifies.
+- **Webhook**: an HTTP POST of
+  `{ "event": "email.urgent", "account", "sender", "subject", "priority", … }`
+  for the priorities listed in `webhook_events` (Slack, Discord, ntfy.sh, …).
+- `configure_alerts` changes these alert settings at runtime and, with
+  `save: true`, writes them to `config.toml`. It is not registered in read-only
+  mode, since it can set a webhook and rewrite the file.
 
-**Notification setup by platform:**
+When new mail is processed, the server pushes `notifications/resources/updated`
+for the account's `unread` and `mailboxes` resources to subscribed clients. The
+watcher works over IMAP only.
 
-<details>
-<summary>macOS</summary>
+## Scheduled sending
 
-Desktop notifications use `osascript` (built-in). The terminal app running the MCP server needs notification permission:
+`schedule_email` queues a message (`send_at` in ISO 8601) as a JSON file in
+`~/.local/state/email-mcp/scheduled/` and mirrors it as a `[Scheduled: …]` draft.
+It goes out through its account's own backend (SMTP or Graph). Three things can
+send it:
 
-1. Open **System Settings → Notifications & Focus**
-2. Find your terminal app (Terminal, iTerm2, VS Code, Cursor, etc.)
-3. Enable **Allow Notifications** and choose **Banners** or **Alerts**
-4. Ensure **Focus** / Do Not Disturb is not blocking notifications
-
-Use `check_notification_setup` to diagnose and `test_notification` to verify.
-</details>
-
-<details>
-<summary>Linux</summary>
-
-Requires `notify-send` from `libnotify`. For sound alerts, `paplay` is also needed:
+1. a running MCP server — at startup, then every minute — unless it is
+   read-only;
+2. `email-mcp scheduler check`, by hand;
+3. the **OS-level periodic check**, which sends even when no client is open:
 
 ```bash
-# Ubuntu / Debian
-sudo apt install libnotify-bin pulseaudio-utils
-
-# Fedora
-sudo dnf install libnotify pulseaudio-utils
-
-# Arch
-sudo pacman -S libnotify
+node dist/main.js scheduler install     # macOS launchd, Linux crontab, Windows Task Scheduler — every minute
+node dist/main.js scheduler status
+node dist/main.js scheduler list
+node dist/main.js scheduler uninstall
 ```
 
-Desktop notifications require a running display server (X11/Wayland) — they will not work in headless/SSH sessions.
-</details>
+On Windows the task, `email-mcp scheduler`, runs without a window. From an
+administrator terminal it runs whether you are signed in or not; from a normal
+terminal only while you are signed in — `install` says which, `status` shows it
+with the last run. The task records the paths of `node` and of email-mcp at
+install time: reinstall after moving the folder or changing Node.
 
-<details>
-<summary>Windows</summary>
+Delivery guarantees: several processes may share the queue, but each email is
+claimed (`<id>.claim`) by one process only, so it is sent once. A failed send is
+retried up to **3 times**, then marked `failed`. A send interrupted midway is
+never retried automatically — the server may already have accepted it — and is
+marked `failed` after 15 minutes ("Interrupted while sending: it may have gone
+out"); check the Sent folder before scheduling it again. An instance only sends
+the emails of the accounts it serves. `cancel_scheduled` removes the entry and its
+draft.
 
-Uses PowerShell toast notifications (built-in):
+## Mailbox management
 
-1. Open **Settings → System → Notifications**
-2. Ensure **Notifications** is turned on
-3. Set **Focus Assist** to allow notifications
-4. If using Windows Terminal, ensure its notifications are enabled
-</details>
+### Labels
 
-**AI-configurable:** The AI can check, test, and configure notifications at runtime:
-- `check_notification_setup` — diagnose platform support and show setup instructions
-- `test_notification` — send a test notification to verify everything works
-- `configure_alerts` — enable/disable desktop, sound, threshold, webhook (with optional persist to config file); not available in read-only mode
+`list_labels` detects the account's label system:
 
-**Webhook payload:**
-```json
-{
-  "event": "email.urgent",
-  "account": "work",
-  "sender": { "name": "John CEO", "address": "ceo@company.com" },
-  "subject": "Q4 Review Due Today",
-  "priority": "urgent",
-  "labels": ["VIP"],
-  "rule": "VIP Contacts",
-  "timestamp": "2026-02-18T11:30:00Z"
-}
-```
+| Provider | Labels are |
+|----------|-----------|
+| Gmail | Gmail labels (`X-GM-LABELS`) |
+| ProtonMail (Bridge) | folders under `Labels/` — `add_label` copies the message there |
+| Other IMAP servers | IMAP keywords (created on first use; cannot be deleted server-wide) |
+| Microsoft Graph | Outlook categories |
 
-Static rules can force desktop notifications with `alert = true`, regardless of urgency threshold:
-```toml
-[[settings.hooks.rules]]
-name = "VIP Contacts"
-match = { from = "ceo@company.com" }
-actions = { flag = true, alert = true, labels = ["VIP"] }
-```
+### Folders and virtual folders
 
-Features:
-- **Auto-reconnect** — Exponential backoff (1s → 60s) on connection failures
-- **Batching** — Groups arrivals within a configurable delay to reduce AI calls
-- **Rate limiting** — Max 10 sampling calls per minute
-- **Graceful degradation** — Falls back to notify mode if client doesn't support sampling
-- **Resource subscriptions** — Pushes `notifications/resources/updated` for unread counts
+`move_email` and `delete_email` need the real folder of a message. A message
+found in a virtual folder (Gmail "All Mail", "Starred") must first be located with
+`find_email_folder`. `delete_mailbox` permanently deletes the folder and its
+content.
 
-## Power Search
+### Cross-account move
 
-`list_emails` and `search_emails` support a rich set of server-side filters translated to native IMAP search criteria. All filters combine with AND; free-text `query` matches as OR across `subject`/`from`/`body` (**deep by default**). Snake_case at the tool layer, camelCase in the service layer.
-
-> **`query` is deep by default — bounded and warned on huge folders.** Free-text `query` searches `SUBJECT` + `FROM` + `BODY`. On a server with no full-text-search (FTS) index, a `BODY` scan over a very large folder is expensive, so when the target folder is large, lacks FTS, and the search touches the body, email-mcp runs it on a **bounded, isolated connection** and attaches a **cost warning** suggesting you narrow by date (`since`/`before`/`on`) or `subject:`/`from:`. If the bounded scan can't finish it returns an explicitly flagged failure — never a silent zero. Truly fast deep search over giant folders requires enabling an FTS index on the IMAP server itself (an infrastructure change, out of scope here).
->
-> **A failed search is never a silent zero.** If an IMAP `SEARCH` fails, times out (including the bounded-scan budget), or is aborted by the server, the result is flagged explicitly (`searchFailed: true` + a `searchStatus` + a warning) instead of an indistinguishable empty result. `search_all_accounts` surfaces a failed account as a loud per-account warning, never as a clean zero participant. Treat a flagged failure as "unknown, narrow and retry" — the messages may still exist.
->
-> **Large folders.** Archive folders and osTicket-ingested mailboxes (e.g. `INBOX.osTicket` on `support@…` addresses, which accumulate tens of thousands of messages) are very large. The opened folder's message count is reported in the result so you can judge truncation/timeout risk; prefer a date filter (`since`/`before`/`on`) or `subject:`/`from:` there.
-
-### Supported filters
-
-| Tool param        | Service option  | Type             | IMAP term / behavior                                                                                  |
-|-------------------|-----------------|------------------|-------------------------------------------------------------------------------------------------------|
-| `query`           | `query`         | string           | OR across `SUBJECT` / `FROM` / `BODY` (deep by default; bounded + cost-warned on huge non-FTS folders) |
-| `from`            | `from`          | string           | `FROM` substring                                                                                      |
-| `to`              | `to`            | string           | `TO` substring                                                                                        |
-| `cc`              | `cc`            | string           | `CC` substring                                                                                        |
-| `bcc`             | `bcc`           | string           | `BCC` substring                                                                                       |
-| `subject`         | `subject`       | string           | `SUBJECT` substring                                                                                   |
-| `body`            | `body`          | string           | `BODY` substring                                                                                      |
-| `text`            | `text`          | string           | `TEXT` (headers + body) substring                                                                     |
-| `since`           | `since`         | string           | `SINCE` — delivery date on/after. Accepts ISO 8601, `YYYY-MM-DD`, or relative (`7d`, `2w`, `1m`, `yesterday`, `today`) |
-| `before`          | `before`        | string           | `BEFORE` — delivery date strictly before                                                              |
-| `on`              | `on`            | string           | `ON` — delivery date equals                                                                            |
-| `sent_since`      | `sentSince`     | string           | `SENTSINCE` — header `Date` on/after                                                                  |
-| `sent_before`     | `sentBefore`    | string           | `SENTBEFORE` — header `Date` before                                                                   |
-| `seen`            | `seen`          | boolean          | `SEEN` / `UNSEEN`                                                                                     |
-| `flagged`         | `flagged`       | boolean          | `FLAGGED` / `UNFLAGGED`                                                                               |
-| `answered`        | `answered`      | boolean          | `ANSWERED` / `UNANSWERED`                                                                             |
-| `draft`           | `draft`         | boolean          | `DRAFT` / `UNDRAFT`                                                                                   |
-| `deleted`         | `deleted`       | boolean          | `DELETED` / `UNDELETED`                                                                               |
-| `keyword`         | `keyword`       | string or array  | `KEYWORD` (custom IMAP flag / label)                                                                  |
-| `not_keyword`     | `notKeyword`    | string or array  | `UNKEYWORD`                                                                                           |
-| `header`          | `header`        | object           | `HEADER name value` per entry (e.g. `{ "X-Custom": "foo" }`)                                          |
-| `uids`            | `uids`          | number[] or string | `UID` — filter to a UID set or IMAP range string (`"1:100"`)                                         |
-| `larger_than`     | `largerThan`    | number (KB)      | `LARGER` (converted to bytes)                                                                          |
-| `smaller_than`    | `smallerThan`   | number (KB)      | `SMALLER`                                                                                              |
-| `has_attachment`  | `hasAttachment` | boolean          | Client-side `BODYSTRUCTURE` check over the whole (capped) match set, before pagination                  |
-| `attachment_filename` | `attachmentFilename` | string    | Substring match (case-insensitive) against any attachment filename across the match set                |
-| `attachment_mimetype` | `attachmentMimetype` | string    | Regex (case-insensitive) applied to each attachment's `type/subtype` across the match set              |
-| `facets`          | `facets`        | string[]         | `search_emails` only — returns bucketed counts by `sender` / `year` / `mailbox`                        |
-| `gmail_raw`       | `gmailRaw`      | string           | Gmail only — passes through to `X-GM-RAW` (Gmail native search syntax). Other filters ignored when set. |
-
-### Example — "Pines Rd" invoice search
-
-```jsonc
-// search_emails tool call
-{
-  "account":        "primary",
-  "subject":        "Pines Rd",
-  "body":           "invoice",
-  "since":          "2024-01-01",
-  "before":         "2024-12-31",
-  "has_attachment": true
-}
-```
-
-### Gmail Fast Path
-
-When the account's `imap.host === "imap.gmail.com"`, pass `gmail_raw` for native Gmail search syntax executed entirely server-side. Dramatically faster than client-side filtering for large mailboxes.
-
-```jsonc
-// search_emails on a Gmail account
-{
-  "account":   "gmail",
-  "gmail_raw": "from:alice@example.com has:attachment older_than:30d"
-}
-```
-
-Notes:
-- When `gmail_raw` is provided, other filters are ignored and a warning lists them.
-- On non-Gmail accounts, `gmail_raw` raises an error explaining the restriction.
-- Full Gmail syntax reference: <https://support.google.com/mail/answer/7190>.
-
-### Attachment filters
-
-When `has_attachment: true` alone returns too much noise, narrow by filename substring or MIME type regex. Both are evaluated client-side, like `has_attachment`, over the whole (capped) match set before pagination, so pages and totals count only matching messages.
-
-```jsonc
-// Narrow a noisy Pines Rd thread to signed PDFs only
-{
-  "account":             "primary",
-  "subject":             "Pines Rd",
-  "attachment_filename": "lease",             // matches "signed_lease_v7.pdf"
-  "attachment_mimetype": "application/pdf"    // regex, case-insensitive
-}
-```
-
-Regex examples:
-
-- `"application/pdf"` — exact MIME
-- `"image/.*"` — any image attachment
-- `"^application/(pdf|zip)$"` — PDFs or zips
-
-Invalid regex patterns raise a `Invalid attachment_mimetype pattern: …` tool error.
-
-### Facets
-
-`search_emails` (only — not `list_emails`) accepts a `facets` array to return bucketed counts across the **full match set** alongside the paginated page:
-
-```jsonc
-{
-  "account": "primary",
-  "since":   "90d",
-  "facets":  ["sender", "year"]
-}
-```
-
-The response appends a `📊 Facets` block with the top 10 senders and year buckets:
-
-```
-📊 Facets
-  By sender: alice@example.com (42), bob@example.com (15), ...
-  By year:   2025 (52), 2024 (20)
-```
-
-Facets are computed via a single envelope-only IMAP fetch in 500-UID chunks. When the match set exceeds **10000 UIDs** facets cover only the 10000 most recent matches, with a warning — narrow the query (date range, sender, subject) for exact facets. In `search_emails`, `"mailbox"` is a single-entry bucket for the current mailbox. In `search_all_accounts`, the `mailbox` facet is re-keyed by account name, giving a per-account breakdown (e.g. `{ "wgs-usa": 42, "all-pedal": 10 }`).
-
-### Performance Notes
-
-- **No cap without client-side filters**: when every filter is evaluated by the server, only the requested page is fetched, whatever the number of matches — the total is exact and every page is reachable.
-- **`has_attachment` / `attachment_*` / `*_contains` are client-side, before pagination**: IMAP has no native attachment search, so the server SEARCH runs with the other criteria and its candidates are then checked by fetching `BODYSTRUCTURE` + envelope (never bodies) in 200-UID chunks, **newest first by arrival date** (`INTERNALDATE`, not UID order — a message moved into a folder gets a new UID but keeps its date). Pages and totals therefore count only matching messages. See [Searching the whole mailbox](#searching-the-whole-mailbox-partial-scans-and-continuation) for the bounds of that scan.
-- **Relative date tokens** (`7d`, `2w`, `1m`, `yesterday`, `today`) are evaluated in UTC at call time, and accepted by every search tool (`list_emails`, `search_emails`, `search_all_accounts`, `export_search`, `save_*_from_search`) on both backends.
-
-### Searching the whole mailbox: partial scans and continuation
-
-A client-side filter (`has_attachment`, `attachment_*` and `*_contains` on IMAP; `*_contains` on Graph) means each candidate message has to be read. One call examines candidates from the newest to the oldest and stops at the first of two bounds:
-
-- a **45 s time budget**, counted from the start of the call — the MCP client gives up on a call after about 60 s, and the first scan of a large Dovecot folder whose index cache lacks body structures can take over a minute;
-- **5000 examined messages**.
-
-The scan is never truncated silently. When a bound stops it, the response says so in its `warning` (the total is shown as `~N`) and, on IMAP and Graph alike, carries a `coverage` object — also in the JSON output of `export_search`, `save_emails_from_search` and `save_all_attachments_from_search`, one entry per account:
-
-```jsonc
-{
-  "stoppedBy": "time_budget",        // or "message_cap", or "server_cap" (Graph $search ceiling)
-  "examined": 1200,                  // messages actually checked (the most recent ones)
-  "candidates": 2199,                // messages matching the server-side criteria
-  "oldestExamined": "2025-03-14T22:10:05.000Z",
-  "continueBefore": "2025-03-16",
-  "hint": "Partial scan: examined the 1200 most recent of 2199 candidate messages (time budget of 45 s reached). … re-run the same call with before: \"2025-03-16\" …"
-}
-```
-
-Results and total then cover only the examined messages. **Re-run the same call with `before: <continueBefore>`** to scan the next slice; repeating covers the whole mailbox. Consecutive slices may overlap slightly (a message can appear twice), never leave a gap: on IMAP `before` compares dates only, so the value is the day after the oldest examined message with a margin for the server's timezone; on Graph's `$filter` path it is the exact instant plus one second. When even a single day holds more than one call can examine, `continueBefore` is omitted and the hint asks for another server-side filter.
-
-### Microsoft Graph accounts
-
-- `$filter` path (no query text): `*_contains` filters walk the `@odata.nextLink` pages (500 messages each, `receivedDateTime desc`) and are applied before pagination, with the same budget, cap and `coverage` as IMAP. They are not pushed to Graph: `contains(from/emailAddress/address, …)` is accepted but returned no message on Outlook.com, and the `$filter` documentation does not cover it for messages.
-- `$search` path (query text, or `subject` / `from` / `to`): Graph rejects `$filter` and `$orderby` alongside `$search`, so date filters are pushed into the KQL query (`received>=…`, widened by a day) and every other criterion — exact dates, `seen`, `flagged`, `has_attachment`, `*_contains` — is checked on each result. Graph returns at most 1000 `$search` results; reaching that ceiling is reported as `coverage.stoppedBy: "server_cap"`.
-- Filters with no faithful Graph translation (`cc`, `bcc`, `text`, `body`, `answered`, `keyword`, `header`, `uids`, sizes, `attachment_filename`, `attachment_mimetype`) are ignored, and the response now says which ones.
-
-### Cross-account search
-
-`search_all_accounts` fans a single query out across multiple accounts in parallel (Promise.allSettled), merges results sorted by date, and tags each item with the originating account name. IMAP and Graph accounts can be mixed in one call; each account is searched by its own backend. Partial failures are surfaced as `warnings` — a single bad account does not fail the entire call. Omit the `accounts` field to default to every configured account.
-
-```jsonc
-// Find every "Pines Rd" message across all configured accounts
-{
-  "query":    "Pines Rd",
-  "accounts": ["wgs-usa", "all-pedal"],  // optional — defaults to every account
-  "since":    "90d",
-  "facets":   ["sender", "mailbox"]       // `mailbox` facet is re-keyed by account
-}
-```
-
-Each result in the rendered output is prefixed with `[account-name]` so you can see the source, and the response appends a `⚠️ Warnings` block whenever one or more accounts failed.
-
-#### Automatic mailbox aliasing
-
-Different providers expose different folder structures. Gmail's archive is
-`[Gmail]/All Mail`; cPanel Dovecot uses `INBOX.Archive`; Exchange uses yet
-another path. When you call `search_all_accounts(mailbox="INBOX.Archive")`,
-each account's mailbox list is checked, and if the literal folder doesn't
-exist, the server's SPECIAL-USE flags (`\All`, `\Archive`, `\Sent`, `\Trash`,
-`\Drafts`, `\Junk`) are used to find the equivalent folder automatically.
-Remappings are surfaced in the response as `ℹ️` notices so you can see what
-was actually searched. Mailbox lists are cached per-account for 5 minutes to
-avoid re-LISTing on every call.
-
-### Saved searches
-
-Define reusable named filter combinations in `config.toml` under `[[searches]]`. Each preset bundles the same parameter set as `search_emails` and can target a single account (`account = "..."`) or fan out across multiple (`accounts = ["a", "b"]`). Run them via `run_preset`.
+`cross_account_move` moves messages between two configured IMAP accounts: it
+fetches the raw message, appends it to the destination with its flags and
+original date (it looks natively delivered), records the move, then moves the
+source copy to the source account's Trash. A message already present at the
+destination is skipped. The move log lives in **PostgreSQL**; without a database,
+this tool refuses and every other tool works normally.
 
 ```toml
-[[searches]]
-name        = "pines-lease"
-description = "Pines Rd 2024 lease paperwork across WGS USA + All Pedal"
-accounts    = ["wgs-usa", "all-pedal"]    # cross-account; omit for single-account use
-subject     = "Pines Rd"
-since       = "2024-01-01"
-before      = "2025-01-01"
-has_attachment       = true
-attachment_filename  = "lease"
-facets      = ["sender", "year", "mailbox"]
-
-[[searches]]
-name    = "urgent-flagged"
-account = "primary"                        # single-account variant
-flagged = true
-seen    = false
+[database]
+url = "postgresql://email_mcp:PASSWORD@HOST:5432/email_mcp"   # or EMAIL_MCP_DATABASE_URL
 ```
 
-```jsonc
-// Tool call
-{ "name": "pines-lease", "pageSize": 20 }
+```bash
+pnpm db:migrate             # apply pending migrations (migrations/*.sql)
+pnpm db:migrate --status    # applied and pending, change nothing
+pnpm db:migrate --dry-run   # list pending
 ```
 
-`list_presets` appends a `📋 Saved searches (from config.toml)` section so the available names are discoverable at runtime.
-
-## Export & Attachment Save
-
-Five tools that write directly to disk under `~/Downloads/` (or a caller-supplied path under `$HOME` / `/tmp`). Every path is validated — attempts to write to `/etc`, `/System`, `/usr/bin`, etc. are rejected, and `..` traversal is stripped.
-
-Pick by what you want to keep:
-
-| Want | Tool | Writes |
-|---|---|---|
-| Metadata of many messages | `export_search` | one CSV / NDJSON file |
-| The messages themselves | `save_email`, `save_emails_from_search` | one `.eml` per message |
-| Files sent with the messages | `save_attachment`, `save_all_attachments_from_search` | the attachments |
-
-### `export_search`
-
-Run any `search_emails` / `search_all_accounts` query and stream the result set to a **CSV** or **NDJSON** file. The MCP response carries only a tiny summary (path + row count + truncation flag); the bulk of the data lives on disk, so this bypasses the ~25k-token response cap.
-
-```jsonc
-// Export every Pines Rd message across two accounts to CSV
-{
-  "accounts":    ["wgs-usa", "all-pedal"],
-  "subject":     "Pines Rd",
-  "since":       "2024-01-01",
-  "before":      "2025-01-01",
-  "format":      "csv",
-  "max_rows":    5000,
-  "destination": "/Users/me/Downloads/pines-rd-2024.csv"
-}
-```
-
-Default CSV columns (snake_case headers): `id`, `account`, `date`, `from`, `subject`, `labels`, `attachments`, `has_attachments`, `seen`, `flagged`. Pass `columns` to pick a subset; available columns are `id`, `account`, `date`, `from`, `to`, `subject`, `flags`, `labels`, `attachments`, `preview`, `size`.
-
-- `attachments` serializes as `filename1.pdf|filename2.png`
-- `labels` serializes as `label1|label2`
-- `from` serializes as `"Name <addr@domain>"`
-- All escaping follows RFC 4180 (quote fields containing `",\n\r`, double embedded quotes)
-
-NDJSON mode emits one `JSON.stringify(EmailMeta)` per line — the `columns` parameter is ignored and the full structured record (including attachments array) is dumped.
-
-`max_rows` defaults to 5000 (hard ceiling 50 000). When the underlying match set is larger the file is truncated and the response sets `truncated: true`.
-
-### `save_email`
-
-Write one message to disk as a **`.eml`** file — the exact RFC822 source the server returned, byte for byte. Nothing is re-encoded, so the file reopens in any mail client (Thunderbird, Outlook, Apple Mail, `mutt -f`) with its attachments and formatting, the DKIM signature and `Received` chain stay verifiable, and the message survives deletion on the server. That last point is what `export_search` cannot give you: CSV/NDJSON records *about* a message, `.eml` is the message.
-
-```jsonc
-{
-  "account":     "wgs-usa",
-  "emailId":     "12345",
-  "mailbox":     "INBOX",
-  "destination": "/Users/me/Downloads"   // optional — file or directory
-}
-```
-
-When `destination` is a directory (or omitted — defaults to `~/Downloads/`), the filename is derived from the message: `2026-08-05_Signed lease v7_12345.eml`. The subject is sanitised and truncated, and the id keeps two same-day/same-subject messages apart. Auto-collision suffix as elsewhere: `…-1.eml` unless `overwrite: true`.
-
-There is no size cap. The parse ceiling that guards `get_email` is a *display* guard; applying it here would produce truncated, unopenable files.
-
-Works on both backends: IMAP fetches the message source, Graph reads the full MIME through `GET /messages/{id}/$value`. No extra OAuth scope is needed — `Mail.Read` (included in `Mail.ReadWrite`) covers it.
-
-### `save_emails_from_search`
-
-Same thing over a whole search — mailbox archival, year-end exports, handing a full sender history to another tool.
-
-```jsonc
-{
-  "accounts":    ["wgs-usa", "all-pedal"],
-  "from":        "landlord@example.com",
-  "since":       "2024-01-01",
-  "organize_by": "date",
-  "max_emails":  500
-}
-```
-
-`organize_by` takes the same values as `save_all_attachments_from_search` (`flat`, `date`, `sender`, `account`). Default destination is `~/Downloads/email-messages-<ISO-ts>/`. A message that fails is recorded in `errors[]` and the batch continues — one unreadable message does not cost you the other 499.
-
-### `save_attachment`
-
-Write a single attachment to disk without the ~5 MB ceiling and base64 hop of `download_attachment`. The file is piped from `imapflow` straight into `fs.createWriteStream` — no intermediate buffer, no MCP-response byte budget.
-
-```jsonc
-// Save a single lease PDF to ~/Downloads
-{
-  "account":    "wgs-usa",
-  "emailId":    "12345",
-  "mailbox":    "INBOX",
-  "filename":   "signed_lease_v7.pdf",
-  "open":       true   // optional — spawns `open <path>` on macOS after save
-}
-```
-
-Contrast:
-
-| | `download_attachment` (legacy) | `save_attachment` (new) |
-|---|---|---|
-| Response payload | base64-encoded bytes | `{ path, size, mimeType }` summary |
-| Size limit | 5 MB | None |
-| MCP token budget | Consumes ~25k tokens for typical PDFs | Constant-size response |
-| Use case | Inline preview, AI analysis | Bulk save, user-facing download |
-
-Auto-collision suffix: if `lease.pdf` exists the tool writes `lease-1.pdf`, `lease-2.pdf`, etc. Pass `overwrite: true` to opt in.
-
-### `save_all_attachments_from_search`
-
-Run a search and sweep every matching attachment into a dated folder. Great for year-end lease-PDF audits, vendor invoice collections, monthly statement exports.
-
-```jsonc
-// Year-end Pines Rd lease-PDF sweep — 2024, across two accounts,
-// filtered to PDFs whose filename mentions "lease", bucketed by month.
-{
-  "accounts":            ["wgs-usa", "all-pedal"],
-  "subject":             "Pines Rd",
-  "since":               "2024-01-01",
-  "before":              "2025-01-01",
-  "attachment_filename": "lease",
-  "attachment_mimetype": "application/pdf",
-  "organize_by":         "date"
-}
-```
-
-`organize_by` controls the subfolder layout under the destination:
-
-- `flat` — all files in a single folder (default)
-- `date` — `YYYY-MM/` buckets based on each email's date
-- `sender` — bucketed by sender domain (e.g. `example.com/`)
-- `account` — bucketed by originating account name (useful for multi-account sweeps)
-
-Default destination is `~/Downloads/email-attachments-<ISO-ts>/`. Per-email errors are collected in `errors[]` rather than aborting the whole run — you get a summary with `files_saved`, `total_size`, `skipped`, and the error list.
-
-### Inline images (`cid`)
-
-`send_email`, `reply_email`, `save_draft` and `update_draft` can embed an image
-**inline** in an HTML body (e.g. a signature logo shown in the message itself,
-not as a downloadable attachment, and without any remote URL). Any attachment
-that carries a `cid` field is embedded inline (`Content-Disposition: inline`,
-`Content-ID: <cid>`) and the message becomes `multipart/related`. Reference it
-from the HTML with `<img src="cid:...">` using the **same** `cid`.
-
-```jsonc
-{
-  "to": ["recipient@example.com"],
-  "subject": "Hello",
-  "html": true,
-  "body": "<p>Hi!</p><img src=\"cid:companyLogo\">",
-  "attachments": [
-    // Inline logo — embedded in the body (NOT a downloadable attachment).
-    { "path": "/abs/path/logo.png", "filename": "logo.png", "cid": "companyLogo" },
-    // Classic attachment alongside the inline image — both coexist.
-    { "path": "/abs/path/quote.pdf" }
-  ]
-}
-```
-
-Notes:
-
-- The `cid` value must match exactly between `<img src="cid:companyLogo">` and
-  the attachment's `cid` (here `companyLogo`).
-- Without `cid`, an attachment stays a normal downloadable attachment
-  (backward-compatible — nothing changes for existing callers).
-- An inline image works from any attachment source: `path`, `content_base64`,
-  or `source_email_id`.
-- `update_draft` warns only when the HTML references a `cid:` for which **no**
-  matching inline attachment was provided (a genuinely broken image).
-
-#### Use an existing Outlook signature automatically
-
-Instead of re-pasting HTML or passing a logo every time, point the account at an
-existing **Outlook signature** and let the server embed it (logo included) on
-demand. Outlook stores signatures under `%APPDATA%\Microsoft\Signatures\` as a
-`.htm` file plus a `<name>_fichiers\` folder of images. Configure the path:
-
-```toml
-# config.toml — per account
-[[accounts]]
-name = "work"
-# …
-signature_path = "C:\\Users\\You\\AppData\\Roaming\\Microsoft\\Signatures\\My Signature.htm"
-signature_default = true   # optional — append the signature on every message
-```
-
-(`signature_path` / `signature_default` also map to the `MCP_EMAIL_SIGNATURE_PATH`
-and `MCP_EMAIL_SIGNATURE_DEFAULT` environment variables.)
-
-`append_signature` is available on `send_email`, `reply_email`, `forward_email`
-and `save_draft`, and resolves with three-state semantics:
-
-- `append_signature: true` → always append;
-- `append_signature: false` → never (overrides the default — e.g. a short reply);
-- omitted → use the account's `signature_default` (so `signature_default = true`
-  appends the signature on **every** message, sent, replied, forwarded or drafted).
-
-`update_draft` is the exception: it never signs implicitly — `signature_default`
-does not apply, so rewriting a draft cannot stack a second signature. A new
-`body` replaces the old one exactly as given; an omitted `body` is kept as is,
-with its signature and inline (`cid`) images if it had them. Pass
-`append_signature: true` together with a new `body` to sign it (ignored, with a
-warning, when `body` is omitted). Same contract on IMAP and Graph accounts.
-
-```jsonc
-// signature_default = true → no flag needed
-{ "account": "work", "to": ["x@y.com"], "subject": "Hello", "body": "<p>Hello,</p>" }
-// opt in explicitly (when signature_default is off)
-{ "account": "work", "to": ["x@y.com"], "subject": "Hello",
-  "body": "<p>Hello,</p>", "append_signature": true }
-```
-
-The server reads the `.htm`, rewrites each local `<img src>` to a `cid:` inline
-image (reading the bytes from the sibling `_fichiers` folder), appends it below
-the body and switches the message to HTML. **Like the password, this is just
-config — no code or HTML to touch.** The MCP server must run on the machine
-where that signature path exists (e.g. your local build on Windows).
-
-## How the `from` / `to` / `subject` filters actually match
-
-These filters are handed to the **mail server**, which decides what matches. RFC 3501 defines `SEARCH FROM` as a substring match, but a server with a full-text index (Dovecot FTS, as deployed by OVH among others) matches indexed **tokens** instead. Observed on a real mailbox holding nine messages from two ENVIROpro domains:
-
-| `from:` | Messages returned | Substring would give |
-|---|---|---|
-| `enviropro` | 9 | 9 |
-| `enviropro-salon.fr` | **1** | 9 |
-| `news.enviropro-salon.fr` | 8 | 8 |
-| `salon.fr` | **0** | 9 |
-
-A parent domain does not find its subdomains, and a fragment starting mid-token finds nothing — while a *shorter* prefix finds everything. Nothing in the response distinguishes this from an empty mailbox.
-
-**When the result must be exhaustive, use the literal variants** — `from_contains`, `to_contains`, `subject_contains`. They are matched here, on the decoded header, so the result no longer depends on the server's index and is identical on IMAP and Graph:
-
-```jsonc
-{ "account": "work", "mailbox": "Junk", "from_contains": "enviropro-salon.fr" }  // → 9
-```
-
-They do not narrow the server-side query, so pair them with `since`/`before` or a coarse `from` on a large mailbox; the tool warns when nothing else bounds the scan.
-
-Available on `search_emails`, `search_all_accounts`, `list_emails`, `export_search`, `save_emails_from_search` and `save_all_attachments_from_search`.
-
-### Reading an export result
-
-The batch tools report `matched` (what the search returned) next to `files_saved` (what was written), plus `truncated`:
-
-```jsonc
-{ "matched": 9, "files_saved": 9, "truncated": false }   // complete
-{ "matched": 1, "files_saved": 1, "truncated": false }   // the QUERY is the problem
-{ "matched": 9, "files_saved": 7, "error_count": 2 }     // the WRITE is the problem
-```
-
-Without `matched`, the middle case is indistinguishable from an empty folder — which is the worst failure mode for an archival tool, since it presents a partial export as a success. When `matched` is 0, or lower than you expected, the response now says so and points at the filter.
-
-## Internet Headers
-
-`get_email` exposes a flattened `headers` map — one value per name. That is enough to read a `List-Unsubscribe`, and useless for tracing a message: a real message crosses 5–10 relays and carries that many `Received:` lines, and a map keeps only one of them.
-
-`get_email_headers` returns the header block in the three forms that matter:
-
-- **`analysis`** — the `Received` chain rebuilt in *chronological* order (relays prepend their line, so the raw order is backwards) with the delay at each hop, the SPF/DKIM/DMARC verdicts parsed out of `Authentication-Results`, the DKIM signatures, and From/Return-Path/SPF/DKIM domain alignment;
-- **`headers`** — every occurrence, unfolded, in message order;
-- **`raw`** — the header block exactly as received (`include_raw: true`).
-
-Only the header block is fetched (`BODY.PEEK[HEADER]` on IMAP), so the call is cheap even on a 40 MB message, and it does **not** mark the message as read.
-
-```jsonc
-{ "account": "work", "emailId": "12345", "mailbox": "INBOX" }
-```
-
-```text
-📨 Internet headers — account "work", mailbox INBOX, id 12345
-Subject: Your invoice
-From: Billing <billing@example.com>
-Return-Path: <bounce@mailer.example.net>
-
---- Authentication ---
-spf=pass (smtp.mailfrom=bounce@mailer.example.net)
-dkim=pass (header.d=example.com)
-dmarc=pass (header.from=example.com)
-Alignment: From=example.com | SPF=mailer.example.net ❌ | DKIM=example.com ✅ | Return-Path ❌
-DKIM signatures: example.com (s=sel1, rsa-sha256)
-
---- Received chain (3 hops, transit 2m 10s) ---
-1. mail.example.com → mx1.mailer.example.net  [ESMTPS]  2026-08-05T10:00:00.000Z
-2. mx1.mailer.example.net → mx.recipient.tld  [ESMTPS]  2026-08-05T10:02:00.000Z  (+2m 0s)
-3. mx.recipient.tld → store.recipient.tld  [LMTP]  2026-08-05T10:02:10.000Z  (+10s)
-
---- Notes ---
-• Return-Path (mailer.example.net) and From (example.com) are on different domains.
-```
-
-Set `format: "json"` for the structured dump instead, `include_all_headers: false` to drop the full listing, `include_raw: true` for the raw block.
-
-Reading the verdicts: when several `Authentication-Results` headers are present, the **topmost wins** — it was added by the last relay to touch the message, so it is the only one an upstream relay could not have forged. Alignment is computed with relaxed (subdomain-tolerant) matching rather than the Public Suffix List; the `dmarc=` verdict from the receiving server remains authoritative and is reported verbatim.
-
-On Graph-backed accounts the header list comes from `internetMessageHeaders` (one cheap request); the `raw` block is then *rebuilt* from that list — values are exact, original folding is not, and the response flags this with `rawReconstructed: true`. When Graph does not serve the list, the tool falls back to the full MIME source (`$value`). No extra OAuth scope is needed either way.
-
-The same fix applies to `get_email`: its flattened `headers` map was always empty on Graph accounts (the backend never requested `internetMessageHeaders`) and now matches the IMAP behaviour.
-
-## API
-
-### Tools (64)
-
-#### Read (22)
-
-| Tool | Description |
-|------|-------------|
-| `list_accounts` | List all configured email accounts |
-| `list_mailboxes` | List folders with unread counts and special-use flags |
-| `list_emails` | Paginated email listing with date, sender, subject, and flag filters |
-| `get_email` | Read full email content with attachment metadata |
-| `get_emails` | Fetch full content of multiple emails in a single call (max 20) |
-| `get_email_status` | Get read/flag/label state of an email without fetching the body |
-| `get_email_headers` | Full Internet headers — every occurrence, unfolded — plus the chronological Received chain, SPF/DKIM/DMARC verdicts and domain alignment (header block only, does not mark as read) |
-| `search_emails` | Search by keyword across subject, sender, and body (deep by default; bounded + cost-warned on huge non-FTS folders); failed searches are flagged, never a silent zero |
-| `search_all_accounts` | Fan a search across multiple accounts in parallel; merges + date-sorts results and tags each with its account |
-| `run_preset` | Run a saved search preset defined under `[[searches]]` in config.toml |
-| `export_search` | Run a search and stream the result set to a CSV or NDJSON file under `~/Downloads/` (bypasses MCP response byte budget) |
-| `save_email` | Save one message to disk as a `.eml` — exact RFC822 source, attachments and DKIM/Received intact, reopens in any mail client |
-| `save_emails_from_search` | Run a search and save every matching message as a `.eml` into a dated folder |
-| `download_attachment` | Download an email attachment by filename (base64 in response; ≤5MB) |
-| `save_attachment` | Save an attachment directly to disk — no base64 hop, no size limit |
-| `save_all_attachments_from_search` | Run a search and download every matching attachment into a dated folder (with optional filename/mimetype filter) |
-| `find_email_folder` | Discover the real folder(s) an email resides in (resolves virtual folders) |
-| `extract_contacts` | Extract unique contacts from recent email headers |
-| `get_thread` | Reconstruct a conversation thread via References/In-Reply-To |
-| `list_templates` | List available email templates |
-| `get_email_stats` | Email analytics — volume, top senders, daily trends |
-| `check_health` | Connection health, latency, quota, and IMAP capabilities |
-
-#### Write (10)
-
-| Tool | Description |
-|------|-------------|
-| `send_email` | Send a new email (plain text or HTML, CC/BCC) |
-| `reply_email` | Reply with proper threading (In-Reply-To, References) |
-| `forward_email` | Forward with original content quoted |
-| `save_draft` | Save an email draft to the Drafts folder |
-| `update_draft` | Replace a draft's content while preserving (or changing) its attachments |
-| `send_draft` | Send an existing draft and remove from Drafts |
-| `apply_template` | Apply a template with variable substitution |
-| `schedule_email` | Schedule an email for future delivery |
-| `list_scheduled` | List scheduled emails by status |
-| `cancel_scheduled` | Cancel a pending scheduled email |
-
-#### Exchange / Outlook.com only (5)
-
-Server-side rules and the automatic reply live in the mailbox itself, so they
-keep working when nothing is connected. IMAP cannot express either, so these
-tools require an account configured with `backend = "graph"` and say so plainly
-on any other.
-
-| Tool | Description |
-|------|-------------|
-| `list_mail_rules` | List the server-side inbox rules |
-| `create_mail_rule` | Create a rule (conditions: sender/subject/body; actions: move, mark read, importance, delete) |
-| `delete_mail_rule` | Delete a rule by id |
-| `get_auto_reply` | Read the automatic reply (out of office) setting |
-| `set_auto_reply` | Turn the automatic reply on (always or scheduled) or off |
-
-#### Manage (8)
-
-| Tool | Description |
-|------|-------------|
-| `move_email` | Move email between folders |
-| `cross_account_move` | Move an email between two different accounts, preserving raw headers, flags and original date |
-| `delete_email` | Move to Trash or permanently delete |
-| `mark_email` | Mark as read/unread, flag/unflag |
-| `bulk_action` | Batch operation on up to 100 emails |
-| `create_mailbox` | Create a new mailbox folder |
-| `rename_mailbox` | Rename an existing mailbox folder |
-| `delete_mailbox` | Permanently delete a mailbox and contents |
-
-#### Labels (5)
-
-| Tool | Description |
-|------|-------------|
-| `list_labels` | Discover available labels (auto-detects provider strategy) |
-| `add_label` | Add a label to an email (ProtonMail folders, Gmail X-GM-LABELS, or IMAP keywords) |
-| `remove_label` | Remove a label from an email |
-| `create_label` | Create a new label |
-| `delete_label` | Delete a label |
-
-#### Watcher & Alerts (6)
-
-| Tool | Description |
-|------|-------------|
-| `get_watcher_status` | Show IMAP IDLE connections, folders being monitored, and last-seen UIDs |
-| `list_presets` | List available AI triage presets AND saved search presets (from `[[searches]]` in config.toml) |
-| `get_hooks_config` | Show current hooks configuration — preset, rules, and custom instructions |
-| `configure_alerts` | Update alert/notification settings at runtime — not in read-only mode, since it can set a webhook and rewrite `config.toml` |
-| `check_notification_setup` | Diagnose desktop notification support and provide setup instructions |
-| `test_notification` | Send a test notification to verify OS permissions are configured |
-
-#### Calendar & Reminders (8)
-
-| Tool | Description |
-|------|-------------|
-| `extract_calendar` | Extract ICS/iCalendar events from an email |
-| `analyze_email_for_scheduling` | Analyze an email to detect events and reminder-worthy content |
-| `add_to_calendar` | Add an email event to the local calendar (macOS/Linux) |
-| `create_reminder` | Create a reminder in macOS Reminders.app from an email |
-| `list_calendars` | List all available local calendars |
-| `list_events` | List local calendar events, filtered by title, date range or calendar |
-| `list_reminders` | List macOS Reminders.app reminders, filtered by title or list |
-| `check_calendar_permissions` | Check whether the local calendar is accessible |
-
-### Prompts (7)
-
-| Prompt | Description |
-|--------|-------------|
-| `triage_inbox` | Categorize and prioritize unread emails with suggested actions |
-| `summarize_thread` | Summarize an email conversation thread |
-| `compose_reply` | Draft a context-aware reply to an email |
-| `draft_from_context` | Compose a new email from provided context and instructions |
-| `extract_action_items` | Extract actionable tasks from email threads |
-| `summarize_meetings` | Summarize upcoming calendar events from emails |
-| `cleanup_inbox` | Suggest emails to archive, delete, or unsubscribe from |
-
-### Resources (6)
-
-| Resource | URI | Description |
-|----------|-----|-------------|
-| Accounts | `email://accounts` | List of configured accounts |
-| Mailboxes | `email://{account}/mailboxes` | Folder tree for an account |
-| Unread | `email://{account}/unread` | Unread email summary |
-| Templates | `email://templates` | Available email templates |
-| Stats | `email://{account}/stats` | Email statistics snapshot |
-| Scheduled | `email://scheduled` | Pending scheduled emails |
-
-### Provider Auto-Detection
-
-| Provider | Domains |
-|----------|---------|
-| Gmail | gmail.com |
-| Outlook / Hotmail | outlook.com, hotmail.com, live.com |
-| Yahoo Mail | yahoo.com, ymail.com |
-| iCloud | icloud.com, me.com, mac.com |
-| Fastmail | fastmail.com |
-| ProtonMail Bridge | proton.me, protonmail.com |
-| Zoho Mail | zoho.com |
-| GMX | gmx.com, gmx.de, gmx.net |
-
-### Architecture
+Migrations are forward-only and recorded in `schema_migrations`. Use a dedicated
+role that can only reach the `email_mcp` database; on PostgreSQL 15+ also run
+`ALTER SCHEMA public OWNER TO email_mcp;` in that database, or the first migration
+fails with "permission denied for schema public".
+
+### Exchange rules and automatic reply
+
+On Graph accounts, `create_mail_rule` creates a server-side inbox rule —
+conditions `from_addresses`, `subject_contains`, `body_contains`; actions
+`move_to_mailbox` (a folder path such as `"Clients/Invoices"`), `mark_as_read`,
+`mark_importance`, `delete_message`, `stop_processing`; `sequence`, `enabled`.
+Rules run in the mailbox, even when nothing is connected. `set_auto_reply` sets
+the out-of-office reply: `status` `disabled`, `alwaysEnabled` or `scheduled`
+(with `start_datetime`, `end_datetime`, `time_zone`), `internal_message`,
+`external_message`, `external_audience` (`none`, `contactsOnly`, `all`).
+
+## Security
+
+### Read-only mode
+
+`read_only = true` in `[settings]`, or `MCP_EMAIL_READ_ONLY=true` for one
+instance:
+
+- the 29 write tools are **not registered** — the model cannot even see them
+  (sending, drafts, moves, deletions, flags, labels, folders, templates,
+  scheduling, rules, automatic reply, `configure_alerts`);
+- the scheduled queue is not processed (the server logs `Scheduler disabled`);
+- tools that write only locally remain: the `save_*` / `export_*` tools (files),
+  `add_to_calendar` and `create_reminder` (local calendar), `test_notification`.
+
+Read-only mode does **not** cover the watcher's hooks: static rules and AI
+triage still apply their labels, flags and read marks when the watcher is
+enabled. Leave `settings.watcher.enabled = false` on an instance that must not
+touch the mailbox. `email-mcp scheduler check` also sends regardless of the
+setting.
+
+### Other safeguards
+
+- **Secrets** — `*_command` fields keep credentials in a password manager; OAuth2
+  refresh tokens are scoped and revocable. Passwords are never logged.
+- **Confirmation** — every tool carries MCP annotations (`readOnlyHint`,
+  `destructiveHint`, `idempotentHint`, `openWorldHint`) that clients use to ask
+  before acting; `delete_email` goes to Trash unless `permanent: true`; calendar
+  and reminder writes on macOS show a native confirmation dialog.
+- **Rate limit** — `rate_limit` messages per minute and per account on SMTP sends.
+- **Disk writes** — the [allow-list](#where-files-may-be-written) above.
+- **Audit log** — write operations are appended to
+  `~/.local/share/email-mcp/audit.log`, sensitive fields redacted.
+- **TLS** — implicit TLS or STARTTLS, certificate verification on by default.
+
+What ends up on disk (`.eml`, attachments, exports) is as sensitive as the
+mailbox itself; see [SECURITY.md](SECURITY.md).
+
+## Troubleshooting
+
+| Symptom | Likely cause and fix |
+|---------|----------------------|
+| A documented tool is missing, or a fix seems absent | The client runs an old build. Run `pnpm build` (the git hooks do it after a pull), **restart the client**, and check `server_build` in `check_health`. |
+| A tool is missing entirely | The instance is read-only (write tools are not registered). |
+| Startup error naming `MCP_EMAIL_ACCOUNTS` | An account name in the client entry does not exist in `config.toml`. |
+| Startup error `… timed out after 30s` / `… printed nothing` | A `*_command` prompts for input or fails; run it in a terminal. |
+| Search returns fewer messages than expected | Server token matching on `from` / `to` / `subject`: use `*_contains`. Or a partial scan: read `coverage` and continue with `before`. |
+| The call is abandoned after about a minute | MCP clients stop waiting around 60 s. Add a date filter (`since: "90d"`) or narrow the folder; client-side scans already stop at 45 s and report how to continue. |
+| Empty bodies, or `the server returned no data for MIME part N` | An antivirus inspecting unencrypted IMAP can strip message parts (observed with ESET). Use TLS (`tls = true`, port 993) or exclude the mail server from the antivirus' email scanning. |
+| Folders missing on Exchange / Outlook.com | Their IMAP endpoint hides custom folders: use `backend = "graph"`. |
+| `… is not supported yet on Graph-backed account` | The tool is IMAP-only ([table](#imap-and-exchange-at-a-glance)). |
+| Sent copy in the wrong folder (cPanel, Mac Mail) | Set `sent_folder` — [docs/troubleshooting-sent-folder.md](docs/troubleshooting-sent-folder.md). |
+| Leftover `email-mcp` processes holding IMAP connections | [docs/troubleshooting-orphan-processes.md](docs/troubleshooting-orphan-processes.md) and `bin/email-mcp-wrapper.sh` (POSIX). |
+| Desktop notifications do not show | `check_notification_setup` / `email-mcp notify status`. |
+| Scheduled emails do not leave | No server running and no `scheduler install`; or the instance is read-only; `scheduler list` shows the state and last error. |
+
+## Architecture
 
 ```
 src/
-├── main.ts                — Entry point and subcommand routing
-├── server.ts              — MCP server factory
-├── logging.ts             — MCP protocol logging bridge
-├── cli/                   — Interactive CLI commands
-│   ├── account-commands.ts — Account CRUD (list, add, edit, delete)
-│   ├── setup.ts           — Legacy setup alias → account add
-│   ├── test.ts            — Connection tester
-│   ├── config-commands.ts — Config management (show, edit, path, init)
-│   ├── install-commands.ts — MCP client registration (install, status, remove)
-│   ├── providers.ts       — Provider auto-detection + OAuth2 endpoints (experimental)
-│   └── scheduler.ts       — Scheduler CLI
-├── config/                — Configuration layer
-│   ├── xdg.ts             — XDG Base Directory paths
-│   ├── schema.ts          — Zod validation schemas
-│   └── loader.ts          — Config loader (TOML + env vars)
-├── connections/
-│   └── manager.ts         — Lazy persistent IMAP/SMTP with OAuth2 (experimental)
-├── services/              — Business logic
-│   ├── imap.service.ts    — IMAP operations
-│   ├── label-strategy.ts  — Provider-aware label strategy (ProtonMail/Gmail/IMAP keywords)
-│   ├── smtp.service.ts    — SMTP operations
-│   ├── template.service.ts — Email template engine
-│   ├── oauth.service.ts   — OAuth2 token management (experimental)
-│   ├── calendar.service.ts — ICS/iCalendar parsing
-│   ├── scheduler.service.ts — Email scheduling queue
-│   ├── watcher.service.ts — IMAP IDLE real-time watcher with auto-reconnect
-│   ├── hooks.service.ts   — AI triage via MCP sampling + static rules + auto-labeling/flagging
-│   ├── notifier.service.ts — Multi-channel notification dispatcher (desktop/sound/webhook)
-│   ├── presets.ts         — Built-in hook presets (inbox-zero, gtd, priority-focus, etc.)
-│   └── event-bus.ts       — Typed EventEmitter for internal email events
-├── tools/                 — MCP tool definitions (42)
-├── prompts/               — MCP prompt definitions (7)
-├── resources/             — MCP resource definitions (6)
-├── safety/                — Audit trail and rate limiter
-└── types/                 — Shared TypeScript types
+├── main.ts            entry point and CLI commands
+├── server.ts          MCP server factory
+├── cli/               account, setup, test, install, config, scheduler, notify
+├── config/            TOML + environment loading, Zod schema, secret commands, XDG paths
+├── connections/       lazy, persistent IMAP / SMTP connections (OAuth2 aware)
+├── services/          business logic
+│   ├── imap.service.ts, smtp.service.ts      IMAP / SMTP backends
+│   ├── graph/                                Microsoft Graph backend and sending
+│   ├── mail-router.ts, mail-backends.ts      per-account routing IMAP ↔ Graph
+│   ├── search-*.ts                           search criteria, coverage, presets
+│   ├── watcher, hooks, notifier, presets     IDLE watcher, triage, alerts
+│   └── scheduler, calendar, reminders, templates, signature-loader, …
+├── routing/           cross-account move and its Postgres log
+├── tools/ prompts/ resources/   MCP surface (64 tools, 7 prompts, 6 resources)
+├── safety/            validation, rate limiter, audit log
+└── utils/             dates, headers, body formatting, build info
 ```
 
-## Maintainers
+Tools call one mail contract (`IMailService`, `ISendService`); a router sends each
+call to IMAP/SMTP or to Graph according to the account's `backend`. A Graph
+account never falls back to IMAP, and an operation Graph does not implement fails
+explicitly rather than returning a partial answer.
 
-[@codefuturist](https://github.com/codefuturist)
-
-## Contributing
-
-PRs accepted. Please conform to the [standard-readme](https://github.com/RichardLitt/standard-readme) specification when editing this README.
+## Development and contributing
 
 ```bash
-# Development workflow
 pnpm install
-pnpm typecheck   # type check
-pnpm check       # lint and format
-pnpm build       # build
-pnpm start       # run
+pnpm dev              # watch mode (tsx)
+pnpm typecheck
+pnpm check            # Biome + ESLint
+pnpm test             # unit tests (Vitest)
+pnpm test:integration # integration tests — needs Docker (GreenMail via Testcontainers)
+pnpm build
 ```
+
+Git hooks (lefthook) run automatically and must not be bypassed (no
+`--no-verify`): **pre-commit** Biome, ESLint, type check and `actionlint`;
+**commit-msg** Conventional Commits; **pre-push** tests, `pnpm check` and the
+build; **post-merge / post-checkout / post-rewrite** rebuild `dist/`.
+
+Every change must keep **both backends** working. A new tool needs its method on
+`ImapService` and `GraphService` (or accepts the explicit "not supported yet"
+error on Graph), registration in `src/tools/register.ts` — inside the
+`if (!readOnly)` block when it writes — and a line in the tools tables of
+**both** `README.md` and `README.fr.md`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Issues and security reports: see [CONTRIBUTING.md](CONTRIBUTING.md) and
+[SECURITY.md](SECURITY.md).
+
+## Maintainer
+
+[@PedroSkyNetFr](https://github.com/PedroSkyNetFr) maintains this fork.
+
+## History and credits
+
+- **Colin ([@codefuturist](https://github.com/codefuturist))** created
+  [email-mcp](https://github.com/codefuturist/email-mcp) in February 2026: the
+  IMAP/SMTP server and its multi-account design, the setup wizard, client
+  installer and CLI, provider-aware labels, the IMAP IDLE watcher with AI triage,
+  presets, static rules and alerts, calendar and reminders integration,
+  templates, scheduling, analytics, prompts and resources, the integration test
+  suite and the npm / Docker release pipeline.
+- **David Young ([@wgs4](https://github.com/wgs4))** extended it in
+  [his fork](https://github.com/wgs4/email-mcp) (March–June 2026, releases 0.3.0
+  and 0.4.0): Sent-folder copies after SMTP sends, server-side filter parity and
+  the Gmail fast path, attachment filters and facets, cross-account search, saved
+  searches and SPECIAL-USE mailbox aliasing, `export_search` and the
+  save-to-disk tools, bounded deep search with explicit search failures,
+  MIME-aware body extraction, attachments on `send_email`, drafts and
+  `update_draft`, `includeAttachments` on replies, and `cross_account_move` with
+  its Postgres log.
+- **This fork ([@PedroSkyNetFr](https://github.com/PedroSkyNetFr))**, since June
+  2026: the Microsoft Graph backend (reading, writing, sending, search, categories,
+  drafts, export), Exchange rules and automatic reply, the OAuth2 setup helper,
+  inline `cid` images and Outlook signatures, `.eml` export and full Internet
+  headers, the save-directory allow-list, `MCP_EMAIL_ACCOUNTS` and `*_command`
+  secrets, search coverage reports with `before` continuation and `*_contains`
+  filters, scheduler hardening and the Windows Task Scheduler, read-only fixes,
+  build visibility in `check_health`, the imapflow 2 / nodemailer 10 upgrade and
+  the git hooks that keep `dist/` current.
 
 ## License
 
-[LGPL-3.0-or-later](LICENSE)
+[LGPL-3.0-or-later](LICENSE).
