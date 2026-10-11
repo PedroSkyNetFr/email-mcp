@@ -177,7 +177,11 @@ export default function registerDraftTools(
       'copy first, then deletes the old UID only after the APPEND succeeds. If anything fails before ' +
       'APPEND, the old draft is left intact. Returns the NEW draft UID. ' +
       'Omitted fields (subject, body, recipients) keep the existing draft values. ' +
-      'attachments_keep defaults to ALL existing attachments; pass [] to drop them all.',
+      'attachments_keep defaults to ALL existing attachments; pass [] to drop them all. ' +
+      'Never adds the account signature implicitly (signature_default does not apply here): a new ' +
+      'body replaces the old one as given, and an omitted body is kept as is — with its signature ' +
+      'and inline (cid) images if it had them. Pass append_signature: true with a new body to ' +
+      'sign it.',
     {
       account: z.string().describe('Account name from list_accounts'),
       draft_id: z
@@ -218,6 +222,15 @@ export default function registerDraftTools(
         .describe(
           'Filenames to drop from the existing draft (subtracted from attachments_keep set)',
         ),
+      append_signature: z
+        .boolean()
+        .optional()
+        .describe(
+          "Append the account's configured signature (signature_path) below the NEW body, with " +
+            'its images embedded inline (cid). Forces HTML. Default false — unlike save_draft, ' +
+            'the account signature_default is NOT applied. Ignored (with a warning) when body ' +
+            'is omitted, since the kept body already carries its signature if it had one.',
+        ),
     },
     { readOnlyHint: false, destructiveHint: true },
     async ({
@@ -234,6 +247,7 @@ export default function registerDraftTools(
       attachments_keep: attachmentsKeep,
       attachments_add: attachmentsAdd,
       attachments_remove: attachmentsRemove,
+      append_signature: appendSignature,
     }) => {
       try {
         const result = await imapService.updateDraft(account, draftId, {
@@ -248,6 +262,7 @@ export default function registerDraftTools(
           attachmentsKeep,
           attachmentsAdd: attachmentsAdd?.map(adaptAttachmentInput),
           attachmentsRemove,
+          appendSignature,
         });
 
         await audit.log(

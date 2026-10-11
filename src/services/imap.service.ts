@@ -2550,6 +2550,13 @@ export default class ImapService {
       attachmentsKeep?: string[];
       attachmentsAdd?: AttachmentInput[];
       attachmentsRemove?: string[];
+      /**
+       * Ajoute la signature du compte sous le NOUVEAU corps (`body`). Jamais
+       * implicite : contrairement à save_draft, `signature_default` ne s'applique
+       * pas ici. Sans `body`, ignoré (avec avertissement) : le corps hérité garde
+       * la signature qu'il a déjà, ou n'en a pas.
+       */
+      appendSignature?: boolean;
     },
   ): Promise<{
     id: number;
@@ -2560,6 +2567,7 @@ export default class ImapService {
   }> {
     const warnings: string[] = [];
     const draftId = ImapService.toUid(draftIdInput, 'draft');
+    const account = this.connections.getAccount(accountName);
 
     // Fetch the existing draft so we know its current state.
     const { email: existing, mailbox: draftsPath } = await this.fetchDraft(
@@ -2608,16 +2616,73 @@ export default class ImapService {
       added = result.resolved;
     }
 
-    const allAttachments = [...kept, ...added];
+    // Source brute (non plafonnée) du brouillon, analysée en GARDANT les liens
+    // cid: — getEmail les remplace par des URI data:, ce qui détachait les
+    // images inline (logo de signature…) de leur pièce et les perdait à la
+    // réécriture. On en tire le HTML hérité et les images inline à reporter.
+    const parsedRaw = await simpleParser(
+      await this.fetchDraftRaw(accountName, draftId, draftsPath),
+      { keepCidLinks: true },
+    );
+    const inheritedHtml =
+      typeof parsedRaw.html === 'string' && parsedRaw.html.trim() !== ''
+        ? parsedRaw.html
+        : existing.bodyHtml;
 
     // Merge: omitted fields keep the existing draft's value.
-    const html = options.html ?? !!existing.bodyHtml;
-    const body = options.body ?? (html ? (existing.bodyHtml ?? '') : (existing.bodyText ?? ''));
+    let html = options.html ?? !!existing.bodyHtml;
+    let body = options.body ?? (html ? (inheritedHtml ?? '') : (existing.bodyText ?? ''));
     const subject = options.subject ?? existing.subject;
     const to = options.to ?? existing.to.map((a) => a.address);
     const cc = options.cc ?? existing.cc?.map((a) => a.address);
     const bcc = options.bcc ?? existing.bcc?.map((a) => a.address);
     const inReplyTo = options.inReplyTo ?? existing.inReplyTo;
+
+    // Signature : uniquement sur demande explicite ET sous un nouveau corps.
+    // Sous un corps hérité, elle ferait doublon avec celle qu'il contient déjà.
+    let signatureAttachments: ResolvedAttachment[] = [];
+    if (options.appendSignature === true) {
+      if (options.body === undefined) {
+        warnings.push(
+          'append_signature ignored: no new body was given, so the existing body is kept as is ' +
+            '(with its signature if it already had one).',
+        );
+      } else {
+        const signed = await applyAccountSignature(account, { body, html }, true);
+        body = signed.body;
+        html = signed.html;
+        signatureAttachments = signed.attachments;
+      }
+    }
+
+    // Images inline de l'ancien brouillon : reportées seulement si le corps
+    // final les référence encore (sinon pièce orpheline), et sans doublon avec
+    // celles qu'apportent la signature ou attachments_add (même cid).
+    const freshCids = new Set(
+      [...added, ...signatureAttachments]
+        .map((a) => a.cid?.toLowerCase())
+        .filter((c): c is string => !!c),
+    );
+    const referencedCids = new Set(
+      html ? extractCidReferences(body).map((c) => c.toLowerCase()) : [],
+    );
+    const carriedInline: ResolvedAttachment[] = parsedRaw.attachments
+      .filter(
+        (a) =>
+          !!a.cid &&
+          a.contentDisposition === 'inline' &&
+          referencedCids.has(a.cid.toLowerCase()) &&
+          !freshCids.has(a.cid.toLowerCase()),
+      )
+      .map((a) => ({
+        filename: a.filename ?? a.cid ?? 'inline',
+        content: a.content,
+        contentType: a.contentType,
+        cid: a.cid,
+        contentDisposition: 'inline' as const,
+      }));
+
+    const allAttachments = [...kept, ...carriedInline, ...added, ...signatureAttachments];
 
     // Inline images: attachments carrying a `cid` are genuinely embedded as
     // multipart/related (see saveDraft → MailComposer). We therefore only warn
@@ -2644,6 +2709,9 @@ export default class ImapService {
       html,
       inReplyTo,
       attachments: allAttachments,
+      // Explicite : sans ce false, saveDraft appliquerait signature_default et
+      // ajouterait la signature du compte à chaque mise à jour.
+      appendSignature: false,
     });
 
     // Only after confirmed APPEND, delete the old UID.

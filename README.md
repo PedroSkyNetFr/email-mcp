@@ -1337,6 +1337,13 @@ and `save_draft`, and resolves with three-state semantics:
 - omitted → use the account's `signature_default` (so `signature_default = true`
   appends the signature on **every** message, sent, replied, forwarded or drafted).
 
+`update_draft` is the exception: it never signs implicitly — `signature_default`
+does not apply, so rewriting a draft cannot stack a second signature. A new
+`body` replaces the old one exactly as given; an omitted `body` is kept as is,
+with its signature and inline (`cid`) images if it had them. Pass
+`append_signature: true` together with a new `body` to sign it (ignored, with a
+warning, when `body` is omitted). Same contract on IMAP and Graph accounts.
+
 ```jsonc
 // signature_default = true → no flag needed
 { "account": "work", "to": ["x@y.com"], "subject": "Hello", "body": "<p>Hello,</p>" }

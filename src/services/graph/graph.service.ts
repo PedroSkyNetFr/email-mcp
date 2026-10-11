@@ -90,6 +90,8 @@ interface GraphAttachment {
   contentType?: string;
   size?: number;
   contentBytes?: string;
+  contentId?: string;
+  isInline?: boolean;
 }
 
 /** Fields needed to build an EmailMeta — kept narrow to limit payload size. */
@@ -868,6 +870,12 @@ export default class GraphService {
       bcc?: string[];
       attachmentsAdd?: AttachmentInput[];
       attachmentsRemove?: string[];
+      /**
+       * Même contrat que sur IMAP : signature ajoutée sous le NOUVEAU corps,
+       * uniquement sur demande explicite (jamais via signature_default) ;
+       * ignorée avec avertissement sans `body`.
+       */
+      appendSignature?: boolean;
     },
   ): Promise<{
     id: number | string;
@@ -888,8 +896,39 @@ export default class GraphService {
 
     const patch: Record<string, unknown> = {};
     if (options.subject !== undefined) patch.subject = options.subject;
+
+    // Corps : remplacé seulement s'il est fourni. Sans `body`, Graph ne touche
+    // pas au corps existant — signature et images inline comprises.
+    let newContent: string | undefined;
+    let signatureAttachments: ResolvedAttachment[] = [];
     if (options.body !== undefined) {
-      patch.body = { contentType: options.html ? 'HTML' : 'Text', content: options.body };
+      // `html` omis : hériter du type du brouillon existant, comme sur IMAP
+      // (auparavant un brouillon HTML repassait en texte brut).
+      let { html } = options;
+      if (html === undefined) {
+        const current = await client.request<{ body?: { contentType?: string } }>(
+          'GET',
+          `/me/messages/${id}?$select=body`,
+        );
+        html = current.body?.contentType?.toLowerCase() === 'html';
+      }
+      newContent = options.body;
+      if (options.appendSignature === true) {
+        const signed = await applyAccountSignature(
+          this.getAccount(accountName),
+          { body: newContent, html },
+          true,
+        );
+        newContent = signed.body;
+        html = signed.html;
+        signatureAttachments = signed.attachments;
+      }
+      patch.body = { contentType: html ? 'HTML' : 'Text', content: newContent };
+    } else if (options.appendSignature === true) {
+      warnings.push(
+        'append_signature ignored: no new body was given, so the existing body is kept as is ' +
+          '(with its signature if it already had one).',
+      );
     }
     if (options.to) patch.toRecipients = recipients(options.to);
     if (options.cc) patch.ccRecipients = recipients(options.cc);
@@ -897,6 +936,40 @@ export default class GraphService {
 
     if (Object.keys(patch).length > 0) {
       await client.request('PATCH', `/me/messages/${id}`, patch);
+    }
+
+    // Nouveau corps : les images inline (cid) qu'il ne référence plus sont
+    // orphelines, et celles que la signature réapporte feraient doublon. On les
+    // retire, comme le fait la réécriture IMAP.
+    if (newContent !== undefined) {
+      const referenced = new Set(
+        [...newContent.matchAll(/cid:([^"'\s>)]+)/gi)].map((m) => m[1].toLowerCase()),
+      );
+      const fresh = new Set(signatureAttachments.map((a) => a.cid?.toLowerCase()));
+      const existingInline = await client.collect<GraphAttachment>(
+        // `contentId` n'existe que sur le type dérivé fileAttachment : le
+        // sélectionner sans transtypage fait échouer la requête (400).
+        `/me/messages/${id}/attachments?$select=id,name,isInline,microsoft.graph.fileAttachment/contentId`,
+      );
+      const stale = existingInline.filter((a) => {
+        const cid = a.contentId?.replace(/^<|>$/g, '').toLowerCase();
+        return !!a.isInline && !!cid && (!referenced.has(cid) || fresh.has(cid));
+      });
+      /* eslint-disable no-restricted-syntax, no-await-in-loop -- sequential: Graph throttles bursts */
+      for (const attachment of stale) {
+        await client.request('DELETE', `/me/messages/${id}/attachments/${attachment.id}`);
+      }
+      for (const attachment of signatureAttachments) {
+        await client.request('POST', `/me/messages/${id}/attachments`, {
+          '@odata.type': '#microsoft.graph.fileAttachment',
+          name: attachment.filename,
+          contentType: attachment.contentType,
+          contentBytes: attachment.content.toString('base64'),
+          isInline: true,
+          contentId: attachment.cid,
+        });
+      }
+      /* eslint-enable no-restricted-syntax, no-await-in-loop */
     }
 
     // Attachments are separate resources on Graph: removals and additions are
