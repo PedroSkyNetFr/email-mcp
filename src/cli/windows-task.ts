@@ -67,7 +67,13 @@ export function buildTaskXml(options: {
   start: Date;
 }): string {
   const [program, ...args] = options.commandLine;
-  const conhost = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'conhost.exe');
+  // Chemin Windows quel que soit l'OS d'exécution : la tâche ne tourne que sous
+  // Windows, et la CI Linux doit produire le même XML.
+  const conhost = path.win32.join(
+    process.env.SystemRoot ?? 'C:\\Windows',
+    'System32',
+    'conhost.exe',
+  );
   const [command, commandArgs] =
     options.logonType === 'InteractiveToken'
       ? [conhost, ['--headless', program, ...args]]
