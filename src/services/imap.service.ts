@@ -3500,31 +3500,24 @@ export default class ImapService {
     try {
       const icsContents: string[] = [];
 
-      // Fetch body structure
-      for await (const msg of client.fetch(
-        emailId,
-        { uid: true, bodyStructure: true },
-        { uid: true },
-      )) {
-        const structure = (msg as unknown as Record<string, unknown>).bodyStructure;
-        const parts = this.findCalendarParts(structure);
+      // Lire la structure d'abord, et terminer cette commande avant d'en lancer
+      // une autre : un fetch imbriqué dans l'itération d'un autre fetch bloque
+      // imapflow (la commande interne attend la fin de l'externe).
+      const msg = await client.fetchOne(emailId, { uid: true, bodyStructure: true }, { uid: true });
+      if (!msg) return icsContents;
+      // Une partie à la fois text/calendar et jointe en .ics n'est lue qu'une fois.
+      const parts = [...new Set(this.findCalendarParts(msg.bodyStructure))];
 
-        // Fetch each calendar part
-        for (const partId of parts) {
-          for await (const partMsg of client.fetch(
-            emailId,
-            { uid: true, bodyParts: [partId] },
-            { uid: true },
-          )) {
-            const bodyParts = (partMsg as unknown as Record<string, unknown>).bodyParts as
-              | Map<string, Buffer>
-              | undefined;
-            if (bodyParts) {
-              bodyParts.forEach((buf) => {
-                icsContents.push(buf.toString('utf-8'));
-              });
-            }
+      // download() décode le transfert (base64, quoted-printable) : bodyParts
+      // renvoyait la partie encodée, illisible pour node-ical.
+      for (const partId of parts) {
+        const downloadResult = await client.download(emailId, partId, { uid: true });
+        if (downloadResult?.content) {
+          const chunks: Buffer[] = [];
+          for await (const chunk of downloadResult.content) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
           }
+          if (chunks.length > 0) icsContents.push(Buffer.concat(chunks).toString('utf-8'));
         }
       }
 
@@ -3547,8 +3540,9 @@ export default class ImapService {
     const subtype = (s.subtype as string | undefined)?.toLowerCase() ?? '';
     const disposition = (s.disposition as string | undefined)?.toLowerCase() ?? '';
 
-    // Check for text/calendar part
-    if (type === 'text' && subtype === 'calendar') {
+    // Partie text/calendar : imapflow donne le type complet (« text/calendar »)
+    // dans `type`, sans `subtype` ; la forme découpée reste acceptée.
+    if (type === 'text/calendar' || (type === 'text' && subtype === 'calendar')) {
       const partId = s.part as string | undefined;
       if (partId) parts.push(partId);
       else if (prefix) parts.push(prefix);

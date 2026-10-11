@@ -1480,6 +1480,66 @@ describe('ImapService', () => {
   // saveAttachmentToDisk — direct-to-disk, no base64 hop (PR 4)
   // -----------------------------------------------------------------------
 
+  describe('getCalendarParts', () => {
+    async function* asyncFrom(chunks: Buffer[]): AsyncGenerator<Buffer> {
+      for (const c of chunks) yield c;
+    }
+
+    // Invitation type Outlook : partie text/calendar dans le multipart/alternative,
+    // plus un invite.ics joint. imapflow donne le type complet dans `type`.
+    const inviteStructure = {
+      type: 'multipart/mixed',
+      childNodes: [
+        {
+          type: 'multipart/alternative',
+          part: '1',
+          childNodes: [
+            { type: 'text/plain', part: '1.1' },
+            { type: 'text/calendar', part: '1.2', encoding: 'base64' },
+          ],
+        },
+        {
+          type: 'application/ics',
+          part: '2',
+          disposition: 'attachment',
+          dispositionParameters: { filename: 'invite.ics' },
+        },
+      ],
+    };
+    const ics =
+      'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:Réunion\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n';
+
+    it('finds an inline text/calendar part and the .ics attachment, decoded', async () => {
+      const withMethods = client as unknown as {
+        fetchOne: ReturnType<typeof vi.fn>;
+        download: ReturnType<typeof vi.fn>;
+      };
+      withMethods.fetchOne = vi.fn().mockResolvedValue({ uid: 7, bodyStructure: inviteStructure });
+      // download() rend le contenu décodé : c'est lui qui retire le base64.
+      withMethods.download = vi
+        .fn()
+        .mockImplementation(async () => ({ content: asyncFrom([Buffer.from(ics, 'utf-8')]) }));
+
+      const result = await service.getCalendarParts('test', 'INBOX', '7');
+
+      expect(withMethods.download).toHaveBeenCalledTimes(2);
+      expect(withMethods.download).toHaveBeenCalledWith('7', '1.2', { uid: true });
+      expect(withMethods.download).toHaveBeenCalledWith('7', '2', { uid: true });
+      expect(result).toEqual([ics, ics]);
+      // Aucun fetch imbriqué : c'est ce qui bloquait imapflow.
+      expect(client.fetch).not.toHaveBeenCalled();
+    });
+
+    it('returns nothing for a message without calendar parts', async () => {
+      (client as unknown as { fetchOne: ReturnType<typeof vi.fn> }).fetchOne = vi
+        .fn()
+        .mockResolvedValue({ uid: 8, bodyStructure: { type: 'text/plain', part: '1' } });
+
+      expect(await service.getCalendarParts('test', 'INBOX', '8')).toEqual([]);
+      expect(client.download).not.toHaveBeenCalled();
+    });
+  });
+
   describe('saveAttachmentToDisk', () => {
     // Minimal bodyStructure with one attachment part — mirrors the shape
     // imapflow produces.
