@@ -1311,6 +1311,33 @@ describe('ImapService', () => {
       }
     });
 
+    it('fails and leaves no empty file when the server returns no data for the part', async () => {
+      // imapflow 2 termine le flux vide sans erreur quand le serveur renvoie
+      // la section vide (cas observé avec GreenMail sur un FETCH partiel).
+      const { mkdtempSync, rmSync, existsSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const tmp = mkdtempSync(join(tmpdir(), 'save-att-'));
+      try {
+        primeClientForDownload(client, Buffer.alloc(0));
+
+        await expect(
+          service.saveAttachmentToDisk('test', '42', 'INBOX', 'lease.pdf', tmp),
+        ).rejects.toThrow(/returned no data for MIME part 2/);
+        expect(existsSync(join(tmp, 'lease.pdf'))).toBe(false);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('downloadAttachment fails instead of returning an empty attachment', async () => {
+      primeClientForDownload(client, Buffer.alloc(0));
+
+      await expect(service.downloadAttachment('test', '42', 'INBOX', 'lease.pdf')).rejects.toThrow(
+        /returned no data for MIME part 2/,
+      );
+    });
+
     it('auto-suffixes when target exists and overwrite=false', async () => {
       const { mkdtempSync, rmSync, writeFileSync, readFileSync } = await import('node:fs');
       const { tmpdir } = await import('node:os');

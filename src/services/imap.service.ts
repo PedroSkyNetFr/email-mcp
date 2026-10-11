@@ -2720,6 +2720,15 @@ export default class ImapService {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       }
       const content = Buffer.concat(chunks);
+      // imapflow 2 redemande une section rendue vide, puis termine le flux
+      // vide sans erreur si le serveur persiste (imapflow 1 ne renvoyait
+      // alors aucun contenu, d'où l'erreur ci-dessus). Une pièce annoncée non
+      // vide qui arrive vide est un échec, pas un fichier de 0 octet.
+      if (content.length === 0 && attachment.size > 0) {
+        throw new Error(
+          `Failed to download attachment "${filename}": the server returned no data for MIME part ${partNumber}`,
+        );
+      }
 
       return {
         filename: attachment.filename,
@@ -3518,7 +3527,7 @@ export default class ImapService {
     overwrite = false,
   ): Promise<AttachmentSaveResult> {
     const { createWriteStream } = await import('node:fs');
-    const { mkdir, stat } = await import('node:fs/promises');
+    const { mkdir, stat, unlink } = await import('node:fs/promises');
     const { dirname, join } = await import('node:path');
     const { pipeline } = await import('node:stream/promises');
 
@@ -3583,6 +3592,15 @@ export default class ImapService {
       await pipeline(downloadResult.content, ws);
 
       const written = await stat(finalPath);
+      // Même garde que downloadAttachment : imapflow 2 peut terminer le flux
+      // vide sans erreur. On retire le fichier vide plutôt que de le laisser
+      // passer pour la pièce jointe.
+      if (written.size === 0 && attachment.size > 0) {
+        await unlink(finalPath).catch(() => {});
+        throw new Error(
+          `Failed to download attachment "${filename}": the server returned no data for MIME part ${partNumber}`,
+        );
+      }
       return {
         path: finalPath,
         size: written.size,
