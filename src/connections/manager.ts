@@ -8,7 +8,7 @@
  */
 
 import { ImapFlow } from 'imapflow';
-import type { Transporter } from 'nodemailer';
+import type { Transporter, TransportOptions } from 'nodemailer';
 import nodemailer from 'nodemailer';
 import { mcpLog } from '../logging.js';
 
@@ -193,7 +193,7 @@ export default class ConnectionManager implements IConnectionManager {
   private static buildSmtpTransportOptions(
     account: AccountConfig,
     auth: SmtpAuth,
-  ): nodemailer.TransportOptions {
+  ): TransportOptions {
     const pool = account.smtp.pool ?? {
       enabled: true,
       maxConnections: 1,
@@ -217,7 +217,7 @@ export default class ConnectionManager implements IConnectionManager {
             maxMessages: pool.maxMessages,
           }
         : {}),
-    } as nodemailer.TransportOptions;
+    } as TransportOptions;
   }
 
   async getSmtpTransport(
@@ -305,33 +305,33 @@ export default class ConnectionManager implements IConnectionManager {
         logger: false,
       });
       await client.connect();
+      // Référence non nullable pour la fermeture `countMessages` ci-dessous
+      // (TypeScript ne propage pas le rétrécissement de `client` dans un callback).
+      const connected = client;
 
-      const mailboxes = await client.list();
-      let messageCount = 0;
-      try {
-        const inbox = await client.status('INBOX', {
-          messages: true,
-          unseen: true,
-        });
-        messageCount = inbox.messages ?? 0;
-      } catch {
-        // INBOX may not exist (e.g. Google Workspace uses "All Mail")
-        if (mailboxes.length > 0) {
-          try {
-            const first = await client.status(mailboxes[0].path, {
-              messages: true,
-            });
-            messageCount = first.messages ?? 0;
-          } catch {
-            /* ignore — connection still works */
-          }
+      const mailboxes = await connected.list();
+      // imapflow distingue deux échecs de STATUS : un dossier absent lève une
+      // erreur `NotFound` (ex. Google Workspace sans INBOX, qui utilise « All
+      // Mail »), un refus du serveur sur un dossier existant renvoie `false`.
+      // Les deux mènent au même repli : compter le premier dossier listé.
+      // Le compteur reste indicatif : la connexion, elle, fonctionne.
+      const countMessages = async (path: string): Promise<number | undefined> => {
+        try {
+          const status = await connected.status(path, { messages: true });
+          return status === false ? undefined : (status.messages ?? 0);
+        } catch {
+          return undefined;
         }
+      };
+      let messageCount = await countMessages('INBOX');
+      if (messageCount === undefined && mailboxes.length > 0) {
+        messageCount = await countMessages(mailboxes[0].path);
       }
 
       return {
         success: true,
         details: {
-          messages: messageCount,
+          messages: messageCount ?? 0,
           folders: mailboxes.length,
         },
       };

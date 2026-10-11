@@ -105,6 +105,28 @@ describe('ImapService', () => {
       });
       expect(client.status).toHaveBeenCalledTimes(2);
     });
+
+    it('keeps a folder listed with zero counts when STATUS resolves false', async () => {
+      // imapflow renvoie `false` (sans rejeter) quand le serveur refuse STATUS
+      // sur un dossier existant : le dossier doit rester listé.
+      client.list.mockResolvedValue([
+        { name: 'INBOX', path: 'INBOX', specialUse: '\\Inbox' },
+        { name: 'Shared', path: 'Shared' },
+      ]);
+      client.status.mockResolvedValueOnce({ messages: 10, unseen: 3 }).mockResolvedValueOnce(false);
+
+      const result = await service.listMailboxes('test');
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toMatchObject({ path: 'INBOX', totalMessages: 10, unseenMessages: 3 });
+      expect(result[1]).toEqual({
+        name: 'Shared',
+        path: 'Shared',
+        specialUse: undefined,
+        totalMessages: 0,
+        unseenMessages: 0,
+      });
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -370,6 +392,35 @@ describe('ImapService', () => {
       expect(result.searchStatus?.kind).toBe('connection_error');
       expect(result.searchStatus?.message).toMatch(/socket hang up/);
       expect(result.total).toBe(0);
+    });
+
+    it('searchEmails: a query imapflow refuses locally surfaces as an input error, not connection_error', async () => {
+      // imapflow 2 rejette search() avec un code InvalidSearchQuery (clé
+      // inconnue, mot-clé non atomique…) avant tout envoi au serveur.
+      const refusal = Object.assign(new Error('Bad label is not a valid keyword'), {
+        code: 'InvalidSearchQuery',
+      });
+      client.search.mockRejectedValueOnce(refusal);
+
+      await expect(service.searchEmails('test', 'anything', {})).rejects.toThrow(
+        /Invalid IMAP search query: Bad label is not a valid keyword/,
+      );
+    });
+
+    it('searchEmails: a query refused on the EPHEMERAL connection is an input error too', async () => {
+      client.mailbox = { exists: 50_000 };
+      const ephemeral = createMockImapClient();
+      ephemeral.search.mockRejectedValueOnce(
+        Object.assign(new Error('The "recent" search key does not exist in IMAP4rev2'), {
+          code: 'MissingServerExtension',
+        }),
+      );
+      connections.createEphemeralImapClient.mockResolvedValue(ephemeral);
+
+      await expect(service.searchEmails('test', 'needle', {})).rejects.toThrow(
+        /Invalid IMAP search query: .*IMAP4rev2/,
+      );
+      expect(ephemeral.close).toHaveBeenCalled();
     });
 
     it('listEmails: client.search → false is flagged searchFailed, not a clean zero', async () => {
@@ -1258,6 +1309,33 @@ describe('ImapService', () => {
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
+    });
+
+    it('fails and leaves no empty file when the server returns no data for the part', async () => {
+      // imapflow 2 termine le flux vide sans erreur quand le serveur renvoie
+      // la section vide (cas observé avec GreenMail sur un FETCH partiel).
+      const { mkdtempSync, rmSync, existsSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const tmp = mkdtempSync(join(tmpdir(), 'save-att-'));
+      try {
+        primeClientForDownload(client, Buffer.alloc(0));
+
+        await expect(
+          service.saveAttachmentToDisk('test', '42', 'INBOX', 'lease.pdf', tmp),
+        ).rejects.toThrow(/returned no data for MIME part 2/);
+        expect(existsSync(join(tmp, 'lease.pdf'))).toBe(false);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('downloadAttachment fails instead of returning an empty attachment', async () => {
+      primeClientForDownload(client, Buffer.alloc(0));
+
+      await expect(service.downloadAttachment('test', '42', 'INBOX', 'lease.pdf')).rejects.toThrow(
+        /returned no data for MIME part 2/,
+      );
     });
 
     it('auto-suffixes when target exists and overwrite=false', async () => {

@@ -4,9 +4,9 @@
  * No MCP dependency — fully unit-testable.
  */
 
-import type { ImapFlow } from 'imapflow';
+import type { ImapFlow, ImapFlowErrorCode } from 'imapflow';
 import { simpleParser } from 'mailparser';
-import MailComposer from 'nodemailer/lib/mail-composer/index.js';
+import MailComposer from 'nodemailer/lib/mail-composer';
 import type { IConnectionManager } from '../connections/types.js';
 import { sanitizeMailboxName } from '../safety/validation.js';
 import type {
@@ -364,11 +364,35 @@ export function findMimePartByFilename(
 }
 
 /**
+ * Codes d'erreur par lesquels imapflow (2.x) refuse LOCALEMENT une requête
+ * SEARCH avant de l'envoyer : clé inconnue, opérande NOT/OR vide, mot-clé qui
+ * n'est pas un atome IMAP, clé absente d'IMAP4rev2 (`recent`, `new`, `old`).
+ * imapflow 1.x ignorait ces critères (ce qui élargissait la recherche) ou les
+ * laissait échouer côté serveur ; imapflow 2 rejette la promesse de `search()`.
+ */
+const SEARCH_QUERY_REFUSAL_CODES: ReadonlySet<string> = new Set<ImapFlowErrorCode>([
+  'InvalidSearchQuery',
+  'MissingServerExtension',
+]);
+
+/**
+ * Une requête refusée par imapflow n'est ni un échec de connexion ni un
+ * résultat vide : c'est une erreur de saisie, déterministe — la relancer ou la
+ * restreindre ne change rien. On la remonte telle quelle (message d'imapflow)
+ * plutôt que de l'étiqueter `connection_error`.
+ */
+function isSearchQueryRefusal(err: unknown): err is Error {
+  if (!(err instanceof Error)) return false;
+  const { code } = err as Error & { code?: unknown };
+  return typeof code === 'string' && SEARCH_QUERY_REFUSAL_CODES.has(code);
+}
+
+/**
  * Parse a value that may be an IMAP envelope Date header (RFC-2822 string,
  * Date object, etc.) into an ISO-8601 string. Returns the fallback when the
  * input is missing or malformed. Never throws.
  */
-function safeIsoDate(raw: unknown, fallback?: string): string {
+export function safeIsoDate(raw: unknown, fallback?: string): string {
   if (raw == null) return fallback ?? new Date().toISOString();
   const d = raw instanceof Date ? raw : new Date(raw as string);
   if (Number.isNaN(d.getTime())) return fallback ?? new Date().toISOString();
@@ -630,6 +654,10 @@ export default class ImapService {
    * rejects instead. Both must be classified as a failed search so callers
    * never coerce `false` into a clean `total:0` (the silent false-negative).
    *
+   * Exception (imapflow 2) : une requête qu'imapflow refuse avant tout envoi
+   * (voir `isSearchQueryRefusal`) est relancée comme une `Error` ordinaire —
+   * c'est une erreur de saisie, pas une recherche échouée ni une panne réseau.
+   *
    * The thread-reconstruction searches in `getThread` are an intentional
    * documented exception — best-effort, loop-tolerant; a failed header search
    * there degrades to a partial thread, never a false "email lost" — so they
@@ -644,6 +672,9 @@ export default class ImapService {
       if (Array.isArray(result)) return { ok: true, uids: result };
       return { ok: false, status: searchFailedStatus() };
     } catch (err) {
+      if (isSearchQueryRefusal(err)) {
+        throw new Error(`Invalid IMAP search query: ${err.message}`, { cause: err });
+      }
       return { ok: false, status: connectionErrorStatus(err) };
     }
   }
@@ -781,6 +812,9 @@ export default class ImapService {
       }
       return raced;
     } catch (err) {
+      // Requête refusée par imapflow (relancée par runSearch) : erreur de
+      // saisie, pas une panne de connexion — on la laisse remonter.
+      if (err instanceof Error && isSearchQueryRefusal(err.cause)) throw err;
       return { ok: false, status: connectionErrorStatus(err) };
     } finally {
       if (timer) {
@@ -859,12 +893,16 @@ export default class ImapService {
           messages: true,
           unseen: true,
         });
+        // `false` : le serveur a refusé STATUS sur un dossier existant (droits,
+        // dossier partagé…). Même repli à zéro que pour un dossier \Noselect
+        // ci-dessous : le dossier reste listé, seuls ses compteurs manquent.
+        const counts = status === false ? undefined : status;
         return {
           name: mb.name,
           path: mb.path,
           specialUse: mb.specialUse ?? undefined,
-          totalMessages: status.messages ?? 0,
-          unseenMessages: status.unseen ?? 0,
+          totalMessages: counts?.messages ?? 0,
+          unseenMessages: counts?.unseen ?? 0,
         };
       }),
     );
@@ -2682,6 +2720,15 @@ export default class ImapService {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       }
       const content = Buffer.concat(chunks);
+      // imapflow 2 redemande une section rendue vide, puis termine le flux
+      // vide sans erreur si le serveur persiste (imapflow 1 ne renvoyait
+      // alors aucun contenu, d'où l'erreur ci-dessus). Une pièce annoncée non
+      // vide qui arrive vide est un échec, pas un fichier de 0 octet.
+      if (content.length === 0 && attachment.size > 0) {
+        throw new Error(
+          `Failed to download attachment "${filename}": the server returned no data for MIME part ${partNumber}`,
+        );
+      }
 
       return {
         filename: attachment.filename,
@@ -3480,7 +3527,7 @@ export default class ImapService {
     overwrite = false,
   ): Promise<AttachmentSaveResult> {
     const { createWriteStream } = await import('node:fs');
-    const { mkdir, stat } = await import('node:fs/promises');
+    const { mkdir, stat, unlink } = await import('node:fs/promises');
     const { dirname, join } = await import('node:path');
     const { pipeline } = await import('node:stream/promises');
 
@@ -3545,6 +3592,15 @@ export default class ImapService {
       await pipeline(downloadResult.content, ws);
 
       const written = await stat(finalPath);
+      // Même garde que downloadAttachment : imapflow 2 peut terminer le flux
+      // vide sans erreur. On retire le fichier vide plutôt que de le laisser
+      // passer pour la pièce jointe.
+      if (written.size === 0 && attachment.size > 0) {
+        await unlink(finalPath).catch(() => {});
+        throw new Error(
+          `Failed to download attachment "${filename}": the server returned no data for MIME part ${partNumber}`,
+        );
+      }
       return {
         path: finalPath,
         size: written.size,
