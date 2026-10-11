@@ -39,7 +39,10 @@ class CancelledError extends Error {
   }
 }
 
-function assertNotCancel<T>(value: T | symbol): asserts value is T {
+// Depuis @clack/prompts 1.8, les prompts renvoient `T | typeof CANCEL_SYMBOL`
+// (un `unique symbol`) : `T | symbol` laissait TypeScript inférer le symbole
+// dans `T`. `Exclude<T, symbol>` retire explicitement le cas « annulé ».
+function assertNotCancel<T>(value: T): asserts value is Exclude<T, symbol> {
   if (isCancel(value)) {
     cancel('Operation cancelled.');
     throw new CancelledError();

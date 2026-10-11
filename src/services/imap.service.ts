@@ -6,7 +6,7 @@
 
 import type { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
-import MailComposer from 'nodemailer/lib/mail-composer/index.js';
+import MailComposer from 'nodemailer/lib/mail-composer';
 import type { IConnectionManager } from '../connections/types.js';
 import { sanitizeMailboxName } from '../safety/validation.js';
 import type {
