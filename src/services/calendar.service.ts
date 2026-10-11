@@ -4,11 +4,12 @@
  * Extracts structured calendar events from ICS content using node-ical.
  */
 
+import type { CalendarComponent } from 'node-ical';
 import ical from 'node-ical';
 
 import type { CalendarEvent, EmailAddress } from '../types/index.js';
 
-type IcalComponent = ical.CalendarComponent;
+type IcalComponent = CalendarComponent;
 
 export default class CalendarService {
   /**
@@ -38,11 +39,11 @@ export default class CalendarService {
 
       events.push({
         uid: (event.uid as string) ?? '',
-        summary: (event.summary as string) ?? '(No title)',
-        description: event.description as string | undefined,
+        summary: CalendarService.paramText(event.summary) ?? '(No title)',
+        description: CalendarService.paramText(event.description),
         start: start ? start.toISOString() : '',
         end: end ? end.toISOString() : '',
-        location: event.location as string | undefined,
+        location: CalendarService.paramText(event.location),
         organizer,
         attendees,
         status: CalendarService.normalizeStatus(event.status as string | undefined),
@@ -84,6 +85,21 @@ export default class CalendarService {
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Texte d'une propriété iCalendar. node-ical renvoie la chaîne seule, ou
+   * `{ params, val }` dès que la propriété porte un paramètre : Outlook et
+   * Exchange écrivent `SUMMARY;LANGUAGE=fr-FR:...`, ce qui donnait un objet
+   * à la place du titre. Le type `ParameterValue` de node-ical 0.27 l'expose.
+   */
+  private static paramText(value: unknown): string | undefined {
+    if (typeof value === 'string') return value;
+    if (value && typeof value === 'object' && 'val' in value) {
+      const { val } = value;
+      return typeof val === 'string' ? val : undefined;
+    }
+    return undefined;
+  }
 
   private static parseOrganizer(organizer: unknown): EmailAddress | undefined {
     if (!organizer) return undefined;
