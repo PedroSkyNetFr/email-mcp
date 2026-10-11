@@ -22,9 +22,9 @@ RUN pnpm prune --prod
 FROM node:24-slim AS production
 
 LABEL org.opencontainers.image.title="email-mcp" \
-      org.opencontainers.image.description="IMAP/SMTP email MCP server — 47 tools, IMAP IDLE push, multi-account, AI triage" \
-      org.opencontainers.image.url="https://github.com/codefuturist/email-mcp" \
-      org.opencontainers.image.source="https://github.com/codefuturist/email-mcp" \
+      org.opencontainers.image.description="Email MCP server — IMAP/SMTP and Microsoft Graph, multi-account, IMAP IDLE watcher, AI triage" \
+      org.opencontainers.image.url="https://github.com/PedroSkyNetFr/email-mcp" \
+      org.opencontainers.image.source="https://github.com/PedroSkyNetFr/email-mcp" \
       org.opencontainers.image.licenses="LGPL-3.0-or-later" \
       org.opencontainers.image.vendor="codefuturist"
 

@@ -23,7 +23,7 @@ Thank you for your interest in contributing! This guide will help you get starte
 
 ### Prerequisites
 
-- **Node.js** >= 22.0.0
+- **Node.js** >= 24.0.0
 - **pnpm** (package manager)
 
 ### Commands
@@ -143,8 +143,10 @@ underneath you.
 8. Register it in `src/tools/register.ts` (read tools are always registered; write
    tools go inside the `if (!readOnly)` block) and add it to the mock list in
    `src/tools/register.test.ts`
-9. Add to the tools reference table in `README.md`, and keep the tool counts in the
-   section headings in sync
+9. Add it to the tools reference tables of **both** `README.md` and its French
+   translation `README.fr.md` (backend and read-only columns included), and keep
+   the tool counts in sync. The two READMEs share the same structure: a change to
+   one belongs in the other
 
 ## Pull Request Process
 
@@ -155,8 +157,8 @@ underneath you.
 
 ## Reporting Issues
 
-- Use [GitHub Issues](https://github.com/codefuturist/email-mcp/issues) for bugs and feature requests
-- Use [GitHub Discussions](https://github.com/codefuturist/email-mcp/discussions) for questions and ideas
+- Use [GitHub Issues](https://github.com/PedroSkyNetFr/email-mcp/issues) for bugs and feature requests
+- Use [GitHub Discussions](https://github.com/PedroSkyNetFr/email-mcp/discussions) for questions and ideas
 
 ## License
 

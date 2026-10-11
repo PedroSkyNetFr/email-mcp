@@ -60,7 +60,7 @@ representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement at
-the [GitHub Discussions](https://github.com/codefuturist/email-mcp/discussions).
+the [GitHub Discussions](https://github.com/PedroSkyNetFr/email-mcp/discussions).
 
 All complaints will be reviewed and investigated promptly and fairly.
 

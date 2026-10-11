@@ -10,7 +10,7 @@
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, please report them via [GitHub Security Advisories](https://github.com/codefuturist/email-mcp/security/advisories/new).
+Instead, please report them via [GitHub Security Advisories](https://github.com/PedroSkyNetFr/email-mcp/security/advisories/new).
 
 You should receive a response within 48 hours. If the issue is confirmed, a fix will be released as soon as possible.
 
@@ -39,7 +39,7 @@ Three features write mailbox data outside the mail server, in clear text:
 
 - Use app-specific passwords instead of your main account password
 - Enable OAuth2 authentication where supported (Gmail, Outlook)
-- Review the audit log at `~/.local/share/email-mcp/audit.jsonl`
+- Review the audit log at `~/.local/share/email-mcp/audit.log`
 - Use `read_only: true` in config if you only need read access
 - Keep the save allow-list as narrow as your workflow allows; add specific folders with `MAIL_ALLOWED_SAVE_DIRS` rather than setting `MAIL_ALLOW_ANY_SAVE_DIR=true`
 - Treat exported `.eml` files as mailbox copies — same storage and disposal rules

@@ -72,14 +72,24 @@
     "name": "codefuturist",
     "url": "https://github.com/codefuturist"
   },
+  "contributors": [
+    {
+      "name": "David Young",
+      "url": "https://github.com/wgs4"
+    },
+    {
+      "name": "PedroSkyNetFr",
+      "url": "https://github.com/PedroSkyNetFr"
+    }
+  ],
   "license": "LGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/codefuturist/email-mcp.git"
+    "url": "git+https://github.com/PedroSkyNetFr/email-mcp.git"
   },
-  "homepage": "https://github.com/codefuturist/email-mcp#readme",
+  "homepage": "https://github.com/PedroSkyNetFr/email-mcp#readme",
   "bugs": {
-    "url": "https://github.com/codefuturist/email-mcp/issues"
+    "url": "https://github.com/PedroSkyNetFr/email-mcp/issues"
   },
   "dependencies": {
     "@clack/prompts": "^1.8.1",
