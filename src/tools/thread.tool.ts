@@ -9,7 +9,6 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import type { IMailService } from '../services/mail-service.types.js';
-import type { BodyFormat } from '../utils/body-format.js';
 import { applyBodyFormat } from '../utils/body-format.js';
 
 export default function registerThreadTools(server: McpServer, imapService: IMailService): void {
@@ -99,7 +98,7 @@ export default function registerThreadTools(server: McpServer, imapService: IMai
             parts.push('(body omitted — use get_email to read this message)');
           } else {
             parts.push('');
-            parts.push(applyBodyFormat(email, format as BodyFormat, maxLength));
+            parts.push(applyBodyFormat(email, format, maxLength));
           }
 
           parts.push('');

@@ -15,7 +15,6 @@ import type {
   PaginatedResult,
   SearchStatus,
 } from '../types/index.js';
-import type { BodyFormat } from '../utils/body-format.js';
 import { applyBodyFormat } from '../utils/body-format.js';
 import {
   COVERAGE_NOTE,
@@ -436,7 +435,7 @@ export default function registerEmailsTools(
         }
 
         parts.push('', '--- Body ---', '');
-        parts.push(applyBodyFormat(email, format as BodyFormat, maxLength));
+        parts.push(applyBodyFormat(email, format, maxLength));
 
         if (markRead) {
           await imapService.setFlags(account, emailId, mailbox, 'read');
@@ -505,7 +504,7 @@ export default function registerEmailsTools(
           const from = email.from.name
             ? `${email.from.name} <${email.from.address}>`
             : email.from.address;
-          const body = applyBodyFormat(email, format as BodyFormat, maxLength);
+          const body = applyBodyFormat(email, format, maxLength);
           const attachLine =
             email.attachments.length > 0
               ? `📎 ${email.attachments.map((a) => a.filename).join(', ')}`

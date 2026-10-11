@@ -450,7 +450,7 @@ export async function saveConfig(
 ): Promise<void> {
   const dir = path.dirname(filePath);
   await fs.mkdir(dir, { recursive: true });
-  const toml = stringifyTOML(config as Record<string, unknown>);
+  const toml = stringifyTOML(config);
   await fs.writeFile(filePath, toml, 'utf-8');
 }
 

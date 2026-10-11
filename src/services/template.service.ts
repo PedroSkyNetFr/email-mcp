@@ -42,7 +42,7 @@ function validateTemplate(raw: Record<string, unknown>, filename: string): Email
     subject,
     body,
     variables,
-  } as EmailTemplate;
+  };
 }
 
 /**

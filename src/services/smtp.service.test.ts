@@ -94,7 +94,7 @@ describe('SmtpService', () => {
     connections = createMockConnectionManager(transport);
     rateLimiter = createMockRateLimiter(true);
     imapService = createMockImapService();
-    service = new SmtpService(connections, rateLimiter, imapService as unknown as ImapService);
+    service = new SmtpService(connections, rateLimiter, imapService);
   });
 
   describe('sendEmail', () => {
@@ -126,7 +126,7 @@ describe('SmtpService', () => {
 
     it('throws when rate limited', async () => {
       rateLimiter = createMockRateLimiter(false);
-      service = new SmtpService(connections, rateLimiter, imapService as unknown as ImapService);
+      service = new SmtpService(connections, rateLimiter, imapService);
 
       await expect(
         service.sendEmail('test', {
@@ -195,7 +195,7 @@ describe('SmtpService', () => {
         imap: { host: 'imap.gmail.com', port: 993, tls: true, starttls: false, verifySsl: true },
         smtp: { host: 'smtp.gmail.com', port: 465, tls: true, starttls: false, verifySsl: true },
       });
-      service = new SmtpService(connections, rateLimiter, imapService as unknown as ImapService);
+      service = new SmtpService(connections, rateLimiter, imapService);
 
       await service.sendEmail('test', {
         to: ['recipient@example.com'],
@@ -208,7 +208,7 @@ describe('SmtpService', () => {
 
     it('skips appendToSent when saveToSent is false', async () => {
       connections = createMockConnectionManager(transport, { saveToSent: false });
-      service = new SmtpService(connections, rateLimiter, imapService as unknown as ImapService);
+      service = new SmtpService(connections, rateLimiter, imapService);
 
       await service.sendEmail('test', {
         to: ['recipient@example.com'],
@@ -244,7 +244,7 @@ describe('SmtpService', () => {
         smtp: { host: 'smtp.gmail.com', port: 465, tls: true, starttls: false, verifySsl: true },
         gmailAutoSave: false,
       });
-      service = new SmtpService(connections, rateLimiter, imapService as unknown as ImapService);
+      service = new SmtpService(connections, rateLimiter, imapService);
 
       await service.sendEmail('test', {
         to: ['recipient@example.com'],
@@ -459,7 +459,7 @@ describe('SmtpService', () => {
           signaturePath: htmPath,
           signatureDefault: true,
         });
-        const svc = new SmtpService(conn, rateLimiter, imapService as unknown as ImapService);
+        const svc = new SmtpService(conn, rateLimiter, imapService);
 
         await svc.forwardEmail('test', { emailId: '42', to: ['fwd@example.com'], body: 'FYI' });
 

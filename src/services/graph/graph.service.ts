@@ -878,7 +878,7 @@ export default class GraphService {
     );
     return categories.map((category) => ({
       name: category.displayName,
-      strategy: 'keyword' as LabelInfo['strategy'],
+      strategy: 'keyword',
     }));
   }
 
@@ -1543,12 +1543,11 @@ export default class GraphService {
       // Un seul parcours par compte, filtres appliqués AVANT la coupe à
       // maxRows — l'ancienne boucle page par page de searchEmails aurait
       // relu toute la boîte à chaque page.
-      const gathered = await this.gather(
-        name,
-        searchText(query, searchOptions as GraphSearchOptions),
-        searchOptions as GraphSearchOptions,
-        { limit: remaining, deadline, withRecipients: true },
-      );
+      const gathered = await this.gather(name, searchText(query, searchOptions), searchOptions, {
+        limit: remaining,
+        deadline,
+        withRecipients: true,
+      });
       if (gathered.limited || gathered.matched.length > remaining) truncated = true;
       collected.push(
         ...gathered.matched.slice(0, remaining).map((item) => ({ ...item, account: name })),

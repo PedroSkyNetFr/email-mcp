@@ -27,7 +27,7 @@ export default class CalendarService {
     });
 
     Object.values(parsed).forEach((comp: IcalComponent | undefined) => {
-      if (!comp || comp.type !== 'VEVENT') return;
+      if (comp?.type !== 'VEVENT') return;
 
       const event = comp as unknown as Record<string, unknown>;
       const start = event.start as Date | undefined;

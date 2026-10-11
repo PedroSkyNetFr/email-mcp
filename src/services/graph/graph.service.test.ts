@@ -150,16 +150,16 @@ describe('GraphService — $filter ordering with $orderby=receivedDateTime', () 
   });
 
   // `from` n'atteint $filter que par listEmails (searchEmails l'envoie à $search).
-  it.each([
-    { from: 'a@b.test' },
-    { from: 'a@b.test', since: '7d', hasAttachment: true },
-  ])('listEmails keeps receivedDateTime first for %o', async (options) => {
-    const { client, service } = build();
+  it.each([{ from: 'a@b.test' }, { from: 'a@b.test', since: '7d', hasAttachment: true }])(
+    'listEmails keeps receivedDateTime first for %o',
+    async (options) => {
+      const { client, service } = build();
 
-    await service.listEmails('graph', options);
+      await service.listEmails('graph', options);
 
-    expectReceivedFirst(filterOf(client));
-  });
+      expectReceivedFirst(filterOf(client));
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -348,7 +348,7 @@ describe('GraphService — client-side filters across Graph pages', () => {
     const result = await service.listEmails('graph', {
       attachmentFilename: 'bail',
       cc: 'x',
-    } as Parameters<GraphService['listEmails']>[1]);
+    });
 
     expect(result.warning).toMatch(/IGNORED: cc, attachment_filename/);
   });

@@ -1189,7 +1189,7 @@ export default class ImapService {
 
     const lock = await client.getMailboxLock(mailbox);
     try {
-      const { criteria, postFilters, warnings } = buildSearchCriteria(options as SearchParams, {
+      const { criteria, postFilters, warnings } = buildSearchCriteria(options, {
         isGmail,
       });
 
@@ -2344,8 +2344,7 @@ export default class ImapService {
     function isSent(mb: unknown): mb is { specialUse: string; path: string } {
       if (typeof mb !== 'object' || mb === null) return false;
       if (!('specialUse' in mb) || !('path' in mb)) return false;
-      const r = mb as { specialUse: unknown; path: unknown };
-      return r.specialUse === '\\Sent' && typeof r.path === 'string';
+      return mb.specialUse === '\\Sent' && typeof mb.path === 'string';
     }
 
     const specialUse = mailboxes.find(isSent);
@@ -2365,7 +2364,7 @@ export default class ImapService {
     function hasPath(mb: unknown): mb is { path: string } {
       if (typeof mb !== 'object' || mb === null) return false;
       if (!('path' in mb)) return false;
-      return typeof (mb as { path: unknown }).path === 'string';
+      return typeof mb.path === 'string';
     }
 
     const paths = new Set(mailboxes.filter(hasPath).map((mb) => mb.path));

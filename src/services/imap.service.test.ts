@@ -594,7 +594,7 @@ describe('ImapService', () => {
       // imapflow collapses a server NO / swallowed socket-timeout / local
       // command failure all into `false` (never a reject). The pre-fix code
       // did `Array.isArray(false) ? r : []` → a clean, indistinguishable zero.
-      client.search.mockResolvedValueOnce(false as unknown as number[]);
+      client.search.mockResolvedValueOnce(false);
 
       const result = await service.searchEmails('test', 'Order #29804', {});
 
@@ -657,7 +657,7 @@ describe('ImapService', () => {
     });
 
     it('listEmails: client.search → false is flagged searchFailed, not a clean zero', async () => {
-      client.search.mockResolvedValueOnce(false as unknown as number[]);
+      client.search.mockResolvedValueOnce(false);
 
       const result = await service.listEmails('test', { pageSize: 10 });
 
@@ -669,7 +669,7 @@ describe('ImapService', () => {
     });
 
     it('extractContacts: a failed search throws SearchFailedError (batch UX, no carrier)', async () => {
-      client.search.mockResolvedValueOnce(false as unknown as number[]);
+      client.search.mockResolvedValueOnce(false);
 
       const err = await service.extractContacts('test', {}).catch((e: unknown) => e);
 
@@ -684,7 +684,7 @@ describe('ImapService', () => {
     });
 
     it('searchForExport: a failed search throws SearchFailedError (D2 REFINED — isError UX)', async () => {
-      client.search.mockResolvedValueOnce(false as unknown as number[]);
+      client.search.mockResolvedValueOnce(false);
 
       const err = await service
         .searchForExport(null, 'test', '', { maxRows: 100 })
@@ -1222,7 +1222,7 @@ describe('ImapService', () => {
       // zero participant (F1 one layer up).
       client.search
         .mockResolvedValueOnce([10]) // account-a uids
-        .mockResolvedValueOnce(false as unknown as number[]); // account-b FAILED
+        .mockResolvedValueOnce(false); // account-b FAILED
       client.fetch.mockReturnValueOnce(
         makeAsyncGen([makeMessage(10, 'A1', '2024-01-01T00:00:00Z', 'a@example.com')]),
       );

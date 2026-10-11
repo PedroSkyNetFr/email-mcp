@@ -147,7 +147,7 @@ export function createMailRouter(
 ): IMailService {
   const isGraphAccount = (name: string | undefined): boolean =>
     !!name && getAccount(name)?.backend === 'graph';
-  return routeByAccount(imapService, graphService, isGraphAccount) as unknown as IMailService;
+  return routeByAccount(imapService, graphService, isGraphAccount);
 }
 
 /**
@@ -162,5 +162,5 @@ export function createSendRouter(
 ): ISendService {
   const isGraphAccount = (name: string | undefined): boolean =>
     !!name && getAccount(name)?.backend === 'graph';
-  return routeByAccount(smtpService, graphSendService, isGraphAccount) as unknown as ISendService;
+  return routeByAccount(smtpService, graphSendService, isGraphAccount);
 }

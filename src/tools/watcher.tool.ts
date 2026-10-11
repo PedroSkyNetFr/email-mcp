@@ -11,7 +11,6 @@ import NotifierService from '../services/notifier.service.js';
 import { listPresets as listAllPresets } from '../services/presets.js';
 import type { SearchPresetRegistry } from '../services/search-presets.js';
 import type WatcherService from '../services/watcher.service.js';
-import type { AlertsConfig } from '../types/index.js';
 
 export default function registerWatcherTools(
   server: McpServer,
@@ -346,7 +345,7 @@ export function registerWatcherWriteTools(server: McpServer, hooksService: Hooks
         }
 
         // Apply runtime update
-        const updated = notifier.updateConfig(partial as Partial<AlertsConfig>);
+        const updated = notifier.updateConfig(partial);
 
         // Also update the in-memory hooks config alerts reference
         hooksConfig.alerts = { ...updated };
