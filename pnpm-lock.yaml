@@ -21,8 +21,8 @@ importers:
         specifier: ^3.9.38
         version: 3.9.38
       node-ical:
-        specifier: ^0.25.6
-        version: 0.25.6
+        specifier: ^0.27.3
+        version: 0.27.3
       nodemailer:
         specifier: ^10.1.0
         version: 10.1.0
@@ -487,10 +487,6 @@ packages:
 
   '@js-sdsl/ordered-map@4.4.2':
     resolution: {integrity: sha512-iUKgm52T8HOE/makSxjqoWhe95ZJA1/G1sYsGev2JDKUSS14KAgg1LHb+Ba+IPow0xflbnSkOsZcO08C7w1gYw==}
-
-  '@js-temporal/polyfill@0.5.1':
-    resolution: {integrity: sha512-hloP58zRVCRSpgDxmqCWJNlizAlUgJFqG2ypq79DCvyv9tHjRYMDOcPFjzfl/A1/YxDvRCZz8wvZvmapQnKwFQ==}
-    engines: {node: '>=12'}
 
   '@kwsites/file-exists@1.1.1':
     resolution: {integrity: sha512-m9/5YGR18lIwxSFDwfE3oA7bWuq9kdau6ugN4H2rJeyhFQZcG9AgSHkQtSD15a8WvTgfz9aikZMrKPHvbpqFiw==}
@@ -1589,6 +1585,7 @@ packages:
   eslint@9.39.2:
     resolution: {integrity: sha512-LEyamqS7W5HB3ujJyvi0HQK/dtVINZvd5mAAp9eT5S/ujByGjiZLCzPcHVzuXbpJDJF/cxwHlfceVUDZ2lnSTw==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'
@@ -2079,9 +2076,6 @@ packages:
     resolution: {integrity: sha512-qQKT4zQxXl8lLwBtHMWwaTcGfFOZviOJet3Oy/xmGk2gZH677CJM9EvtfdSkgWcATZhj/55JZ0rmy3myCT5lsA==}
     hasBin: true
 
-  jsbi@4.3.2:
-    resolution: {integrity: sha512-9fqMSQbhJykSeii05nxKl4m6Eqn2P6rOlYiS+C5Dr/HPIU/7yZxu5qzbs40tgaFORiw2Amd0mirjxatXYMkIew==}
-
   jsesc@3.1.0:
     resolution: {integrity: sha512-/sM3dO2FOzXjKQhJuo0Q173wf2KOo8t4I8vHy6lF9poUp7bKT0/NHE8fPX23PwfhnykfqnC2xRxOnVw5XuGIaA==}
     engines: {node: '>=6'}
@@ -2327,9 +2321,9 @@ packages:
     resolution: {integrity: sha512-pyFS63ptit/P5WqUkt+UUfe+4oevH+bFeIiPPdfb0pFeYEu/1ELnJu5l+5EcTKYL5M7zaAa7S8ddywgXypqKCw==}
     engines: {node: '>= 0.4'}
 
-  node-ical@0.25.6:
-    resolution: {integrity: sha512-Wo3GSBGYUNkcxOjHhevKTGa/+eB7ZwNLCq50h/eTX/YHSDZz1nT4KzXArO455CGHLD68gc5vw3nevqWQpOjjLQ==}
-    engines: {node: '>=18'}
+  node-ical@0.27.3:
+    resolution: {integrity: sha512-KT8DFQXcOlx4kXRUEr7XvEDa3SE7yury8ZKG6GB3JB20v9d0SKSSieThbXCI8kpTsyNeQkKqfJn/nbnmaRMpRw==}
+    engines: {node: '>=22'}
 
   node-releases@2.0.27:
     resolution: {integrity: sha512-nmh3lCkYZ3grZvqcCH+fjmQ7X+H0OeZgP40OierEaAptX4XofMh5kwNbWh7lBduUzCcV/8kZ+NDLCwm2iorIlA==}
@@ -2614,8 +2608,8 @@ packages:
     resolution: {integrity: sha512-nLTrUKm2UyiL7rlhapu/Zl45FwNgkZGaCpZbIHajDYgwlJCOzLSk+cIPAnsEqV955GjILJnKbdQC1nVPz+gAYQ==}
     engines: {node: '>= 18'}
 
-  rrule-temporal@1.6.0:
-    resolution: {integrity: sha512-tlhiNroletItRVdVP3knk92MCPNdFmPpehQMxf+jSo0CHZpmp1WUsvdVpg2iS++J9+O7/89J64BldN21kbcBqA==}
+  rrule-temporal@2.2.8:
+    resolution: {integrity: sha512-+wWUe0J02oMh1UWKIt1RTu2H0Cz+gP11O/iweK0MN2UP6JLGeepTUkbSBa90Hxq0W+ywSxM9IlJNouIUdMOwhg==}
 
   run-parallel@1.2.0:
     resolution: {integrity: sha512-5l4VyZR86LZ/lDxZTR6jqL8AFE2S0IFLMP26AbjsLVADxHdhB/c0GUsH+y39UfCi3dzz8OlQuPmnaJOMoDHQBA==}
@@ -2860,14 +2854,14 @@ packages:
   teex@1.0.1:
     resolution: {integrity: sha512-eYE6iEI62Ni1H8oIa7KlDU6uQBtqr4Eajni3wX7rpfXD8ysFx8z0+dri+KWEPWpBsxXfxu58x/0jvTVT1ekOSg==}
 
-  temporal-polyfill@0.3.2:
-    resolution: {integrity: sha512-TzHthD/heRK947GNiSu3Y5gSPpeUDH34+LESnfsq8bqpFhsB79HFBX8+Z834IVX68P3EUyRPZK5bL/1fh437Eg==}
-
-  temporal-spec@0.3.1:
-    resolution: {integrity: sha512-B4TUhezh9knfSIMwt7RVggApDRJZo73uZdj8AacL2mZ8RP5KtLianh2MXxL06GN9ESYiIsiuoLQhgVfwe55Yhw==}
+  temporal-polyfill@1.0.5:
+    resolution: {integrity: sha512-+H/mmY74i6wXCMcjIhGuSnODcyZnc4eois2myhOyX0UqRAKNXQY5m9iB1en5jQ/n4SXtjLXo1ElBI5bmn8tZwQ==}
 
   temporal-spec@1.0.1:
     resolution: {integrity: sha512-wxVoanmDeavXie1vu2JaQ3WIc3JZnWAOYFBsJyATaVsXsycKYUflGsyBmrRSnoCpZJpwPyr38VpgSUlQ8CbFxg==}
+
+  temporal-utils@1.0.3:
+    resolution: {integrity: sha512-9jbTSX3HvkOWvDpNpFzwX/d1mkCrgQgwLmVTOEiuocZGKHsrQJtttGZFmybJ2zYP5zCSZuU5ZyeS8+eOEPABiQ==}
 
   testcontainers@11.12.0:
     resolution: {integrity: sha512-VWtH+UQejVYYvb53ohEZRbx2naxyDvwO9lQ6A0VgmVE2Oh8r9EF09I+BfmrXpd9N9ntpzhao9di2yNwibSz5KA==}
@@ -3009,6 +3003,7 @@ packages:
 
   uuid@10.0.0:
     resolution: {integrity: sha512-8XkAphELsDnEGrDxUOHB3RGvXz6TeuYSGEZBOjtTtPm2lwhGBjLgOzLHB63IUWfBpNucQjND6d3AOudO+H3RWQ==}
+    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
   vary@1.1.2:
@@ -3538,10 +3533,6 @@ snapshots:
       '@jridgewell/sourcemap-codec': 1.5.5
 
   '@js-sdsl/ordered-map@4.4.2': {}
-
-  '@js-temporal/polyfill@0.5.1':
-    dependencies:
-      jsbi: 4.3.2
 
   '@kwsites/file-exists@1.1.1':
     dependencies:
@@ -5377,8 +5368,6 @@ snapshots:
     dependencies:
       argparse: 2.0.1
 
-  jsbi@4.3.2: {}
-
   jsesc@3.1.0: {}
 
   json-buffer@3.0.1: {}
@@ -5597,10 +5586,10 @@ snapshots:
       object.entries: 1.1.9
       semver: 6.3.1
 
-  node-ical@0.25.6:
+  node-ical@0.27.3:
     dependencies:
-      rrule-temporal: 1.6.0
-      temporal-polyfill: 0.3.2
+      rrule-temporal: 2.2.8
+      temporal-polyfill: 1.0.5
 
   node-releases@2.0.27: {}
 
@@ -5949,9 +5938,8 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  rrule-temporal@1.6.0:
+  rrule-temporal@2.2.8:
     dependencies:
-      '@js-temporal/polyfill': 0.5.1
       temporal-spec: 1.0.1
 
   run-parallel@1.2.0:
@@ -6285,13 +6273,14 @@ snapshots:
       - react-native-b4a
     optional: true
 
-  temporal-polyfill@0.3.2:
+  temporal-polyfill@1.0.5:
     dependencies:
-      temporal-spec: 0.3.1
-
-  temporal-spec@0.3.1: {}
+      temporal-spec: 1.0.1
+      temporal-utils: 1.0.3
 
   temporal-spec@1.0.1: {}
+
+  temporal-utils@1.0.3: {}
 
   testcontainers@11.12.0:
     dependencies:
