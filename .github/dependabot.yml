@@ -7,11 +7,16 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 10
+    # Les groupes ne prennent que les mises à jour mineures et correctives :
+    # chaque version majeure arrive dans sa propre PR, pour qu'une majeure
+    # incompatible (ex. TypeScript 7) ne bloque pas les autres mises à jour.
     groups:
       dev-dependencies:
         dependency-type: development
+        update-types: [minor, patch]
       production-dependencies:
         dependency-type: production
+        update-types: [minor, patch]
 
   - package-ecosystem: github-actions
     directory: /
