@@ -319,8 +319,16 @@ describe('Email Draft Operations', () => {
   // updateDraft cid: warning surface
   // ---------------------------------------------------------------------------
 
+  // Contrat (depuis l'embarquement multipart/related) : on n'avertit QUE pour
+  // un `cid:` du HTML sans pièce inline correspondante (image cassée chez le
+  // destinataire). Un `cid:` couvert par une pièce inline est réellement
+  // embarqué : aucun avertissement. On vérifie le contenu de l'avertissement
+  // (les CID manquants nommés) plutôt qu'un fragment de libellé figé.
   describe('updateDraft surfaces cid: warnings', () => {
-    it('reports a warning when the new HTML body references cid: parts', async () => {
+    const isMissingInlineWarning = (w: string): boolean =>
+      /inline image\(s\) with no matching attachment/i.test(w);
+
+    it('warns and names the cid: references that have no matching inline part', async () => {
       const original = await services.imapService.saveDraftWithAttachments(TEST_ACCOUNT_NAME, {
         to: [],
         subject: 'HTML draft',
@@ -334,7 +342,46 @@ describe('Email Draft Operations', () => {
         body: '<p>new body with <img src="cid:logo@example"/> and <img src="cid:sig@example"/></p>',
       });
 
-      expect(updated.warnings.some((w) => /cid:/i.test(w))).toBe(true);
+      const warning = updated.warnings.find(isMissingInlineWarning);
+      expect(warning).toBeDefined();
+      expect(warning).toContain('logo@example');
+      expect(warning).toContain('sig@example');
+    });
+
+    it('does not warn when every cid: reference has a matching inline part', async () => {
+      const original = await services.imapService.saveDraftWithAttachments(TEST_ACCOUNT_NAME, {
+        to: [],
+        subject: 'HTML draft with inline logo',
+        body: '<p>original</p>',
+        html: true,
+      });
+
+      // PNG 1x1 transparent : contenu fourni en base64, aucun téléchargement IMAP.
+      const pngBase64 =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
+      const updated = await services.imapService.updateDraft(TEST_ACCOUNT_NAME, original.id, {
+        mailbox: original.mailbox,
+        html: true,
+        body: '<p>new body with <img src="cid:logo@example"/></p>',
+        attachmentsAdd: [
+          {
+            contentBase64: pngBase64,
+            filename: 'logo.png',
+            mimeType: 'image/png',
+            cid: 'logo@example',
+          },
+        ],
+      });
+
+      expect(updated.warnings.filter(isMissingInlineWarning)).toEqual([]);
+
+      // L'image est bien embarquée dans le nouveau brouillon (pièce inline).
+      const raw = (
+        await services.imapService.fetchDraftRaw(TEST_ACCOUNT_NAME, updated.id, updated.mailbox)
+      ).toString('utf8');
+      expect(raw).toMatch(/multipart\/related/i);
+      expect(raw).toMatch(/Content-ID:\s*<logo@example>/i);
     });
   });
 
