@@ -67,11 +67,47 @@ describe('createMailRouter', () => {
 
   // Regression: these three do NOT take the account name first, so the naive
   // "first argument is the account" rule sent them to IMAP whatever the backend.
-  it('reads the account list of searchAcrossAccounts', async () => {
-    const { router } = build();
-    await expect(router.searchAcrossAccounts(['exchange'], '', {})).rejects.toThrow(
-      /not supported yet/,
-    );
+  // L'orchestration multi-comptes d'IMAP tourne avec le routeur pour `this` :
+  // chaque appel mono-compte qu'elle émet part vers le backend de SON compte.
+  // Avant, `search_all_accounts` était refusé dès qu'un compte Graph figurait
+  // dans la liste — c'est-à-dire toujours, sans liste explicite.
+  it('serves searchAcrossAccounts over both backends, account by account', async () => {
+    const graphSearch = vi.fn().mockResolvedValue('graph');
+    const { imap, router } = build({ searchEmails: graphSearch });
+    Object.assign(imap, {
+      searchEmails: vi.fn().mockResolvedValue('imap'),
+      async searchAcrossAccounts(
+        this: { searchEmails: (n: string) => Promise<string> },
+        names: string[],
+      ) {
+        return Promise.all(names.map(async (name) => this.searchEmails(name)));
+      },
+    });
+
+    await expect(router.searchAcrossAccounts(['ovh', 'exchange'], '', {})).resolves.toEqual([
+      'imap',
+      'graph',
+    ]);
+    expect(graphSearch).toHaveBeenCalledWith('exchange');
+  });
+
+  it('serves a multi-account searchForExport account by account', async () => {
+    const { imap, graph, router } = build();
+    Object.assign(imap, {
+      async searchForExport(
+        this: { searchForExport: (...a: unknown[]) => Promise<string> },
+        names: string[] | null,
+        name: string | null,
+      ) {
+        if (names === null) return `imap:${name}`;
+        return Promise.all(names.map(async (n) => this.searchForExport(null, n, '', {})));
+      },
+    });
+
+    await expect(
+      router.searchForExport(['ovh', 'exchange'], null, '', { maxRows: 10 }),
+    ).resolves.toEqual(['imap:ovh', 'graph']);
+    expect(graph.searchForExport).toHaveBeenCalledWith(null, 'exchange', '', {});
   });
 
   it('reads the second argument of searchForExport', async () => {
@@ -100,9 +136,17 @@ describe('createMailRouter', () => {
 
   it('refuses a single call spanning both backends', async () => {
     const { router } = build();
-    await expect(router.searchAcrossAccounts(['ovh', 'exchange'], '', {})).rejects.toThrow(
-      /cannot span both backends/,
-    );
+    await expect(
+      router.saveAllAttachmentsFromSearch({
+        accountNames: ['ovh', 'exchange'],
+        accountName: null,
+        query: '',
+        searchOptions: {},
+        maxEmails: 1,
+        destinationFolder: '/tmp',
+        organizeBy: 'flat',
+      }),
+    ).rejects.toThrow(/cannot span both backends/);
   });
 
   it('still routes a pure IMAP account list to IMAP', async () => {

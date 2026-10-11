@@ -56,6 +56,20 @@ const ACCOUNTS_IN_ARGS: Record<string, (args: unknown[]) => string[]> = {
   },
 };
 
+/**
+ * Méthodes multi-comptes dont l'implémentation IMAP n'est qu'une orchestration :
+ * elle rappelle, compte par compte, une méthode mono-compte via `this`
+ * (`searchEmails`, `searchForExport(null, nom, …)`). Exécutée avec le routeur
+ * comme `this`, chacun de ces appels part vers le backend de SON compte : une
+ * recherche peut alors couvrir des comptes IMAP et Graph à la fois, au lieu
+ * d'être refusée (`search_all_accounts` sans liste de comptes échouait dès
+ * qu'un compte Graph était configuré).
+ */
+const PER_ACCOUNT_ORCHESTRATORS = new Set<string | symbol>([
+  'searchAcrossAccounts',
+  'searchForExport',
+]);
+
 function accountsOf(property: string | symbol, args: unknown[]): string[] {
   const extractor = typeof property === 'string' ? ACCOUNTS_IN_ARGS[property] : undefined;
   return extractor ? extractor(args) : asNames(args[0]);
@@ -85,6 +99,15 @@ function routeByAccount<T extends object>(
         // No Graph account involved — the default backend serves it.
         if (graphNames.length === 0) {
           return (fallback as (...a: unknown[]) => unknown).apply(target, args);
+        }
+
+        // Orchestration multi-comptes (voir PER_ACCOUNT_ORCHESTRATORS) : la
+        // version par défaut, exécutée avec le routeur pour `this`, renvoie
+        // chaque compte vers son backend. Un appel mono-compte de
+        // searchForExport (accountNames = null) reste servi par Graph.
+        const multiAccount = property === 'searchAcrossAccounts' || Array.isArray(args[0]);
+        if (PER_ACCOUNT_ORCHESTRATORS.has(property) && multiAccount) {
+          return (fallback as (...a: unknown[]) => unknown).apply(receiver, args);
         }
 
         // Every routed method is Promise-returning, so refusals are surfaced as
