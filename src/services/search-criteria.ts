@@ -1,6 +1,6 @@
 /**
  * Shared helper that translates a high-level Power Search parameter object
- * into an imapflow search criteria object plus any post-pagination filters.
+ * into an imapflow search criteria object plus the filters evaluated client-side (before pagination).
  *
  * Used by `ImapService.searchEmails` and `ImapService.listEmails` so the two
  * entry points share identical filter semantics.
@@ -34,7 +34,8 @@ export interface SearchParams {
   uids?: number[] | string;
   largerThan?: number; // tool-facing KB — multiplied to bytes here
   smallerThan?: number;
-  // Post-pagination filters (not part of IMAP search — applied client-side):
+  // Filtres côté client (absents du SEARCH IMAP) — appliqués à tout le jeu
+  // d'UID retenu, AVANT la pagination (voir narrowUidsClientSide) :
   hasAttachment?: boolean;
   /** Substring match (case-insensitive) against any attachment filename. */
   attachmentFilename?: string;

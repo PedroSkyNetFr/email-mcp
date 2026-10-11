@@ -52,7 +52,7 @@ import type { LabelStrategy } from './label-strategy.js';
 import { detectLabelStrategy } from './label-strategy.js';
 import type { MailboxRef } from './mailbox-resolver.js';
 import { resolveMailboxForAccount } from './mailbox-resolver.js';
-import type { SearchParams } from './search-criteria.js';
+import type { BuildResult, SearchParams } from './search-criteria.js';
 import { applyLiteralFilters, buildSearchCriteria, chunkUids } from './search-criteria.js';
 import {
   connectionErrorStatus,
@@ -450,6 +450,147 @@ function messageToEmailMeta(msg: Record<string, unknown>): EmailMeta {
     preview,
     ...(attachments !== undefined ? { attachments } : {}),
   };
+}
+
+/** Filtres appliqués côté client, après le SEARCH du serveur. */
+type PostFilters = BuildResult['postFilters'];
+
+/**
+ * Vrai quand au moins un filtre ne peut pas être exprimé en SEARCH IMAP et
+ * doit donc être évalué ici : présence ou nature des pièces jointes (aucune clé
+ * SEARCH standard n'existe pour ça), ou filtres littéraux `*Contains`.
+ */
+function hasClientSideFilters(postFilters: PostFilters): boolean {
+  return (
+    postFilters.hasAttachment !== undefined ||
+    Boolean(postFilters.attachmentFilename) ||
+    Boolean(postFilters.attachmentMimetype) ||
+    Boolean(postFilters.fromContains) ||
+    Boolean(postFilters.toContains) ||
+    Boolean(postFilters.subjectContains)
+  );
+}
+
+/**
+ * Compile la regex `attachment_mimetype`. Fait AVANT tout parcours de la boîte
+ * pour qu'un motif invalide échoue tout de suite, sans aller-retour serveur.
+ */
+function compileMimetypeFilter(pattern: string | undefined): RegExp | undefined {
+  if (!pattern) return undefined;
+  try {
+    return new RegExp(pattern, 'i');
+  } catch (err) {
+    throw new Error(
+      `Invalid attachment_mimetype pattern: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Applique les filtres côté client (pièces jointes + filtres littéraux) à un
+ * lot de messages dont la BODYSTRUCTURE et l'enveloppe ont été lues.
+ *
+ * Point unique partagé par `listEmails`, `searchEmails` et `searchForExport` :
+ * les trois chemins donnent ainsi le même résultat pour un même critère.
+ */
+function applyClientSideFilters(items: EmailMeta[], postFilters: PostFilters): EmailMeta[] {
+  const mimeRe = compileMimetypeFilter(postFilters.attachmentMimetype);
+  let out = items;
+  if (postFilters.hasAttachment !== undefined) {
+    const want = postFilters.hasAttachment;
+    out = out.filter((m) => m.hasAttachments === want);
+  }
+  if (postFilters.attachmentFilename) {
+    const needle = postFilters.attachmentFilename.toLowerCase();
+    out = out.filter((m) =>
+      (m.attachments ?? []).some((a) => a.filename.toLowerCase().includes(needle)),
+    );
+  }
+  if (mimeRe) {
+    out = out.filter((m) => (m.attachments ?? []).some((a) => mimeRe.test(a.mimeType)));
+  }
+  return applyLiteralFilters(out, postFilters);
+}
+
+/** Taille des lots FETCH lors du tri client (BODYSTRUCTURE + enveloppe). */
+const CLIENT_FILTER_CHUNK = 200;
+
+/**
+ * Budget de temps du tri client. Sur un serveur Dovecot dont le cache
+ * d'index ne contient pas encore la BODYSTRUCTURE, le premier parcours oblige
+ * le serveur à relire chaque message en entier (constaté chez OVH : plus d'une
+ * minute pour ~2 200 messages au premier appel, ~2,5 s une fois le cache
+ * chaud). Au-delà de ce budget on rend ce qui a été trouvé, signalé comme
+ * partiel — jamais un zéro silencieux, ni un appel qui dépasse le délai du
+ * client MCP.
+ */
+const CLIENT_FILTER_BUDGET_MS = 20_000;
+
+interface NarrowOutcome {
+  /** UID retenus, du plus récent au plus ancien. */
+  uids: number[];
+  /** Nombre de messages effectivement examinés. */
+  scanned: number;
+  /** Faux quand le budget a interrompu le parcours avant la fin. */
+  complete: boolean;
+}
+
+/**
+ * Réduit un jeu d'UID (déjà plafonné et trié du plus récent au plus ancien)
+ * aux seuls messages qui satisfont les filtres côté client.
+ *
+ * Pourquoi AVANT la pagination : filtrer seulement la page courante rendait
+ * une page vide dès que les N messages les plus récents n'avaient pas de pièce
+ * jointe (« No emails found » alors que la boîte en contient), et affichait le
+ * nombre de messages du SEARCH comme total. Ici on lit BODYSTRUCTURE et
+ * enveloppe — jamais le corps — par lots, sur au plus MAX_SEARCH_UIDS messages
+ * et dans la limite de CLIENT_FILTER_BUDGET_MS.
+ */
+async function narrowUidsClientSide(
+  client: ImapFlow,
+  uids: number[],
+  postFilters: PostFilters,
+  budgetMs: number = CLIENT_FILTER_BUDGET_MS,
+): Promise<NarrowOutcome> {
+  // Valide la regex avant le premier FETCH.
+  compileMimetypeFilter(postFilters.attachmentMimetype);
+  const startedAt = Date.now();
+  const kept = new Set<number>();
+  let scanned = 0;
+  /* eslint-disable no-restricted-syntax, no-await-in-loop -- lots séquentiels sur la connexion partagée */
+  for (const chunk of chunkUids(uids, CLIENT_FILTER_CHUNK)) {
+    // Le premier lot est toujours examiné : la page 1 n'est jamais vide par
+    // simple manque de temps.
+    if (scanned > 0 && Date.now() - startedAt > budgetMs) break;
+    const metas: EmailMeta[] = [];
+    for await (const msg of client.fetch(
+      chunk.join(','),
+      { uid: true, envelope: true, bodyStructure: true },
+      { uid: true },
+    )) {
+      metas.push(messageToEmailMeta(msg as unknown as Record<string, unknown>));
+    }
+    applyClientSideFilters(metas, postFilters).forEach((m) => {
+      kept.add(Number(m.id));
+    });
+    scanned += chunk.length;
+  }
+  /* eslint-enable no-restricted-syntax, no-await-in-loop */
+  return {
+    // Conserve l'ordre d'entrée (du plus récent au plus ancien).
+    uids: uids.filter((uid) => kept.has(uid)),
+    scanned,
+    complete: scanned >= uids.length,
+  };
+}
+
+/** Avertissement affiché quand le tri client a été interrompu par le budget. */
+function partialScanWarning(outcome: NarrowOutcome, candidates: number): string {
+  return (
+    `Attachment / *_contains filters checked only the ${outcome.scanned} most recent of ` +
+    `${candidates} candidate messages (time budget reached) — results and total are partial; ` +
+    'add since/before or another server-side filter to narrow the scan'
+  );
 }
 
 /**
@@ -1026,10 +1167,18 @@ export default class ImapService {
         };
       }
 
-      // Sort descending (newest first) and paginate FIRST — the hasAttachment
-      // post-filter is applied only to the current page to avoid fetching
-      // bodyStructure for tens of thousands of messages on huge folders.
+      // Du plus récent au plus ancien, puis filtres côté client AVANT la
+      // pagination (voir narrowUidsClientSide) : la page et le total portent
+      // sur les messages qui satisfont réellement les filtres.
       uids.sort((a, b) => b - a);
+      if (hasClientSideFilters(postFilters)) {
+        const narrowed = await narrowUidsClientSide(client, uids, postFilters);
+        if (!narrowed.complete) {
+          totalApprox = true;
+          warnings.push(partialScanWarning(narrowed, uids.length));
+        }
+        uids = narrowed.uids;
+      }
       const total = uids.length;
       const start = (page - 1) * pageSize;
       const pageUids = uids.slice(start, start + pageSize);
@@ -1047,7 +1196,7 @@ export default class ImapService {
         };
       }
 
-      let items: EmailMeta[] = [];
+      const items: EmailMeta[] = [];
       const range = pageUids.join(',');
 
       // eslint-disable-next-line no-restricted-syntax
@@ -1065,47 +1214,6 @@ export default class ImapService {
       )) {
         items.push(messageToEmailMeta(msg as unknown as Record<string, unknown>));
       }
-
-      // Post-pagination hasAttachment filter. If it trims this page, we simply
-      // serve fewer items for the page and mark totalApprox=true — PR 1 keeps
-      // it simple; we do not backfill from later UIDs.
-      if (postFilters.hasAttachment !== undefined) {
-        const want = postFilters.hasAttachment;
-        items = items.filter((m) => m.hasAttachments === want);
-        if (items.length !== pageUids.length) {
-          totalApprox = true;
-        }
-      }
-
-      // PR 2 Phase E — attachment filename / mimetype post-filters.
-      if (postFilters.attachmentFilename) {
-        const needle = postFilters.attachmentFilename.toLowerCase();
-        items = items.filter((m) => {
-          const atts = m.attachments ?? [];
-          return atts.some((a) => a.filename.toLowerCase().includes(needle));
-        });
-        if (items.length !== pageUids.length) totalApprox = true;
-      }
-      if (postFilters.attachmentMimetype) {
-        let re: RegExp;
-        try {
-          re = new RegExp(postFilters.attachmentMimetype, 'i');
-        } catch (err) {
-          throw new Error(
-            `Invalid attachment_mimetype pattern: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-        items = items.filter((m) => {
-          const atts = m.attachments ?? [];
-          return atts.some((a) => re.test(a.mimeType));
-        });
-        if (items.length !== pageUids.length) totalApprox = true;
-      }
-
-      // Literal (server-independent) header filters.
-      const beforeLiteral = items.length;
-      items = applyLiteralFilters(items, postFilters);
-      if (items.length !== beforeLiteral) totalApprox = true;
 
       // Sort by date descending
       items.sort(
@@ -1372,6 +1480,17 @@ export default class ImapService {
       }
 
       uids.sort((a, b) => b - a);
+      // Filtres côté client AVANT la pagination et les facettes : page, total
+      // et facettes portent sur les messages qui satisfont réellement les
+      // filtres (voir narrowUidsClientSide).
+      if (hasClientSideFilters(postFilters)) {
+        const narrowed = await narrowUidsClientSide(client, uids, postFilters);
+        if (!narrowed.complete) {
+          totalApprox = true;
+          warnings.push(partialScanWarning(narrowed, uids.length));
+        }
+        uids = narrowed.uids;
+      }
       const total = uids.length;
       const start = (page - 1) * pageSize;
       const pageUids = uids.slice(start, start + pageSize);
@@ -1404,7 +1523,7 @@ export default class ImapService {
         };
       }
 
-      let items: EmailMeta[] = [];
+      const items: EmailMeta[] = [];
       const range = pageUids.join(',');
 
       // eslint-disable-next-line no-restricted-syntax
@@ -1422,46 +1541,6 @@ export default class ImapService {
       )) {
         items.push(messageToEmailMeta(msg as unknown as Record<string, unknown>));
       }
-
-      // Post-pagination hasAttachment filter — applied only to the current page.
-      // If filter trims items, we simply serve fewer results and mark totalApprox.
-      if (postFilters.hasAttachment !== undefined) {
-        const want = postFilters.hasAttachment;
-        items = items.filter((m) => m.hasAttachments === want);
-        if (items.length !== pageUids.length) {
-          totalApprox = true;
-        }
-      }
-
-      // PR 2 Phase E — attachment filename / mimetype post-filters.
-      if (postFilters.attachmentFilename) {
-        const needle = postFilters.attachmentFilename.toLowerCase();
-        items = items.filter((m) => {
-          const atts = m.attachments ?? [];
-          return atts.some((a) => a.filename.toLowerCase().includes(needle));
-        });
-        if (items.length !== pageUids.length) totalApprox = true;
-      }
-      if (postFilters.attachmentMimetype) {
-        let re: RegExp;
-        try {
-          re = new RegExp(postFilters.attachmentMimetype, 'i');
-        } catch (err) {
-          throw new Error(
-            `Invalid attachment_mimetype pattern: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-        items = items.filter((m) => {
-          const atts = m.attachments ?? [];
-          return atts.some((a) => re.test(a.mimeType));
-        });
-        if (items.length !== pageUids.length) totalApprox = true;
-      }
-
-      // Literal (server-independent) header filters.
-      const beforeLiteral = items.length;
-      items = applyLiteralFilters(items, postFilters);
-      if (items.length !== beforeLiteral) totalApprox = true;
 
       items.sort(
         (a, b) => safeDate(b.date, new Date(0)).getTime() - safeDate(a.date, new Date(0)).getTime(),
@@ -3464,34 +3543,9 @@ export default class ImapService {
       }
       /* eslint-enable no-restricted-syntax, no-await-in-loop */
 
-      // Apply post-pagination filters (hasAttachment / attachment_filename /
-      // attachment_mimetype) to the full buffered set — these are cheap in
-      // memory since we already have bodyStructure-derived `attachments`.
-      if (postFilters.hasAttachment !== undefined) {
-        const want = postFilters.hasAttachment;
-        items = items.filter((m) => m.hasAttachments === want);
-      }
-      if (postFilters.attachmentFilename) {
-        const needle = postFilters.attachmentFilename.toLowerCase();
-        items = items.filter((m) => {
-          const atts = m.attachments ?? [];
-          return atts.some((a) => a.filename.toLowerCase().includes(needle));
-        });
-      }
-      if (postFilters.attachmentMimetype) {
-        let re: RegExp;
-        try {
-          re = new RegExp(postFilters.attachmentMimetype, 'i');
-        } catch (err) {
-          throw new Error(
-            `Invalid attachment_mimetype pattern: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-        items = items.filter((m) => (m.attachments ?? []).some((a) => re.test(a.mimeType)));
-      }
-
-      // Literal (server-independent) header filters — see applyLiteralFilters.
-      items = applyLiteralFilters(items, postFilters);
+      // Filtres côté client (pièces jointes + littéraux) sur tout le lot tamponné
+      // — même helper que listEmails / searchEmails.
+      items = applyClientSideFilters(items, postFilters);
 
       items.sort(
         (a, b) => safeDate(b.date, new Date(0)).getTime() - safeDate(a.date, new Date(0)).getTime(),

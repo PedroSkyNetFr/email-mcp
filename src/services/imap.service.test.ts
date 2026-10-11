@@ -278,55 +278,144 @@ describe('ImapService', () => {
       expect((criteria.since as Date).toISOString()).toBe('2024-01-01T00:00:00.000Z');
     });
 
-    it('applies hasAttachment post-filter only after pagination (no upfront bodyStructure fetch)', async () => {
-      // Pretend the server matches 3 UIDs; only the current page should be body-structured.
-      client.search.mockResolvedValue([1, 2, 3]);
-
-      // Mock fetch: only invoked ONCE with the page range (not the full search set).
-      // The mock yields three messages — two with attachments, one without.
-      const mockMessages = [
-        {
-          uid: 3,
-          envelope: { subject: 'A', from: [{ address: 'a@x' }], to: [], date: '2024-01-03' },
-          flags: new Set<string>(),
-          bodyStructure: { disposition: 'attachment' },
-          source: Buffer.from(''),
+    // -----------------------------------------------------------------------
+    // Filtres côté client (pièce jointe, littéraux) appliqués AVANT pagination.
+    // Scénario réel (OVH) : les N messages les plus récents n'ont pas de pièce
+    // jointe → l'ancien code filtrait seulement cette page et répondait « No
+    // emails found » alors que la boîte contenait des PDF plus anciens.
+    // -----------------------------------------------------------------------
+    describe('client-side filters run before pagination', () => {
+      /** Boîte simulée : UID 1..30, seuls 3 et 1 portent un PDF ; 7 vient d'edf.fr. */
+      const fakeMessage = (uid: number) => ({
+        uid,
+        envelope: {
+          subject: `M${uid}`,
+          from: [{ address: uid === 7 ? 'facture@edf.fr' : `s${uid}@x.test` }],
+          to: [],
+          date: new Date(Date.UTC(2026, 0, uid)).toISOString(),
         },
-        {
-          uid: 2,
-          envelope: { subject: 'B', from: [{ address: 'b@x' }], to: [], date: '2024-01-02' },
-          flags: new Set<string>(),
-          bodyStructure: { type: 'text', subtype: 'plain' },
-          source: Buffer.from(''),
-        },
-        {
-          uid: 1,
-          envelope: { subject: 'C', from: [{ address: 'c@x' }], to: [], date: '2024-01-01' },
-          flags: new Set<string>(),
-          bodyStructure: { disposition: 'attachment' },
-          source: Buffer.from(''),
-        },
-      ];
-      client.fetch.mockReturnValueOnce(
-        // eslint-disable-next-line @stylistic/wrap-iife -- mirror createMockImapClient pattern
-        (async function* gen() {
-          for (const m of mockMessages) yield m;
-        })(),
-      );
-
-      const result = await service.searchEmails('test', '', {
-        hasAttachment: true,
-        pageSize: 10,
+        flags: new Set<string>(),
+        bodyStructure:
+          uid === 3 || uid === 1
+            ? {
+                type: 'multipart/mixed',
+                childNodes: [
+                  { type: 'text/plain' },
+                  {
+                    type: 'application/pdf',
+                    disposition: 'attachment',
+                    dispositionParameters: { filename: `facture-${uid}.pdf` },
+                  },
+                ],
+              }
+            : { type: 'text/plain' },
+        source: Buffer.from(''),
       });
 
-      // Fetch was called exactly ONCE with the page range — never upfront for all matches.
-      expect(client.fetch).toHaveBeenCalledTimes(1);
-      // pageUids = first `pageSize` of sorted-desc UIDs = "3,2,1"
-      expect(client.fetch.mock.calls[0][0]).toBe('3,2,1');
+      beforeEach(() => {
+        client.search.mockResolvedValue(Array.from({ length: 30 }, (_, i) => i + 1));
+        // Le FETCH renvoie exactement les UID demandés dans la plage.
+        client.fetch.mockImplementation((range: string) =>
+          // eslint-disable-next-line @stylistic/wrap-iife -- même motif que createMockImapClient
+          (async function* gen() {
+            for (const uid of range.split(',').map(Number)) yield fakeMessage(uid);
+          })(),
+        );
+      });
 
-      // Two of three messages have attachments → the filter should retain 2
-      expect(result.items).toHaveLength(2);
-      expect(result.totalApprox).toBe(true);
+      it('searchEmails: has_attachment finds older matches when the newest page has none', async () => {
+        const result = await service.searchEmails('test', '', { hasAttachment: true, pageSize: 5 });
+
+        expect(result.items.map((m) => m.id)).toEqual(['3', '1']);
+        expect(result.total).toBe(2);
+        expect(result.hasMore).toBe(false);
+        expect(result.totalApprox).toBeUndefined();
+      });
+
+      it('searchEmails: paginates over the filtered set, not the raw SEARCH set', async () => {
+        const p1 = await service.searchEmails('test', '', { hasAttachment: true, pageSize: 1 });
+        const p2 = await service.searchEmails('test', '', {
+          hasAttachment: true,
+          pageSize: 1,
+          page: 2,
+        });
+
+        expect(p1.items.map((m) => m.id)).toEqual(['3']);
+        expect(p1.hasMore).toBe(true);
+        expect(p2.items.map((m) => m.id)).toEqual(['1']);
+        expect(p2.hasMore).toBe(false);
+        expect(p2.total).toBe(2);
+      });
+
+      it('searchEmails: attachment_mimetype / attachment_filename also see the whole set', async () => {
+        const byMime = await service.searchEmails('test', '', {
+          attachmentMimetype: 'pdf',
+          pageSize: 5,
+        });
+        const byName = await service.searchEmails('test', '', {
+          attachmentFilename: 'facture-1',
+          pageSize: 5,
+        });
+
+        expect(byMime.items.map((m) => m.id)).toEqual(['3', '1']);
+        expect(byName.items.map((m) => m.id)).toEqual(['1']);
+      });
+
+      it('searchEmails: from_contains is matched across the whole set', async () => {
+        const result = await service.searchEmails('test', '', {
+          fromContains: 'edf.fr',
+          pageSize: 5,
+        } as Parameters<ImapService['searchEmails']>[2]);
+
+        expect(result.items.map((m) => m.id)).toEqual(['7']);
+        expect(result.total).toBe(1);
+      });
+
+      it('searchEmails: an invalid attachment_mimetype fails before any FETCH', async () => {
+        await expect(service.searchEmails('test', '', { attachmentMimetype: '(' })).rejects.toThrow(
+          /Invalid attachment_mimetype pattern/,
+        );
+        expect(client.fetch).not.toHaveBeenCalled();
+      });
+
+      it('listEmails: has_attachment finds older matches when the newest page has none', async () => {
+        const result = await service.listEmails('test', { hasAttachment: true, pageSize: 5 });
+
+        expect(result.items.map((m) => m.id)).toEqual(['3', '1']);
+        expect(result.total).toBe(2);
+      });
+
+      it('stops at the time budget and flags the result as partial, never a silent zero', async () => {
+        // 450 candidats → 3 lots de 200 ; chaque FETCH « coûte » 15 s simulées.
+        client.search.mockResolvedValue(Array.from({ length: 450 }, (_, i) => i + 1));
+        vi.useFakeTimers({ toFake: ['Date'] });
+        try {
+          client.fetch.mockImplementation((range: string) => {
+            vi.setSystemTime(Date.now() + 15_000);
+            // eslint-disable-next-line @stylistic/wrap-iife -- même motif que createMockImapClient
+            return (async function* gen() {
+              for (const uid of range.split(',').map(Number)) yield fakeMessage(uid);
+            })();
+          });
+
+          const result = await service.searchEmails('test', '', { hasAttachment: true });
+
+          // Lots 1 et 2 examinés (30 s > budget de 20 s) ; les PDF (UID 3 et 1)
+          // sont dans le 3e lot, non examiné : le résultat le dit.
+          expect(result.items).toEqual([]);
+          expect(result.totalApprox).toBe(true);
+          expect(result.warning).toMatch(/checked only the 400 most recent of 450/);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('without client-side filter, only the page is fetched (no full scan)', async () => {
+        await service.searchEmails('test', '', { pageSize: 5 });
+
+        expect(client.fetch).toHaveBeenCalledTimes(1);
+        expect(client.fetch.mock.calls[0][0]).toBe('30,29,28,27,26');
+      });
     });
 
     it('caps at MAX_SEARCH_UIDS (5000) and emits a truncation warning', async () => {

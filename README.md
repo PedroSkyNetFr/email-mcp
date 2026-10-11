@@ -1002,9 +1002,9 @@ Features:
 | `uids`            | `uids`          | number[] or string | `UID` — filter to a UID set or IMAP range string (`"1:100"`)                                         |
 | `larger_than`     | `largerThan`    | number (KB)      | `LARGER` (converted to bytes)                                                                          |
 | `smaller_than`    | `smallerThan`   | number (KB)      | `SMALLER`                                                                                              |
-| `has_attachment`  | `hasAttachment` | boolean          | Post-pagination filter (IMAP has no native attachment search — applied to current page only)           |
-| `attachment_filename` | `attachmentFilename` | string    | Substring match (case-insensitive) against any attachment filename on the current page                 |
-| `attachment_mimetype` | `attachmentMimetype` | string    | Regex (case-insensitive) applied to each attachment's `type/subtype` on the current page               |
+| `has_attachment`  | `hasAttachment` | boolean          | Client-side `BODYSTRUCTURE` check over the whole (capped) match set, before pagination                  |
+| `attachment_filename` | `attachmentFilename` | string    | Substring match (case-insensitive) against any attachment filename across the match set                |
+| `attachment_mimetype` | `attachmentMimetype` | string    | Regex (case-insensitive) applied to each attachment's `type/subtype` across the match set              |
 | `facets`          | `facets`        | string[]         | `search_emails` only — returns bucketed counts by `sender` / `year` / `mailbox`                        |
 | `gmail_raw`       | `gmailRaw`      | string           | Gmail only — passes through to `X-GM-RAW` (Gmail native search syntax). Other filters ignored when set. |
 
@@ -1041,7 +1041,7 @@ Notes:
 
 ### Attachment filters
 
-When `has_attachment: true` alone returns too much noise, narrow by filename substring or MIME type regex. Both are applied post-pagination on the current page's body-structure fetches (same trade-off as `has_attachment`: if the filter trims the page, fewer items are served and `totalApprox` is set).
+When `has_attachment: true` alone returns too much noise, narrow by filename substring or MIME type regex. Both are evaluated client-side, like `has_attachment`, over the whole (capped) match set before pagination, so pages and totals count only matching messages.
 
 ```jsonc
 // Narrow a noisy Pines Rd thread to signed PDFs only
@@ -1086,7 +1086,7 @@ Facets are computed via a single envelope-only IMAP fetch in 500-UID chunks. Whe
 ### Performance Notes
 
 - **UID cap**: large result sets are capped at **5000 UIDs** before pagination. When truncation happens the response includes a `warning` and the rendered count is prefixed with `~` to indicate `totalApprox`. Narrow the query with more filters (dates, sender, subject) to drop below the cap.
-- **`has_attachment` is post-pagination**: because IMAP has no native attachment search, the filter is now applied only to the current page's body-structure fetches — so a 78k-message folder no longer triggers a full-folder body-structure scan upfront. The trade-off: if the filter trims items on a page, the page serves fewer results and `totalApprox` is set; narrow the query instead of relying on `has_attachment` alone.
+- **`has_attachment` / `attachment_*` / `*_contains` are client-side, before pagination**: IMAP has no native attachment search, so the server SEARCH runs with the other criteria and the result (capped at 5000 UIDs) is then checked by fetching `BODYSTRUCTURE` + envelope (never bodies) in 200-UID chunks. Pages and totals therefore count only matching messages. The scan has a **20 s budget**: past it (typically the first scan of a large Dovecot folder whose index cache lacks body structures) the most recent matches found so far are returned with a `warning` and `totalApprox` — add `since`/`before` to keep the scan small.
 - **Relative date tokens** (`7d`, `2w`, `1m`, `yesterday`, `today`) are evaluated in UTC at call time.
 
 ### Cross-account search
