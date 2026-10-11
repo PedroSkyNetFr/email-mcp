@@ -4,7 +4,7 @@
  * No MCP dependency — fully unit-testable.
  */
 
-import type { ImapFlow } from 'imapflow';
+import type { ImapFlow, ImapFlowErrorCode } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import MailComposer from 'nodemailer/lib/mail-composer';
 import type { IConnectionManager } from '../connections/types.js';
@@ -364,6 +364,30 @@ export function findMimePartByFilename(
 }
 
 /**
+ * Codes d'erreur par lesquels imapflow (2.x) refuse LOCALEMENT une requête
+ * SEARCH avant de l'envoyer : clé inconnue, opérande NOT/OR vide, mot-clé qui
+ * n'est pas un atome IMAP, clé absente d'IMAP4rev2 (`recent`, `new`, `old`).
+ * imapflow 1.x ignorait ces critères (ce qui élargissait la recherche) ou les
+ * laissait échouer côté serveur ; imapflow 2 rejette la promesse de `search()`.
+ */
+const SEARCH_QUERY_REFUSAL_CODES: ReadonlySet<string> = new Set<ImapFlowErrorCode>([
+  'InvalidSearchQuery',
+  'MissingServerExtension',
+]);
+
+/**
+ * Une requête refusée par imapflow n'est ni un échec de connexion ni un
+ * résultat vide : c'est une erreur de saisie, déterministe — la relancer ou la
+ * restreindre ne change rien. On la remonte telle quelle (message d'imapflow)
+ * plutôt que de l'étiqueter `connection_error`.
+ */
+function isSearchQueryRefusal(err: unknown): err is Error {
+  if (!(err instanceof Error)) return false;
+  const { code } = err as Error & { code?: unknown };
+  return typeof code === 'string' && SEARCH_QUERY_REFUSAL_CODES.has(code);
+}
+
+/**
  * Parse a value that may be an IMAP envelope Date header (RFC-2822 string,
  * Date object, etc.) into an ISO-8601 string. Returns the fallback when the
  * input is missing or malformed. Never throws.
@@ -630,6 +654,10 @@ export default class ImapService {
    * rejects instead. Both must be classified as a failed search so callers
    * never coerce `false` into a clean `total:0` (the silent false-negative).
    *
+   * Exception (imapflow 2) : une requête qu'imapflow refuse avant tout envoi
+   * (voir `isSearchQueryRefusal`) est relancée comme une `Error` ordinaire —
+   * c'est une erreur de saisie, pas une recherche échouée ni une panne réseau.
+   *
    * The thread-reconstruction searches in `getThread` are an intentional
    * documented exception — best-effort, loop-tolerant; a failed header search
    * there degrades to a partial thread, never a false "email lost" — so they
@@ -644,6 +672,9 @@ export default class ImapService {
       if (Array.isArray(result)) return { ok: true, uids: result };
       return { ok: false, status: searchFailedStatus() };
     } catch (err) {
+      if (isSearchQueryRefusal(err)) {
+        throw new Error(`Invalid IMAP search query: ${err.message}`, { cause: err });
+      }
       return { ok: false, status: connectionErrorStatus(err) };
     }
   }
@@ -781,6 +812,9 @@ export default class ImapService {
       }
       return raced;
     } catch (err) {
+      // Requête refusée par imapflow (relancée par runSearch) : erreur de
+      // saisie, pas une panne de connexion — on la laisse remonter.
+      if (err instanceof Error && isSearchQueryRefusal(err.cause)) throw err;
       return { ok: false, status: connectionErrorStatus(err) };
     } finally {
       if (timer) {

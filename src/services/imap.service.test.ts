@@ -394,6 +394,35 @@ describe('ImapService', () => {
       expect(result.total).toBe(0);
     });
 
+    it('searchEmails: a query imapflow refuses locally surfaces as an input error, not connection_error', async () => {
+      // imapflow 2 rejette search() avec un code InvalidSearchQuery (clé
+      // inconnue, mot-clé non atomique…) avant tout envoi au serveur.
+      const refusal = Object.assign(new Error('Bad label is not a valid keyword'), {
+        code: 'InvalidSearchQuery',
+      });
+      client.search.mockRejectedValueOnce(refusal);
+
+      await expect(service.searchEmails('test', 'anything', {})).rejects.toThrow(
+        /Invalid IMAP search query: Bad label is not a valid keyword/,
+      );
+    });
+
+    it('searchEmails: a query refused on the EPHEMERAL connection is an input error too', async () => {
+      client.mailbox = { exists: 50_000 };
+      const ephemeral = createMockImapClient();
+      ephemeral.search.mockRejectedValueOnce(
+        Object.assign(new Error('The "recent" search key does not exist in IMAP4rev2'), {
+          code: 'MissingServerExtension',
+        }),
+      );
+      connections.createEphemeralImapClient.mockResolvedValue(ephemeral);
+
+      await expect(service.searchEmails('test', 'needle', {})).rejects.toThrow(
+        /Invalid IMAP search query: .*IMAP4rev2/,
+      );
+      expect(ephemeral.close).toHaveBeenCalled();
+    });
+
     it('listEmails: client.search → false is flagged searchFailed, not a clean zero', async () => {
       client.search.mockResolvedValueOnce(false as unknown as number[]);
 
