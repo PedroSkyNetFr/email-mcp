@@ -18,6 +18,9 @@
  *   différents), pas la restauration d'un fichier ni un `checkout -b` sur place ;
  * - post-rewrite : un rebase (`git pull --rebase`), pas un `commit --amend`.
  *
+ * Si pnpm-lock.yaml a changé, les dépendances verrouillées sont réinstallées
+ * avant la compilation (`pnpm install --frozen-lockfile`).
+ *
  * Un hook post-* ne peut pas annuler l'opération git. En cas d'échec, le
  * message le dit, et le code de sortie non nul le fait apparaître chez lefthook.
  */
@@ -42,6 +45,43 @@ function shouldRebuild() {
 }
 
 if (!shouldRebuild()) process.exit(0);
+
+// Bornes de l'opération git : ce qui était là avant, ce qui est là après.
+function updateRange() {
+  if (hook === 'post-checkout') return [args[0], args[1]];
+  // post-merge et rebase : git laisse l'ancienne tête dans ORIG_HEAD.
+  return ['ORIG_HEAD', 'HEAD'];
+}
+
+function lockfileChanged() {
+  const [before, after] = updateRange();
+  const diff = spawnSync('git', ['diff', '--quiet', before, after, '--', 'pnpm-lock.yaml'], {
+    cwd: root,
+  });
+  // 1 = différence ; 0 = identique ; autre (révision introuvable) : prudence.
+  return diff.status !== 0;
+}
+
+// Un pull qui change les dépendances laisse node_modules/ à l'ancienne version :
+// le code compilé importe alors des modules absents et le serveur ne démarre
+// plus (cas vécu : nodemailer 8 resté installé sous un code écrit pour la 10).
+if (existsSync(path.join(root, 'node_modules')) && lockfileChanged()) {
+  console.log('pnpm-lock.yaml changed: installing the locked dependencies…');
+  // shell : pnpm est un .cmd sous Windows. Le prepare de pnpm réinstalle les hooks.
+  // Commande en une seule chaîne fixe : avec shell, Node déconseille les arguments séparés.
+  const install = spawnSync('pnpm install --frozen-lockfile', {
+    cwd: root,
+    stdio: 'inherit',
+    shell: true,
+  });
+  if (install.status !== 0) {
+    console.error(
+      '\n❌ pnpm install failed: node_modules/ no longer matches pnpm-lock.yaml and the ' +
+        'server may not start. Run pnpm install, then pnpm build.',
+    );
+    process.exit(install.status ?? 1);
+  }
+}
 
 // Un worktree tout juste créé n'a pas encore ses dépendances : rien à compiler.
 if (!existsSync(tsc)) {

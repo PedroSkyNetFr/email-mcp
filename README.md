@@ -115,7 +115,9 @@ Point your MCP client at the local binary by replacing the
 **Keep `dist/` in step with the code.** `dist/` is not versioned, so a `git pull`
 updates `src/` and leaves the build your client runs behind — a merged fix looks
 deployed and is not. Git hooks rebuild `dist/` after a pull, a branch switch or a
-rebase; `pnpm install` sets them up, or run `pnpm hooks:install`. A client loads
+rebase — first reinstalling the locked dependencies when `pnpm-lock.yaml` changed,
+since new code on old `node_modules/` may not start at all; `pnpm install` sets
+them up, or run `pnpm hooks:install`. A client loads
 `dist/` when it starts the server, so restart it afterwards; `check_health`
 reports which build is running.
 
