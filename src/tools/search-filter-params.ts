@@ -35,6 +35,18 @@ export const FROM_DESCRIPTION = `Filter by sender (server-side). ${SERVER_MATCH_
 export const TO_DESCRIPTION = `Filter by recipient (server-side). ${SERVER_MATCH_CAVEAT}`;
 export const SUBJECT_DESCRIPTION = `Filter by subject (server-side). ${SERVER_MATCH_CAVEAT}`;
 
+/**
+ * Contrat de couverture des filtres évalués côté client, repris dans la
+ * description des outils de recherche : la réponse dit quand le parcours est
+ * partiel, et comment reprendre avec `before` pour couvrir toute la boîte.
+ */
+export const COVERAGE_NOTE =
+  'Filters evaluated client-side (has_attachment / attachment_* on IMAP, *_contains everywhere) ' +
+  'check candidates newest first, within a 45 s budget and 5000 messages per call. A partial ' +
+  'scan is never silent: the warning (and `coverage`) gives examined/candidates, the oldest ' +
+  'message examined and a `before` value — re-run with it to continue, and repeat to cover the ' +
+  'whole mailbox.';
+
 const CONTAINS_NOTE =
   'Applied locally on the decoded header, so the result does not depend on the server index. ' +
   'It does not narrow the server-side query: combine it with since/before or a coarse filter ' +

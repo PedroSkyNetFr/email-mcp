@@ -242,6 +242,9 @@ export default function registerEmlTools(
               'set, not the whole of it. Raise max_emails or narrow the query.',
           );
         }
+        (result.coverage ?? []).forEach((c) => {
+          notes.push(`${c.account ? `${c.account}: ` : ''}${c.hint}`);
+        });
         if (result.errors.length > 0) {
           notes.push(
             `${result.errors.length} message(s) matched but could not be written — see errors.`,
@@ -258,6 +261,7 @@ export default function registerEmlTools(
                   matched: result.matched,
                   files_saved: result.files_saved,
                   truncated: result.truncated,
+                  ...(result.coverage ? { coverage: result.coverage } : {}),
                   total_size: result.total_size,
                   total_size_human: `${Math.round(result.total_size / 1024 / 1024)}MB`,
                   // Les erreurs sont plafonnées pour ne pas noyer la réponse ;

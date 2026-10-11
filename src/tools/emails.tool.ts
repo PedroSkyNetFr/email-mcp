@@ -18,6 +18,7 @@ import type {
 import type { BodyFormat } from '../utils/body-format.js';
 import { applyBodyFormat } from '../utils/body-format.js';
 import {
+  COVERAGE_NOTE,
   FROM_DESCRIPTION,
   literalFilterOptions,
   literalFilterParams,
@@ -208,6 +209,7 @@ export default function registerEmailsTools(
       'Use get_email to fetch full body content. ' +
       'ProtonMail note: labels are represented as IMAP folders — use list_labels to discover them, ' +
       'then list_emails with mailbox="Labels/X" to find labeled emails. ' +
+      `${COVERAGE_NOTE} ` +
       "If a query of INBOX returns nothing relevant, consider re-running against the account's Archive " +
       'mailbox (use list_mailboxes to find its name); always pair archive queries with a date filter, ' +
       'because archives can hold tens of thousands of messages.',
@@ -598,20 +600,20 @@ export default function registerEmailsTools(
   // ---------------------------------------------------------------------------
   server.tool(
     'search_emails',
-    'Search emails with server-side filters. Omit query (or pass an empty string) to use pure filters. ' +
-      'Free-text `query` searches subject + from + body (deep by default). On a very large folder whose ' +
-      'server has no full-text index, a body scan is expensive: it is run on a bounded connection and, ' +
-      'if it cannot complete, returns an explicitly flagged failure (never a silent zero) with a cost ' +
-      'warning suggesting you narrow by date (since/before/on) or subject:/from:. ' +
-      'Supports date ranges (since/before/on, including "7d" / "yesterday"), subject/from/to/cc/bcc/body/text ' +
-      'filters, read/flag/answered state, keywords/labels, header matches, UID ranges, size limits, and attachments. ' +
-      "On Gmail accounts, pass gmail_raw (e.g. 'from:foo has:attachment older_than:30d') for a dramatically " +
-      'faster native Gmail search. Results are paginated; large result sets are capped at 5000 UIDs with a warning. ' +
-      'A failed or timed-out SEARCH is reported explicitly (searchFailed + a warning) and is NEVER returned as a ' +
-      'silent zero-result — if you see it, narrow the query and retry; the messages may still exist. ' +
-      'Archive folders and osTicket-ingested mailboxes (e.g. INBOX.osTicket on support@ addresses accumulate ' +
-      'tens of thousands of messages) are very large — always include a date filter (since/before/on or relative ' +
-      'tokens like "30d") or narrow by subject:/from:, otherwise the search may be slow or truncated.',
+    `Search emails with server-side filters. Omit query (or pass an empty string) to use pure filters. ` +
+      `Free-text \`query\` searches subject + from + body (deep by default). On a very large folder whose ` +
+      `server has no full-text index, a body scan is expensive: it is run on a bounded connection and, ` +
+      `if it cannot complete, returns an explicitly flagged failure (never a silent zero) with a cost ` +
+      `warning suggesting you narrow by date (since/before/on) or subject:/from:. ` +
+      `Supports date ranges (since/before/on, including "7d" / "yesterday"), subject/from/to/cc/bcc/body/text ` +
+      `filters, read/flag/answered state, keywords/labels, header matches, UID ranges, size limits, and attachments. ` +
+      `On Gmail accounts, pass gmail_raw (e.g. 'from:foo has:attachment older_than:30d') for a dramatically ` +
+      `faster native Gmail search. Results are paginated. ${COVERAGE_NOTE} ` +
+      `A failed or timed-out SEARCH is reported explicitly (searchFailed + a warning) and is NEVER returned as a ` +
+      `silent zero-result — if you see it, narrow the query and retry; the messages may still exist. ` +
+      `Archive folders and osTicket-ingested mailboxes (e.g. INBOX.osTicket on support@ addresses accumulate ` +
+      `tens of thousands of messages) are very large — always include a date filter (since/before/on or relative ` +
+      `tokens like "30d") or narrow by subject:/from:, otherwise the search may be slow or truncated.`,
     {
       account: z.string().describe('Account name from list_accounts'),
       query: z
@@ -774,10 +776,11 @@ export default function registerEmailsTools(
   // ---------------------------------------------------------------------------
   server.tool(
     'search_all_accounts',
-    'Search emails across multiple accounts in parallel. Same filter set as search_emails ' +
-      'but fans out across N accounts and merges results sorted by date. Each result is tagged ' +
-      'with the account it came from. Partial failures are surfaced as warnings without failing ' +
-      'the whole call. Useful for "find X anywhere in my inboxes" queries across your email ecosystem.',
+    `Search emails across multiple accounts in parallel. Same filter set as search_emails ` +
+      `but fans out across N accounts and merges results sorted by date. Each result is tagged ` +
+      `with the account it came from. Partial failures are surfaced as warnings without failing ` +
+      `the whole call. Useful for "find X anywhere in my inboxes" queries across your email ecosystem. ` +
+      `IMAP and Microsoft Graph accounts can be mixed. ${COVERAGE_NOTE}`,
     {
       query: z
         .string()

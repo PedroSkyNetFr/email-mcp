@@ -28,6 +28,7 @@ import type {
   Mailbox,
   PaginatedResult,
   QuotaInfo,
+  SearchCoverage,
   SearchStatus,
   SenderStat,
 } from '../types/index.js';
@@ -52,6 +53,7 @@ import type { LabelStrategy } from './label-strategy.js';
 import { detectLabelStrategy } from './label-strategy.js';
 import type { MailboxRef } from './mailbox-resolver.js';
 import { resolveMailboxForAccount } from './mailbox-resolver.js';
+import { buildCoverage, MAX_SCANNED_MESSAGES, SEARCH_SCAN_BUDGET_MS } from './search-coverage.js';
 import type { BuildResult, SearchParams } from './search-criteria.js';
 import { applyLiteralFilters, buildSearchCriteria, chunkUids } from './search-criteria.js';
 import {
@@ -76,15 +78,16 @@ import { applyAccountSignature } from './signature-loader.js';
  */
 const MAX_PARSE_SOURCE_BYTES = 25 * 1024 * 1024;
 
-/** Maximum UIDs retained after the server SEARCH before pagination. */
-const MAX_SEARCH_UIDS = 5000;
-
-/** Maximum match-set size for which we'll envelope-fetch to compute facets. */
+/**
+ * Facettes : au plus ce nombre de messages (les plus récents) sont relus pour
+ * les compter. Au-delà, les facettes portent sur ce sous-ensemble et un
+ * avertissement le dit.
+ */
 const MAX_FACET_UIDS = 10000;
 
 /**
  * R5: folders larger than this are "big enough that a non-FTS BODY scan is a
- * resource risk". Chosen at the MAX_SEARCH_UIDS cap — below it the result set
+ * resource risk". Chosen at the MAX_SCANNED_MESSAGES cap — below it the result set
  * is fully servable anyway; above it (osTicket ~18k, Archive ~79k) a body
  * scan on a server without a full-text index is the abortable/expensive case.
  */
@@ -515,53 +518,116 @@ function applyClientSideFilters(items: EmailMeta[], postFilters: PostFilters): E
 /** Taille des lots FETCH lors du tri client (BODYSTRUCTURE + enveloppe). */
 const CLIENT_FILTER_CHUNK = 200;
 
-/**
- * Budget de temps du tri client. Sur un serveur Dovecot dont le cache
- * d'index ne contient pas encore la BODYSTRUCTURE, le premier parcours oblige
- * le serveur à relire chaque message en entier (constaté chez OVH : plus d'une
- * minute pour ~2 200 messages au premier appel, ~2,5 s une fois le cache
- * chaud). Au-delà de ce budget on rend ce qui a été trouvé, signalé comme
- * partiel — jamais un zéro silencieux, ni un appel qui dépasse le délai du
- * client MCP.
- */
-const CLIENT_FILTER_BUDGET_MS = 20_000;
+/** Taille des lots FETCH INTERNALDATE servant à ordonner les candidats. */
+const ARRIVAL_CHUNK = 1000;
 
-interface NarrowOutcome {
-  /** UID retenus, du plus récent au plus ancien. */
-  uids: number[];
-  /** Nombre de messages effectivement examinés. */
-  scanned: number;
-  /** Faux quand le budget a interrompu le parcours avant la fin. */
-  complete: boolean;
+/**
+ * Compacte une liste d'UID en jeu de séquences IMAP (`1:5,7,9:12`).
+ *
+ * Les candidats d'un SEARCH sont souvent contigus : un dossier de 2 000
+ * messages tient alors en `1:2000` au lieu de 2 000 nombres, ce qui garde la
+ * ligne de commande courte (Dovecot la limite à 64 Ko par défaut).
+ */
+export function compactUidSet(uids: number[]): string {
+  const sorted = [...new Set(uids)].sort((a, b) => a - b);
+  const parts: string[] = [];
+  let i = 0;
+  while (i < sorted.length) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j += 1;
+    parts.push(i === j ? String(sorted[i]) : `${sorted[i]}:${sorted[j]}`);
+    i = j + 1;
+  }
+  return parts.join(',');
+}
+
+/** Un candidat et sa date de réception (ms depuis l'époque, 0 si inconnue). */
+interface Candidate {
+  uid: number;
+  arrival: number;
 }
 
 /**
- * Réduit un jeu d'UID (déjà plafonné et trié du plus récent au plus ancien)
- * aux seuls messages qui satisfont les filtres côté client.
+ * Ordonne les candidats du plus récemment reçu au plus ancien, d'après
+ * INTERNALDATE — la date même que comparent SEARCH `BEFORE` / `SINCE`.
+ *
+ * Pourquoi pas l'ordre des UID : un UID reflète l'arrivée DANS LE DOSSIER, pas
+ * la réception. Un message déplacé (archivage, tri manuel) reçoit un UID neuf
+ * mais garde sa date d'origine : les 5 000 plus grands UID d'un dossier
+ * Archive sont les derniers ARCHIVÉS, pas les plus récents, et une reprise
+ * `before: <plus ancien examiné>` sauterait des messages. Trié sur
+ * INTERNALDATE, tout message non examiné est reçu au plus tard à la date du
+ * plus ancien examiné : la reprise par date ne laisse aucun trou.
+ *
+ * Coût : INTERNALDATE est servi par l'index du serveur, sans lire le message —
+ * sans commune mesure avec la BODYSTRUCTURE lue ensuite. À date égale, l'UID
+ * le plus grand passe d'abord.
+ */
+async function orderByArrival(client: ImapFlow, uids: number[]): Promise<Candidate[]> {
+  const arrival = new Map<number, number>();
+  const ascending = [...uids].sort((a, b) => a - b);
+  /* eslint-disable no-restricted-syntax, no-await-in-loop -- lots séquentiels sur la connexion partagée */
+  for (const chunk of chunkUids(ascending, ARRIVAL_CHUNK)) {
+    for await (const msg of client.fetch(
+      compactUidSet(chunk),
+      { uid: true, internalDate: true },
+      { uid: true },
+    )) {
+      const raw = (msg as unknown as { internalDate?: unknown }).internalDate;
+      const time = raw instanceof Date ? raw.getTime() : Date.parse(String(raw));
+      arrival.set(Number(msg.uid), Number.isNaN(time) ? 0 : time);
+    }
+  }
+  /* eslint-enable no-restricted-syntax, no-await-in-loop */
+  return uids
+    .map((uid) => ({ uid, arrival: arrival.get(uid) ?? 0 }))
+    .sort((a, b) => b.arrival - a.arrival || b.uid - a.uid);
+}
+
+interface ClientScanOutcome {
+  /** UID retenus, du plus récemment reçu au plus ancien. */
+  uids: number[];
+  /** Présent quand tous les candidats n'ont pas pu être examinés. */
+  coverage?: SearchCoverage;
+}
+
+/**
+ * Réduit les candidats d'un SEARCH aux seuls messages qui satisfont les
+ * filtres côté client.
  *
  * Pourquoi AVANT la pagination : filtrer seulement la page courante rendait
  * une page vide dès que les N messages les plus récents n'avaient pas de pièce
  * jointe (« No emails found » alors que la boîte en contient), et affichait le
  * nombre de messages du SEARCH comme total. Ici on lit BODYSTRUCTURE et
- * enveloppe — jamais le corps — par lots, sur au plus MAX_SEARCH_UIDS messages
- * et dans la limite de CLIENT_FILTER_BUDGET_MS.
+ * enveloppe — jamais le corps — par lots, du plus récent au plus ancien.
+ *
+ * Bornes : `MAX_SCANNED_MESSAGES` messages et l'échéance `deadline`. Sur un
+ * Dovecot dont le cache d'index ne contient pas encore la BODYSTRUCTURE, le
+ * premier parcours oblige le serveur à relire chaque message (constaté chez
+ * OVH : plus d'une minute pour ~2 200 messages au premier appel, 1 à 3 s une
+ * fois le cache chaud). Quand une borne l'interrompt, le bilan `coverage` dit
+ * combien de messages ont été examinés et avec quel `before` reprendre.
  */
-async function narrowUidsClientSide(
+async function scanClientSide(
   client: ImapFlow,
   uids: number[],
   postFilters: PostFilters,
-  budgetMs: number = CLIENT_FILTER_BUDGET_MS,
-): Promise<NarrowOutcome> {
+  opts: { deadline: number; before?: string },
+): Promise<ClientScanOutcome> {
   // Valide la regex avant le premier FETCH.
   compileMimetypeFilter(postFilters.attachmentMimetype);
-  const startedAt = Date.now();
+  const ordered = await orderByArrival(client, uids);
+  const examinable = ordered.slice(0, MAX_SCANNED_MESSAGES);
   const kept = new Set<number>();
   let scanned = 0;
   /* eslint-disable no-restricted-syntax, no-await-in-loop -- lots séquentiels sur la connexion partagée */
-  for (const chunk of chunkUids(uids, CLIENT_FILTER_CHUNK)) {
+  for (const chunk of chunkUids(
+    examinable.map((c) => c.uid),
+    CLIENT_FILTER_CHUNK,
+  )) {
     // Le premier lot est toujours examiné : la page 1 n'est jamais vide par
     // simple manque de temps.
-    if (scanned > 0 && Date.now() - startedAt > budgetMs) break;
+    if (scanned > 0 && Date.now() > opts.deadline) break;
     const metas: EmailMeta[] = [];
     for await (const msg of client.fetch(
       chunk.join(','),
@@ -576,21 +642,26 @@ async function narrowUidsClientSide(
     scanned += chunk.length;
   }
   /* eslint-enable no-restricted-syntax, no-await-in-loop */
-  return {
-    // Conserve l'ordre d'entrée (du plus récent au plus ancien).
-    uids: uids.filter((uid) => kept.has(uid)),
-    scanned,
-    complete: scanned >= uids.length,
-  };
-}
 
-/** Avertissement affiché quand le tri client a été interrompu par le budget. */
-function partialScanWarning(outcome: NarrowOutcome, candidates: number): string {
-  return (
-    `Attachment / *_contains filters checked only the ${outcome.scanned} most recent of ` +
-    `${candidates} candidate messages (time budget reached) — results and total are partial; ` +
-    'add since/before or another server-side filter to narrow the scan'
-  );
+  const matched = examinable
+    .slice(0, scanned)
+    .filter((c) => kept.has(c.uid))
+    .map((c) => c.uid);
+  if (scanned >= ordered.length) return { uids: matched };
+
+  const oldest = examinable[scanned - 1]?.arrival;
+  return {
+    uids: matched,
+    coverage: buildCoverage({
+      stoppedBy: scanned < examinable.length ? 'time_budget' : 'message_cap',
+      examined: scanned,
+      candidates: ordered.length,
+      oldestExamined: oldest ? new Date(oldest) : undefined,
+      // SEARCH BEFORE ne compare que la date (RFC 3501).
+      granularity: 'day',
+      currentBefore: opts.before,
+    }),
+  };
 }
 
 /**
@@ -1112,6 +1183,9 @@ export default class ImapService {
     const mailbox = sanitizeMailboxName(options.mailbox ?? 'INBOX');
     const page = options.page ?? 1;
     const pageSize = options.pageSize ?? 20;
+    // Échéance du tri côté client, comptée dès l'entrée : le SEARCH serveur
+    // consomme le même délai client que le parcours.
+    const deadline = Date.now() + SEARCH_SCAN_BUDGET_MS;
 
     const lock = await client.getMailboxLock(mailbox);
     try {
@@ -1143,16 +1217,11 @@ export default class ImapService {
       let uids: number[] = searchOutcome.uids;
       let totalApprox = false;
 
-      // Cap pre-pagination UIDs so huge folders don't balloon later work.
-      if (uids.length > MAX_SEARCH_UIDS) {
-        const originalCount = uids.length;
-        uids.sort((a, b) => b - a);
-        uids = uids.slice(0, MAX_SEARCH_UIDS);
-        totalApprox = true;
-        warnings.push(
-          `Truncated to ${MAX_SEARCH_UIDS} of ${originalCount} matches — narrow the query with more filters`,
-        );
-      }
+      // Aucun plafond ici : sans filtre côté client, seule la page demandée est
+      // lue, quel que soit le nombre de correspondances — total exact, toutes
+      // les pages accessibles. Le plafond MAX_SCANNED_MESSAGES ne borne que le
+      // tri côté client (scanClientSide), qui, lui, lit chaque candidat.
+      let coverage: SearchCoverage | undefined;
 
       if (uids.length === 0) {
         const warning = warnings.length > 0 ? warnings.join('; ') : undefined;
@@ -1168,16 +1237,20 @@ export default class ImapService {
       }
 
       // Du plus récent au plus ancien, puis filtres côté client AVANT la
-      // pagination (voir narrowUidsClientSide) : la page et le total portent
-      // sur les messages qui satisfont réellement les filtres.
+      // pagination (voir scanClientSide) : la page et le total portent sur les
+      // messages qui satisfont réellement les filtres.
       uids.sort((a, b) => b - a);
       if (hasClientSideFilters(postFilters)) {
-        const narrowed = await narrowUidsClientSide(client, uids, postFilters);
-        if (!narrowed.complete) {
+        const scan = await scanClientSide(client, uids, postFilters, {
+          deadline,
+          before: options.before,
+        });
+        uids = scan.uids;
+        if (scan.coverage) {
+          coverage = scan.coverage;
           totalApprox = true;
-          warnings.push(partialScanWarning(narrowed, uids.length));
+          warnings.push(scan.coverage.hint);
         }
-        uids = narrowed.uids;
       }
       const total = uids.length;
       const start = (page - 1) * pageSize;
@@ -1193,6 +1266,7 @@ export default class ImapService {
           hasMore: false,
           ...(warning ? { warning } : {}),
           ...(totalApprox ? { totalApprox } : {}),
+          ...(coverage ? { coverage } : {}),
         };
       }
 
@@ -1229,6 +1303,7 @@ export default class ImapService {
         hasMore: start + pageSize < total,
         ...(warning ? { warning } : {}),
         ...(totalApprox ? { totalApprox } : {}),
+        ...(coverage ? { coverage } : {}),
       };
     } finally {
       lock.release();
@@ -1377,6 +1452,9 @@ export default class ImapService {
     const mailbox = sanitizeMailboxName(options.mailbox ?? 'INBOX');
     const page = options.page ?? 1;
     const pageSize = options.pageSize ?? 20;
+    // Échéance du tri côté client, comptée dès l'entrée : le SEARCH serveur
+    // (éventuellement sur connexion éphémère) consomme le même délai client.
+    const deadline = Date.now() + SEARCH_SCAN_BUDGET_MS;
 
     let activeLock: { release: () => void } | null = await client.getMailboxLock(mailbox);
     const releaseLock = () => {
@@ -1455,15 +1533,11 @@ export default class ImapService {
       let uids: number[] = searchOutcome.uids;
       let totalApprox = false;
 
-      if (uids.length > MAX_SEARCH_UIDS) {
-        const originalCount = uids.length;
-        uids.sort((a, b) => b - a);
-        uids = uids.slice(0, MAX_SEARCH_UIDS);
-        totalApprox = true;
-        warnings.push(
-          `Truncated to ${MAX_SEARCH_UIDS} of ${originalCount} matches — narrow the query with more filters`,
-        );
-      }
+      // Aucun plafond ici : sans filtre côté client, seule la page demandée est
+      // lue, quel que soit le nombre de correspondances — total exact, toutes
+      // les pages accessibles. Le plafond MAX_SCANNED_MESSAGES ne borne que le
+      // tri côté client (scanClientSide), qui, lui, lit chaque candidat.
+      let coverage: SearchCoverage | undefined;
 
       if (uids.length === 0) {
         const warning = warnings.length > 0 ? warnings.join('; ') : undefined;
@@ -1482,30 +1556,36 @@ export default class ImapService {
       uids.sort((a, b) => b - a);
       // Filtres côté client AVANT la pagination et les facettes : page, total
       // et facettes portent sur les messages qui satisfont réellement les
-      // filtres (voir narrowUidsClientSide).
+      // filtres (voir scanClientSide).
       if (hasClientSideFilters(postFilters)) {
-        const narrowed = await narrowUidsClientSide(client, uids, postFilters);
-        if (!narrowed.complete) {
+        const scan = await scanClientSide(client, uids, postFilters, {
+          deadline,
+          before: options.before,
+        });
+        uids = scan.uids;
+        if (scan.coverage) {
+          coverage = scan.coverage;
           totalApprox = true;
-          warnings.push(partialScanWarning(narrowed, uids.length));
+          warnings.push(scan.coverage.hint);
         }
-        uids = narrowed.uids;
       }
       const total = uids.length;
       const start = (page - 1) * pageSize;
       const pageUids = uids.slice(start, start + pageSize);
 
-      // PR 2 Phase G — faceted counts across the full (post-cap) UID set.
-      // Skip when the match set is too large to envelope-fetch efficiently.
+      // PR 2 Phase G — facettes sur le jeu de correspondances. Au-delà de
+      // MAX_FACET_UIDS, elles portent sur les plus récentes seulement (comme
+      // avant, quand le plafond de 5 000 UID tronquait le jeu en amont) — et
+      // l'avertissement le dit.
       let facets: FacetResult | undefined;
       if (postFilters.facets && postFilters.facets.length > 0) {
-        if (uids.length > MAX_FACET_UIDS) {
+        const facetUids = uids.slice(0, MAX_FACET_UIDS);
+        if (facetUids.length < uids.length) {
           warnings.push(
-            `Facets skipped — match set (${uids.length}) exceeds ${MAX_FACET_UIDS}. Add more filters to enable facets.`,
+            `Facets cover only the ${facetUids.length} most recent of ${uids.length} matches — add filters for exact facets.`,
           );
-        } else {
-          facets = await ImapService.computeFacets(client, uids, postFilters.facets, mailbox);
         }
+        facets = await ImapService.computeFacets(client, facetUids, postFilters.facets, mailbox);
       }
 
       if (pageUids.length === 0) {
@@ -1518,6 +1598,7 @@ export default class ImapService {
           hasMore: false,
           ...(warning ? { warning } : {}),
           ...(totalApprox ? { totalApprox } : {}),
+          ...(coverage ? { coverage } : {}),
           ...(facets ? { facets } : {}),
           ...(folderSize !== undefined ? { folderSize } : {}),
         };
@@ -1555,6 +1636,7 @@ export default class ImapService {
         hasMore: start + pageSize < total,
         ...(warning ? { warning } : {}),
         ...(totalApprox ? { totalApprox } : {}),
+        ...(coverage ? { coverage } : {}),
         ...(facets ? { facets } : {}),
         ...(folderSize !== undefined ? { folderSize } : {}),
       };
@@ -1584,7 +1666,12 @@ export default class ImapService {
     accountNames: string[],
     query: string,
     options: SearchOptions = {},
-  ): Promise<PaginatedResult<EmailMeta> & { warnings?: { account: string; error: string }[] }> {
+  ): Promise<
+    PaginatedResult<EmailMeta> & {
+      warnings?: { account: string; error: string }[];
+      accountCoverage?: SearchCoverage[];
+    }
+  > {
     if (accountNames.length === 0) {
       throw new Error('searchAcrossAccounts requires at least one account name');
     }
@@ -1694,6 +1781,8 @@ export default class ImapService {
     let anyYear = false;
     let anyMailbox = false;
     const collectedItems: EmailMeta[] = [];
+    // Bilans de couverture partielle, compte par compte (reprise par `before`).
+    const accountCoverage: SearchCoverage[] = [];
 
     settled.forEach((outcome, idx) => {
       const { name } = participants[idx];
@@ -1731,6 +1820,7 @@ export default class ImapService {
       totalAcross += res.total;
       if (res.totalApprox) totalApprox = true;
       if (res.warning) perAccountWarnings.push(`${name}: ${res.warning}`);
+      if (res.coverage) accountCoverage.push({ ...res.coverage, account: name });
 
       if (res.facets) {
         if (res.facets.sender) {
@@ -1804,6 +1894,7 @@ export default class ImapService {
       ...(totalApprox ? { totalApprox } : {}),
       ...(facetsPresent ? { facets: facetsPresent } : {}),
       ...(mergedWarnings.length > 0 ? { warnings: mergedWarnings } : {}),
+      ...(accountCoverage.length > 0 ? { accountCoverage } : {}),
     };
   }
 
@@ -3512,8 +3603,10 @@ export default class ImapService {
     accountName: string | null,
     query: string,
     options: SearchOptions & { maxRows: number },
-  ): Promise<{ items: EmailMeta[]; truncated: boolean }> {
+  ): Promise<{ items: EmailMeta[]; truncated: boolean; coverage?: SearchCoverage[] }> {
     const { maxRows, ...searchOpts } = options;
+    // Même échéance que searchEmails : l'export répond lui aussi au client MCP.
+    const deadline = Date.now() + SEARCH_SCAN_BUDGET_MS;
 
     // ------------------------------------------------------------------
     // Multi-account — delegate per account and merge
@@ -3535,6 +3628,7 @@ export default class ImapService {
 
       let merged: EmailMeta[] = [];
       let anyTruncated = false;
+      const coverage: SearchCoverage[] = [];
       settled.forEach((outcome, idx) => {
         if (outcome.status === 'fulfilled') {
           const name = accountNames[idx];
@@ -3542,6 +3636,9 @@ export default class ImapService {
             merged.push({ ...m, account: name });
           });
           if (outcome.value.truncated) anyTruncated = true;
+          (outcome.value.coverage ?? []).forEach((c) => {
+            coverage.push({ ...c, account: name });
+          });
         }
       });
       merged.sort(
@@ -3552,7 +3649,11 @@ export default class ImapService {
         merged = merged.slice(0, maxRows);
         anyTruncated = true;
       }
-      return { items: merged, truncated: anyTruncated };
+      return {
+        items: merged,
+        truncated: anyTruncated,
+        ...(coverage.length > 0 ? { coverage } : {}),
+      };
     }
 
     // ------------------------------------------------------------------
@@ -3584,6 +3685,19 @@ export default class ImapService {
       }
 
       uids.sort((a, b) => b - a);
+
+      // Filtres côté client AVANT la coupe à maxRows : couper d'abord ne
+      // gardait que les maxRows plus récents, puis les filtrait — un export
+      // `from_contains` avec max_rows=100 ne voyait que 100 messages.
+      let coverage: SearchCoverage | undefined;
+      if (hasClientSideFilters(postFilters)) {
+        const scan = await scanClientSide(client, uids, postFilters, {
+          deadline,
+          before: searchOpts.before,
+        });
+        uids = scan.uids;
+        coverage = scan.coverage;
+      }
 
       if (uids.length > maxRows) {
         uids = uids.slice(0, maxRows);
@@ -3618,7 +3732,7 @@ export default class ImapService {
       items.sort(
         (a, b) => safeDate(b.date, new Date(0)).getTime() - safeDate(a.date, new Date(0)).getTime(),
       );
-      return { items, truncated };
+      return { items, truncated, ...(coverage ? { coverage: [coverage] } : {}) };
     } finally {
       lock.release();
     }
@@ -3764,7 +3878,7 @@ export default class ImapService {
     assertSafeDestination(input.destinationFolder);
     await mkdir(input.destinationFolder, { recursive: true });
 
-    const { items, truncated } = await this.searchForExport(
+    const { items, truncated, coverage } = await this.searchForExport(
       input.accountNames,
       input.accountName,
       input.query,
@@ -3849,6 +3963,7 @@ export default class ImapService {
       folder: input.destinationFolder,
       matched: items.length,
       truncated,
+      ...(coverage ? { coverage } : {}),
       files_saved: filesSaved,
       total_size: totalSize,
       skipped,
@@ -4042,7 +4157,7 @@ export default class ImapService {
     assertSafeDestination(input.destinationFolder);
     await mkdir(input.destinationFolder, { recursive: true });
 
-    const { items, truncated } = await this.searchForExport(
+    const { items, truncated, coverage } = await this.searchForExport(
       input.accountNames,
       input.accountName,
       input.query,
@@ -4091,6 +4206,7 @@ export default class ImapService {
       folder: input.destinationFolder,
       matched: items.length,
       truncated,
+      ...(coverage ? { coverage } : {}),
       files_saved: filesSaved,
       total_size: totalSize,
       errors,

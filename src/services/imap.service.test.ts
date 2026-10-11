@@ -278,6 +278,41 @@ describe('ImapService', () => {
       expect((criteria.since as Date).toISOString()).toBe('2024-01-01T00:00:00.000Z');
     });
 
+    // Les dates relatives doivent atteindre le SEARCH depuis chaque point
+    // d'entrée des outils de recherche (list_emails, search_emails,
+    // search_all_accounts, export_search et save_*_from_search via
+    // searchForExport).
+    describe('relative dates reach the SEARCH from every entry point', () => {
+      beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-10-11T12:00:00Z'));
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it.each([
+        ['listEmails', async (s: ImapService, o: object) => s.listEmails('test', o)],
+        ['searchEmails', async (s: ImapService, o: object) => s.searchEmails('test', '', o)],
+        [
+          'searchAcrossAccounts',
+          async (s: ImapService, o: object) => s.searchAcrossAccounts(['test'], '', o),
+        ],
+        [
+          'searchForExport',
+          async (s: ImapService, o: object) =>
+            s.searchForExport(null, 'test', '', { ...o, maxRows: 10 }),
+        ],
+      ])('%s: since "60d" / before "yesterday" / sent_since "2w"', async (_name, call) => {
+        await call(service, { since: '60d', before: 'yesterday', sentSince: '2w' });
+
+        const [criteria] = client.search.mock.calls[0];
+        expect((criteria.since as Date).toISOString()).toBe('2026-08-12T00:00:00.000Z');
+        expect((criteria.before as Date).toISOString()).toBe('2026-10-10T00:00:00.000Z');
+        expect((criteria.sentSince as Date).toISOString()).toBe('2026-09-27T00:00:00.000Z');
+      });
+    });
+
     // -----------------------------------------------------------------------
     // Filtres côté client (pièce jointe, littéraux) appliqués AVANT pagination.
     // Scénario réel (OVH) : les N messages les plus récents n'ont pas de pièce
@@ -285,14 +320,25 @@ describe('ImapService', () => {
     // emails found » alors que la boîte contenait des PDF plus anciens.
     // -----------------------------------------------------------------------
     describe('client-side filters run before pagination', () => {
-      /** Boîte simulée : UID 1..30, seuls 3 et 1 portent un PDF ; 7 vient d'edf.fr. */
-      const fakeMessage = (uid: number) => ({
+      /** Développe un jeu de séquences IMAP (`1:3,7`) en liste d'UID. */
+      const uidsOf = (range: string): number[] =>
+        range.split(',').flatMap((part) => {
+          const [lo, hi] = part.split(':').map(Number);
+          return hi === undefined ? [lo] : Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+        });
+
+      /** Date de réception par défaut : le jour `uid` de janvier 2026. */
+      const dayOf = (uid: number) => new Date(Date.UTC(2026, 0, 1) + (uid - 1) * 86_400_000);
+
+      /** Boîte simulée : seuls 3 et 1 portent un PDF ; 7 vient d'edf.fr. */
+      const fakeMessage = (uid: number, arrival: Date = dayOf(uid)) => ({
         uid,
+        internalDate: arrival,
         envelope: {
           subject: `M${uid}`,
           from: [{ address: uid === 7 ? 'facture@edf.fr' : `s${uid}@x.test` }],
           to: [],
-          date: new Date(Date.UTC(2026, 0, uid)).toISOString(),
+          date: arrival.toISOString(),
         },
         flags: new Set<string>(),
         bodyStructure:
@@ -312,15 +358,20 @@ describe('ImapService', () => {
         source: Buffer.from(''),
       });
 
+      /** FETCH simulé : rend exactement les UID demandés ; `onFetch` simule un coût. */
+      const serve = (arrivalOf: (uid: number) => Date = dayOf, onFetch?: () => void) => {
+        client.fetch.mockImplementation((range: string) => {
+          onFetch?.();
+          // eslint-disable-next-line @stylistic/wrap-iife -- même motif que createMockImapClient
+          return (async function* gen() {
+            for (const uid of uidsOf(range)) yield fakeMessage(uid, arrivalOf(uid));
+          })();
+        });
+      };
+
       beforeEach(() => {
         client.search.mockResolvedValue(Array.from({ length: 30 }, (_, i) => i + 1));
-        // Le FETCH renvoie exactement les UID demandés dans la plage.
-        client.fetch.mockImplementation((range: string) =>
-          // eslint-disable-next-line @stylistic/wrap-iife -- même motif que createMockImapClient
-          (async function* gen() {
-            for (const uid of range.split(',').map(Number)) yield fakeMessage(uid);
-          })(),
-        );
+        serve();
       });
 
       it('searchEmails: has_attachment finds older matches when the newest page has none', async () => {
@@ -330,6 +381,7 @@ describe('ImapService', () => {
         expect(result.total).toBe(2);
         expect(result.hasMore).toBe(false);
         expect(result.totalApprox).toBeUndefined();
+        expect(result.coverage).toBeUndefined();
       });
 
       it('searchEmails: paginates over the filtered set, not the raw SEARCH set', async () => {
@@ -385,53 +437,145 @@ describe('ImapService', () => {
         expect(result.total).toBe(2);
       });
 
-      it('stops at the time budget and flags the result as partial, never a silent zero', async () => {
-        // 450 candidats → 3 lots de 200 ; chaque FETCH « coûte » 15 s simulées.
-        client.search.mockResolvedValue(Array.from({ length: 450 }, (_, i) => i + 1));
-        vi.useFakeTimers({ toFake: ['Date'] });
-        try {
-          client.fetch.mockImplementation((range: string) => {
-            vi.setSystemTime(Date.now() + 15_000);
-            // eslint-disable-next-line @stylistic/wrap-iife -- même motif que createMockImapClient
-            return (async function* gen() {
-              for (const uid of range.split(',').map(Number)) yield fakeMessage(uid);
-            })();
-          });
-
-          const result = await service.searchEmails('test', '', { hasAttachment: true });
-
-          // Lots 1 et 2 examinés (30 s > budget de 20 s) ; les PDF (UID 3 et 1)
-          // sont dans le 3e lot, non examiné : le résultat le dit.
-          expect(result.items).toEqual([]);
-          expect(result.totalApprox).toBe(true);
-          expect(result.warning).toMatch(/checked only the 400 most recent of 450/);
-        } finally {
-          vi.useRealTimers();
-        }
-      });
-
       it('without client-side filter, only the page is fetched (no full scan)', async () => {
         await service.searchEmails('test', '', { pageSize: 5 });
 
         expect(client.fetch).toHaveBeenCalledTimes(1);
         expect(client.fetch.mock.calls[0][0]).toBe('30,29,28,27,26');
       });
+
+      // ---------------------------------------------------------------------
+      // Couverture : un parcours interrompu le dit, avec la reprise `before`.
+      // ---------------------------------------------------------------------
+
+      it('stops at the 45 s budget, reports examined/candidates and how to continue', async () => {
+        // 450 candidats → 3 lots de 200 ; chaque lot « coûte » 20 s simulées.
+        client.search.mockResolvedValue(Array.from({ length: 450 }, (_, i) => i + 1));
+        vi.useFakeTimers({ toFake: ['Date'] });
+        try {
+          vi.setSystemTime(new Date('2026-10-11T12:00:00Z'));
+          serve(dayOf, () => {
+            vi.setSystemTime(Date.now() + 20_000);
+          });
+
+          const result = await service.searchEmails('test', '', { hasAttachment: true });
+
+          // INTERNALDATE (20 s), lots 1 et 2 (60 s > 45 s) ; le 3e lot — les
+          // 50 plus anciens, dont les PDF 3 et 1 — n'est pas examiné.
+          expect(result.items).toEqual([]);
+          expect(result.totalApprox).toBe(true);
+          expect(result.coverage).toMatchObject({
+            stoppedBy: 'time_budget',
+            examined: 400,
+            candidates: 450,
+            // UID 51 = le plus ancien examiné, reçu le 2026-02-20.
+            oldestExamined: '2026-02-20T00:00:00.000Z',
+            continueBefore: '2026-02-21',
+          });
+          expect(result.warning).toMatch(/examined the 400 most recent of 450 candidate messages/);
+          expect(result.warning).toMatch(/time budget of 45 s/);
+          expect(result.warning).toMatch(/re-run the same call with before: "2026-02-21"/);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('continuing with the suggested before reaches the older matches', async () => {
+        // L'appel de reprise : le serveur n'applique BEFORE que s'il le reçoit.
+        client.search.mockImplementation(async (criteria: { before?: Date }) =>
+          Array.from({ length: 450 }, (_, i) => i + 1).filter(
+            (uid) => !criteria.before || dayOf(uid) < criteria.before,
+          ),
+        );
+
+        const result = await service.searchEmails('test', '', {
+          hasAttachment: true,
+          before: '2026-02-21',
+        });
+
+        const [criteria] = client.search.mock.calls[0];
+        expect((criteria.before as Date).toISOString()).toBe('2026-02-21T00:00:00.000Z');
+        expect(result.items.map((m) => m.id)).toEqual(['3', '1']);
+        expect(result.coverage).toBeUndefined();
+      });
+
+      it('stops at the 5000-message cap and reports the continuation', async () => {
+        client.search.mockResolvedValue(Array.from({ length: 5200 }, (_, i) => i + 1));
+
+        const result = await service.searchEmails('test', '', { hasAttachment: true });
+
+        // Les 5 000 plus récents (UID 5200 → 201) sont examinés ; les PDF 3 et
+        // 1, plus anciens, sont au-delà du plafond.
+        expect(result.items).toEqual([]);
+        expect(result.coverage).toMatchObject({
+          stoppedBy: 'message_cap',
+          examined: 5000,
+          candidates: 5200,
+          oldestExamined: dayOf(201).toISOString(),
+        });
+        expect(result.coverage?.continueBefore).toBe(
+          new Date(dayOf(201).getTime() + 86_400_000).toISOString().slice(0, 10),
+        );
+        expect(result.warning).toMatch(/scan cap of 5000 messages/);
+      });
+
+      it('orders candidates by arrival date, not UID (moved / archived mail)', async () => {
+        // UID 30..21 : déplacés récemment dans le dossier, mais reçus en 2019.
+        // Le parcours doit commencer par les vrais plus récents (UID 20..1).
+        const arrival = (uid: number) => (uid > 20 ? new Date(Date.UTC(2019, 0, uid)) : dayOf(uid));
+        serve(arrival);
+        const scanned: number[][] = [];
+        const realFetch = client.fetch.getMockImplementation();
+        client.fetch.mockImplementation((range: string, query: { bodyStructure?: boolean }) => {
+          if (query.bodyStructure) scanned.push(uidsOf(range));
+          return realFetch?.(range, query);
+        });
+
+        await service.searchEmails('test', '', { hasAttachment: true });
+
+        expect(scanned[0].slice(0, 3)).toEqual([20, 19, 18]);
+        expect(scanned[0].slice(-1)).toEqual([21]);
+      });
+
+      it('fetches INTERNALDATE with a compact UID set', async () => {
+        await service.searchEmails('test', '', { hasAttachment: true });
+
+        expect(client.fetch.mock.calls[0][0]).toBe('1:30');
+        expect(client.fetch.mock.calls[0][1]).toEqual({ uid: true, internalDate: true });
+      });
+
+      it('listEmails reports the same coverage as searchEmails', async () => {
+        client.search.mockResolvedValue(Array.from({ length: 5200 }, (_, i) => i + 1));
+
+        const result = await service.listEmails('test', { hasAttachment: true });
+
+        expect(result.coverage?.stoppedBy).toBe('message_cap');
+        expect(result.coverage?.examined).toBe(5000);
+      });
+
+      it('searchForExport filters BEFORE cutting to maxRows, and reports coverage', async () => {
+        const exported = await service.searchForExport(null, 'test', '', {
+          hasAttachment: true,
+          maxRows: 5,
+        });
+
+        // L'ancien code gardait les 5 plus récents (30..26) puis filtrait : 0.
+        expect(exported.items.map((m) => m.id)).toEqual(['3', '1']);
+        expect(exported.truncated).toBe(false);
+        expect(exported.coverage).toBeUndefined();
+      });
     });
 
-    it('caps at MAX_SEARCH_UIDS (5000) and emits a truncation warning', async () => {
-      // Return 6000 synthetic UIDs
-      const tooMany = Array.from({ length: 6000 }, (_, i) => i + 1);
-      client.search.mockResolvedValue(tooMany);
+    it('without client-side filter, never truncates: exact total, every page reachable', async () => {
+      // 6000 correspondances : seul la page est lue, il n'y a rien à plafonner.
+      client.search.mockResolvedValue(Array.from({ length: 6000 }, (_, i) => i + 1));
 
-      // fetch yields nothing — we only care about the truncation warning path
-      client.fetch.mockReturnValueOnce((async function* gen() {})());
+      const last = await service.searchEmails('test', '', { pageSize: 100, page: 60 });
 
-      const result = await service.searchEmails('test', '', {});
-
-      expect(result.totalApprox).toBe(true);
-      expect(result.warning).toBeDefined();
-      expect(result.warning).toMatch(/Truncated to 5000 of 6000/);
-      expect(result.total).toBe(5000);
+      expect(last.total).toBe(6000);
+      expect(last.totalApprox).toBeUndefined();
+      expect(last.warning).toBeUndefined();
+      expect(client.fetch.mock.calls[0][0].split(',')[99]).toBe('1');
     });
 
     it('throws when gmail_raw is used on non-Gmail account', async () => {
@@ -564,17 +708,17 @@ describe('ImapService', () => {
     // the NEWEST UIDs would silently drop fresh mail — the worst possible
     // outcome of this fix. This test fails if the cap's descending sort is
     // flipped to ascending or removed.
-    it('AC5 (regression): MAX_SEARCH_UIDS cap retains the NEWEST UIDs, served newest-first', async () => {
-      // 6000 UIDs in ASCENDING order; the cap keeps 5000. Correct behavior
-      // keeps the highest (newest) 5000 and serves page 1 newest-first.
+    it('AC5 (regression): page 1 serves the NEWEST UIDs first, even past 5000 matches', async () => {
+      // 6000 UIDs in ASCENDING order. Sans filtre côté client il n'y a plus de
+      // plafond (total exact) ; page 1 doit rester les 5 plus récents.
       const ascending = Array.from({ length: 6000 }, (_, i) => i + 1); // 1..6000
       client.search.mockResolvedValueOnce(ascending);
       client.fetch.mockReturnValueOnce((async function* gen() {})());
 
       const result = await service.searchEmails('test', '', { pageSize: 5 });
 
-      expect(result.total).toBe(5000);
-      expect(result.totalApprox).toBe(true);
+      expect(result.total).toBe(6000);
+      expect(result.totalApprox).toBeUndefined();
       // Page 1 must be the 5 NEWEST UIDs, descending. An ascending-sort or
       // no-sort regression would retain/serve 1..5000 (the oldest) instead.
       expect(client.fetch).toHaveBeenCalledTimes(1);

@@ -20,6 +20,7 @@ import { assertSafeDestination } from '../services/file-paths.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import type { EmailMeta } from '../types/index.js';
 import {
+  COVERAGE_NOTE,
   FROM_DESCRIPTION,
   literalFilterOptions,
   literalFilterParams,
@@ -164,10 +165,12 @@ export default function registerExportTools(
 ): void {
   server.tool(
     'export_search',
-    'Run any search_emails / search_all_accounts query and stream the result set to a CSV or ' +
-      'NDJSON file under ~/Downloads/ (or a caller-supplied destination). Bypasses the MCP response ' +
-      'byte budget — returns only a summary (path, rows_written, truncated). Default CSV columns: ' +
-      'id, account, date, from, subject, labels, attachments, has_attachments, seen, flagged.',
+    `Run any search_emails / search_all_accounts query and stream the result set to a CSV or ` +
+      `NDJSON file under ~/Downloads/ (or a caller-supplied destination). Bypasses the MCP response ` +
+      `byte budget — returns only a summary (path, rows_written, truncated). Default CSV columns: ` +
+      `id, account, date, from, subject, labels, attachments, has_attachments, seen, flagged. ${
+        COVERAGE_NOTE
+      }`,
     {
       account: z.string().optional().describe('Single-account mode'),
       accounts: z
@@ -250,7 +253,7 @@ export default function registerExportTools(
           accountNames = connections.getAccountNames();
         }
 
-        const { items, truncated } = await imapService.searchForExport(
+        const { items, truncated, coverage } = await imapService.searchForExport(
           accountNames,
           accountName,
           params.query ?? '',
@@ -309,6 +312,9 @@ export default function registerExportTools(
                   rows_written: rowsWritten,
                   truncated,
                   format: params.format,
+                  // Tri côté client interrompu (budget de temps, plafond) :
+                  // combien de messages examinés, et le `before` de reprise.
+                  ...(coverage ? { coverage } : {}),
                   // Un export vide n'est pas nécessairement une boîte vide : le
                   // filtre est interprété par le serveur, qui indexe des jetons.
                   ...(items.length === 0

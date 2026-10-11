@@ -304,6 +304,7 @@ export default function registerAttachmentTools(
                   matched: result.matched,
                   files_saved: result.files_saved,
                   truncated: result.truncated,
+                  ...(result.coverage ? { coverage: result.coverage } : {}),
                   total_size: result.total_size,
                   total_size_human: `${(result.total_size / 1024 / 1024).toFixed(2)}MB`,
                   skipped: result.skipped,

@@ -333,6 +333,44 @@ export interface SearchStatus {
   suggestion: string;
 }
 
+// ---------------------------------------------------------------------------
+// Couverture d'une recherche filtrée côté client (voir services/search-coverage.ts)
+// ---------------------------------------------------------------------------
+
+/** Ce qui a interrompu le parcours. */
+export type CoverageStop =
+  /** Budget de temps atteint. */
+  | 'time_budget'
+  /** Plafond de `MAX_SCANNED_MESSAGES` (5000) messages examinés atteint. */
+  | 'message_cap'
+  /** Le serveur n'a pas rendu davantage de résultats (plafond de `$search` Graph). */
+  | 'server_cap';
+
+/**
+ * Bilan d'un parcours INCOMPLET. Absent du résultat quand tous les candidats
+ * ont été examinés : sa présence suffit à signaler une couverture partielle.
+ */
+export interface SearchCoverage {
+  /** Compte concerné — renseigné par les recherches multi-comptes. */
+  account?: string;
+  stoppedBy: CoverageStop;
+  /** Messages effectivement examinés (les plus récents). */
+  examined: number;
+  /** Candidats renvoyés par le serveur avant le tri côté client. */
+  candidates: number;
+  /** Vrai quand le serveur ne donne pas le nombre exact de candidats. */
+  candidatesApprox?: boolean;
+  /** Date de réception (ISO 8601) du plus ancien message examiné. */
+  oldestExamined?: string;
+  /**
+   * Valeur à passer en `before` pour reprendre. Absente quand on ne peut pas
+   * avancer par date (voir `continuationBefore`).
+   */
+  continueBefore?: string;
+  /** Consigne lisible, reprise telle quelle dans l'avertissement. */
+  hint: string;
+}
+
 export interface PaginatedResult<T> {
   items: T[];
   total: number;
@@ -361,6 +399,12 @@ export interface PaginatedResult<T> {
   folderSize?: number;
   /** Optional bucketed counts across the full match set (capped). */
   facets?: FacetResult;
+  /**
+   * Présent quand le tri côté client n'a pas examiné tous les candidats
+   * (budget de temps, plafond de messages) : résultats et total ne portent
+   * que sur les messages examinés, et `continueBefore` dit comment reprendre.
+   */
+  coverage?: SearchCoverage;
 }
 
 export interface FacetResult {
@@ -559,6 +603,8 @@ export interface BatchAttachmentResult {
   matched: number;
   /** True when the search hit `max_emails` and the set is a prefix, not the whole. */
   truncated: boolean;
+  /** Comptes dont le tri côté client est resté partiel — voir {@link SearchCoverage}. */
+  coverage?: SearchCoverage[];
   files_saved: number;
   total_size: number;
   skipped: number;
@@ -629,6 +675,8 @@ export interface BatchEmailSaveResult {
   matched: number;
   /** True quand la recherche a atteint `max_emails` : le lot est un préfixe. */
   truncated: boolean;
+  /** Comptes dont le tri côté client est resté partiel — voir {@link SearchCoverage}. */
+  coverage?: SearchCoverage[];
   files_saved: number;
   total_size: number;
   errors: { emailId: string; account?: string; error: string }[];
