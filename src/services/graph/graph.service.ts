@@ -131,6 +131,12 @@ function toAddresses(
   return (input ?? []).map((entry) => toAddress(entry));
 }
 
+/** Tri des listes de messages : du plus récent au plus ancien, comme IMAP. */
+const ORDER_BY = 'receivedDateTime desc';
+
+/** Borne basse neutre placée en tête de $filter quand aucune date n'est donnée. */
+const RECEIVED_LOWER_BOUND = '1900-01-01T00:00:00Z';
+
 /** Filtres de date acceptés par les outils de recherche, communs à IMAP et Graph. */
 interface DateFilters {
   since?: string;
@@ -334,20 +340,34 @@ export default class GraphService {
 
     // Graph filters are OData; only the subset with a faithful translation is
     // applied here, so a filter is never silently reinterpreted.
-    const filters: string[] = [];
-    if (options.seen !== undefined) filters.push(`isRead eq ${options.seen ? 'true' : 'false'}`);
+    const others: string[] = [];
+    if (options.seen !== undefined) others.push(`isRead eq ${options.seen ? 'true' : 'false'}`);
     if (options.hasAttachment !== undefined) {
-      filters.push(`hasAttachments eq ${options.hasAttachment ? 'true' : 'false'}`);
+      others.push(`hasAttachments eq ${options.hasAttachment ? 'true' : 'false'}`);
     }
-    filters.push(...dates.received);
     if (options.from) {
-      filters.push(`from/emailAddress/address eq '${options.from.replace(/'/g, "''")}'`);
+      others.push(`from/emailAddress/address eq '${options.from.replace(/'/g, "''")}'`);
     }
-    filters.push(...dates.sent);
+    others.push(...dates.sent);
+
+    // Règle Graph pour $filter + $orderby sur les messages : la propriété de
+    // tri doit figurer dans $filter, EN PREMIER, avant toute autre propriété ;
+    // sinon 400 InefficientFilter (« The restriction or sort order is too
+    // complex for this operation »). Voir
+    // https://learn.microsoft.com/graph/api/user-list-messages, section « Using
+    // filter and orderby in the same query ». Les clauses receivedDateTime
+    // passent donc en tête ; sans filtre de date, une borne basse neutre (1900)
+    // est ajoutée — technique documentée — pour satisfaire la règle sans
+    // restreindre le résultat.
+    const received = [...dates.received];
+    if (received.length === 0 && others.length > 0) {
+      received.push(`receivedDateTime ge ${RECEIVED_LOWER_BOUND}`);
+    }
+    const filters = [...received, ...others];
 
     const query = [
       `$select=${META_SELECT}`,
-      '$orderby=receivedDateTime desc',
+      `$orderby=${ORDER_BY}`,
       `$top=${pageSize}`,
       `$skip=${(page - 1) * pageSize}`,
       '$count=true',

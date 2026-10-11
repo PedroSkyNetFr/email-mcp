@@ -91,3 +91,73 @@ describe('GraphService — date filters', () => {
     expect(client.request).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// $filter + $orderby : Graph exige que receivedDateTime (propriété de tri)
+// apparaisse EN PREMIER dans $filter, sinon 400 InefficientFilter.
+// ---------------------------------------------------------------------------
+
+describe('GraphService — $filter ordering with $orderby=receivedDateTime', () => {
+  /** Vérifie la règle Graph sur un $filter : receivedDateTime d'abord, d'un bloc. */
+  function expectReceivedFirst(filter: string): void {
+    const isReceived = filter.split(' and ').map((c) => c.startsWith('receivedDateTime '));
+    expect(isReceived[0]).toBe(true);
+    const firstOther = isReceived.indexOf(false);
+    if (firstOther !== -1) expect(isReceived.lastIndexOf(true)).toBeLessThan(firstOther);
+  }
+
+  it('puts receivedDateTime before hasAttachments (the InefficientFilter case)', async () => {
+    const { client, service } = build();
+
+    await service.searchEmails('graph', '', { hasAttachment: true, since: '2026-08-01' });
+
+    expect(filterOf(client)).toBe(
+      'receivedDateTime ge 2026-08-01T00:00:00.000Z and hasAttachments eq true',
+    );
+  });
+
+  it('adds a neutral receivedDateTime lower bound when no date is given', async () => {
+    const { client, service } = build();
+
+    await service.searchEmails('graph', '', { hasAttachment: true });
+
+    expect(filterOf(client)).toBe(
+      'receivedDateTime ge 1900-01-01T00:00:00Z and hasAttachments eq true',
+    );
+  });
+
+  it('sends no $filter at all when there is nothing to filter', async () => {
+    const { client, service } = build();
+
+    await service.listEmails('graph', {});
+
+    expect(client.request.mock.calls[0][1]).not.toContain('$filter=');
+  });
+
+  it.each([
+    { seen: false },
+    { seen: true, hasAttachment: false },
+    { hasAttachment: true, before: '2026-09-01', since: '2026-08-01' },
+    { hasAttachment: true, on: '2026-08-01', seen: false },
+    { sentSince: '2026-08-01', hasAttachment: true },
+    { sentBefore: '2026-08-01', since: '30d', seen: true, hasAttachment: true },
+  ])('keeps receivedDateTime first for %o', async (options) => {
+    const { client, service } = build();
+
+    await service.searchEmails('graph', '', options);
+
+    expectReceivedFirst(filterOf(client));
+  });
+
+  // `from` n'atteint $filter que par listEmails (searchEmails l'envoie à $search).
+  it.each([
+    { from: 'a@b.test' },
+    { from: 'a@b.test', since: '7d', hasAttachment: true },
+  ])('listEmails keeps receivedDateTime first for %o', async (options) => {
+    const { client, service } = build();
+
+    await service.listEmails('graph', options);
+
+    expectReceivedFirst(filterOf(client));
+  });
+});
