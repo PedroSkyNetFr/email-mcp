@@ -87,7 +87,7 @@
     "imapflow": "^1.2.9",
     "mailparser": "^3.9.8",
     "node-ical": "^0.25.2",
-    "nodemailer": "^8.0.1",
+    "nodemailer": "^10.0.9",
     "postgres": "^3.4.5",
     "smol-toml": "^1.6.0",
     "zod": "^4.3.6"
