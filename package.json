@@ -103,7 +103,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.15",
+    "@biomejs/biome": "^2.6.2",
     "@eslint/compat": "^2.1.1",
     "@eslint/js": "^9.39.5",
     "@types/mailparser": "^3.9.0",
@@ -111,7 +111,7 @@
     "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^9.39.5",
     "eslint-config-airbnb-extended": "^3.3.0",
-    "lefthook": "^2.2.1",
+    "lefthook": "^2.2.2",
     "testcontainers": "^11.14.0",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
