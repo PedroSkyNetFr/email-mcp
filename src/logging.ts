@@ -1,23 +1,22 @@
 /**
- * MCP protocol logging bridge.
+ * Journalisation structurée du serveur, sur stderr.
  *
- * Forwards structured log messages to the connected MCP client
- * via the logging notification channel declared in server capabilities.
+ * Le canal MCP `notifications/message` et la capacité `logging` sont
+ * dépréciés depuis la révision 2026-07-28 du protocole (SEP-2577). Pour un
+ * serveur stdio, la sortie sûre est stderr : elle ne touche jamais le flux
+ * JSON-RPC de stdout, n'a pas besoin d'attendre la poignée de main
+ * `initialize` / `initialized`, et les clients MCP (Claude Desktop, Cursor…)
+ * la recueillent dans les journaux du serveur.
  *
- * Messages are silently dropped until `markInitialized()` is called,
- * which should happen only after the MCP `initialized` handshake
- * completes.  This prevents pre-handshake notifications from being
- * written to stdout and breaking clients.
+ * Format : une ligne par message —
+ *   2026-11-15T10:00:00.000Z INFO [server] Email MCP server started
  *
- * Usage:
- *   bindServer(server)       — call once after creating the McpServer
- *   markInitialized()        — call from the `oninitialized` callback
- *   mcpLog("info", …)        — fire-and-forget from anywhere
+ * `mcpLog()` garde sa signature `Promise<void>` d'origine : les appels
+ * existants (`await mcpLog(…)` et `mcpLog(…).catch(…)`) restent inchangés.
+ * Rien n'est jamais écrit sur stdout.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-
-type LogLevel =
+export type LogLevel =
   | 'debug'
   | 'info'
   | 'notice'
@@ -27,52 +26,32 @@ type LogLevel =
   | 'alert'
   | 'emergency';
 
-let mcpServerRef: McpServer | null = null;
-
-/** `true` only after the client has completed the MCP `initialized` handshake. */
-let initialized = false;
-
-/**
- * Bind an McpServer instance so subsequent `mcpLog()` calls
- * are forwarded to the connected client.
- */
-export function bindServer(server: McpServer): void {
-  mcpServerRef = server;
+/** Rend une donnée de journal en texte, sans jamais lever. */
+function formatData(data: unknown): string {
+  if (typeof data === 'string') return data;
+  if (data instanceof Error) return data.message;
+  try {
+    return JSON.stringify(data) ?? String(data);
+  } catch {
+    // Structure circulaire ou non sérialisable.
+    return String(data);
+  }
 }
 
 /**
- * Mark the server as fully initialized (handshake complete).
+ * Écrit une ligne de journal horodatée sur stderr.
  *
- * Call this from the `server.server.oninitialized` callback so that
- * `mcpLog()` starts forwarding messages to the client.
- */
-export function markInitialized(): void {
-  initialized = true;
-}
-
-/**
- * Reset module state.  **Test-only** — never call in production.
- * @internal
- */
-// eslint-disable-next-line @typescript-eslint/naming-convention, no-underscore-dangle
-export function __resetForTesting(): void {
-  mcpServerRef = null;
-  initialized = false;
-}
-
-/**
- * Emit a structured log message over the MCP logging channel.
- *
- * Safe to call at any point — silently dropped when:
- *   • the server hasn't been bound yet
- *   • the transport isn't connected
- *   • the MCP handshake hasn't completed (`markInitialized()` not called)
+ * Utilisable n'importe où, à tout moment. Les retours à la ligne du message
+ * sont échappés pour qu'un message reste une ligne. Un échec d'écriture
+ * (stderr fermé) est avalé : la journalisation ne doit jamais casser un outil.
  */
 export async function mcpLog(level: LogLevel, logger: string, data: unknown): Promise<void> {
-  if (!initialized || !mcpServerRef?.isConnected()) return;
+  const message = formatData(data).replace(/\r?\n/g, '\\n');
   try {
-    await mcpServerRef.sendLoggingMessage({ level, logger, data });
+    process.stderr.write(
+      `${new Date().toISOString()} ${level.toUpperCase()} [${logger}] ${message}\n`,
+    );
   } catch {
-    // Never let a logging failure break tool execution
+    // stderr indisponible : on renonce à ce message.
   }
 }

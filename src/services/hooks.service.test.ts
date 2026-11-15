@@ -3,7 +3,7 @@
  * références du message transmises aux alertes.
  */
 
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import type { Server } from '@modelcontextprotocol/server';
 import type { EmailMeta, HooksConfig } from '../types/index.js';
 import eventBus from './event-bus.js';
 import HooksService from './hooks.service.js';

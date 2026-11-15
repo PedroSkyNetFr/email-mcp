@@ -1,74 +1,77 @@
-import { __resetForTesting, bindServer, markInitialized, mcpLog } from './logging.js';
+import type { MockInstance } from 'vitest';
+
+import { mcpLog } from './logging.js';
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Build a fake McpServer with spies for `isConnected` and `sendLoggingMessage`. */
-function createMockServer(connected = true) {
-  return {
-    isConnected: vi.fn(() => connected),
-    sendLoggingMessage: vi.fn(async () => {}),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Tests
+// mcpLog écrit sur stderr, une ligne horodatée par message, jamais sur stdout.
 // ---------------------------------------------------------------------------
 
 describe('mcpLog', () => {
+  let stderrSpy: MockInstance<typeof process.stderr.write>;
+  let stdoutSpy: MockInstance<typeof process.stdout.write>;
+
   beforeEach(() => {
-    __resetForTesting();
+    stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
   });
 
-  it('drops messages when no server is bound', async () => {
-    // No bindServer() called — should not throw
-    await expect(mcpLog('info', 'test', 'hello')).resolves.toBeUndefined();
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
-  it('drops messages before markInitialized() is called', async () => {
-    const mock = createMockServer(true);
-    bindServer(mock as never);
+  /** Les lignes écrites sur stderr pendant le test. */
+  function stderrLines(): string[] {
+    return stderrSpy.mock.calls.map((call: unknown[]) => String(call[0]));
+  }
 
-    await mcpLog('info', 'test', 'should be dropped');
+  it('writes one timestamped line with level and logger to stderr', async () => {
+    await expect(mcpLog('info', 'server', 'Email MCP server started')).resolves.toBeUndefined();
 
-    expect(mock.sendLoggingMessage).not.toHaveBeenCalled();
+    const lines = stderrLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z INFO \[server\] Email MCP server started\n$/,
+    );
   });
 
-  it('forwards messages after markInitialized() when connected', async () => {
-    const mock = createMockServer(true);
-    bindServer(mock as never);
-    markInitialized();
+  it('never writes to stdout, which carries the JSON-RPC stream', async () => {
+    await mcpLog('error', 'imap', 'boom');
+    await mcpLog('debug', 'watcher', { folder: 'INBOX' });
 
-    await mcpLog('info', 'server', 'Email MCP server started');
+    expect(stdoutSpy).not.toHaveBeenCalled();
+    expect(stderrSpy).toHaveBeenCalledTimes(2);
+  });
 
-    expect(mock.sendLoggingMessage).toHaveBeenCalledOnce();
-    expect(mock.sendLoggingMessage).toHaveBeenCalledWith({
-      level: 'info',
-      logger: 'server',
-      data: 'Email MCP server started',
+  it('serializes objects as JSON and errors by their message', async () => {
+    await mcpLog('warning', 'hooks', { account: 'work', count: 2 });
+    await mcpLog('error', 'smtp', new Error('connection refused'));
+
+    const [objectLine, errorLine] = stderrLines();
+    expect(objectLine).toContain('WARNING [hooks] {"account":"work","count":2}');
+    expect(errorLine).toContain('ERROR [smtp] connection refused');
+  });
+
+  it('keeps a multi-line message on a single line', async () => {
+    await mcpLog('info', 'server', 'first\nsecond\r\nthird');
+
+    const [line] = stderrLines();
+    expect(line).toContain('[server] first\\nsecond\\nthird\n');
+    expect(line.split('\n')).toHaveLength(2); // le texte, puis le vide après le \n final
+  });
+
+  it('survives unserializable data', async () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    await expect(mcpLog('info', 'test', circular)).resolves.toBeUndefined();
+    expect(stderrLines()[0]).toContain('[test] [object Object]');
+  });
+
+  it('swallows a failing stderr write', async () => {
+    stderrSpy.mockImplementation(() => {
+      throw new Error('EPIPE');
     });
-  });
 
-  it('drops messages when transport is not connected', async () => {
-    const mock = createMockServer(false); // not connected
-    bindServer(mock as never);
-    markInitialized();
-
-    await mcpLog('warning', 'test', 'no transport');
-
-    expect(mock.sendLoggingMessage).not.toHaveBeenCalled();
-  });
-
-  it('swallows errors from sendLoggingMessage', async () => {
-    const mock = createMockServer(true);
-    mock.sendLoggingMessage = vi.fn(async () => {
-      throw new Error('transport closed');
-    });
-    bindServer(mock as never);
-    markInitialized();
-
-    // Should resolve without throwing
-    await expect(mcpLog('error', 'test', 'boom')).resolves.toBeUndefined();
+    await expect(mcpLog('error', 'test', 'lost')).resolves.toBeUndefined();
   });
 });

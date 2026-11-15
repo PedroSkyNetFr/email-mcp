@@ -3,7 +3,7 @@
  * Graph quand elle reçoit le routeur (et non le service IMAP brut).
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import type ConnectionManager from '../connections/manager.js';
 import type GraphClient from '../services/graph/graph.client.js';
 import GraphService from '../services/graph/graph.service.js';
@@ -32,7 +32,7 @@ type ReadCallback = (
 function register(mailService: unknown): ReadCallback {
   let read: ReadCallback | undefined;
   const server = {
-    resource: (_name: string, _template: unknown, _meta: unknown, cb: ReadCallback) => {
+    registerResource: (_name: string, _template: unknown, _meta: unknown, cb: ReadCallback) => {
       read = cb;
     },
   } as unknown as McpServer;

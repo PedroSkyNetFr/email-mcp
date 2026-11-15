@@ -5,7 +5,7 @@
  * falls back to single-account `searchEmails`.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
@@ -62,18 +62,21 @@ export default function registerSavedSearchesTools(
   connections: ConnectionManager,
   registry: SearchPresetRegistry,
 ): void {
-  server.tool(
+  server.registerTool(
     'run_preset',
-    'Run a saved search preset defined in config.toml under [[searches]]. ' +
-      'Presets bundle a named filter combination you can reuse. ' +
-      'Use list_presets to see available search presets. ' +
-      'Pass pagination to page through large result sets.',
     {
-      name: z.string().describe('Preset name from config.toml [[searches]] or list_presets'),
-      page: numeric(z.number().int().min(1).default(1).optional()),
-      pageSize: numeric(z.number().int().min(1).max(100).default(20).optional()),
+      description:
+        'Run a saved search preset defined in config.toml under [[searches]]. ' +
+        'Presets bundle a named filter combination you can reuse. ' +
+        'Use list_presets to see available search presets. ' +
+        'Pass pagination to page through large result sets.',
+      inputSchema: z.object({
+        name: z.string().describe('Preset name from config.toml [[searches]] or list_presets'),
+        page: numeric(z.number().int().min(1).default(1).optional()),
+        pageSize: numeric(z.number().int().min(1).max(100).default(20).optional()),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async ({ name, page, pageSize }) => {
       const resolvedPage = page ?? 1;
       const resolvedPageSize = pageSize ?? 20;

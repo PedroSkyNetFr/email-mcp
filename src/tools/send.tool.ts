@@ -2,7 +2,7 @@
  * MCP tools: send_email, reply_email, forward_email
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import audit from '../safety/audit.js';
 import { validateInputLength } from '../safety/validation.js';
@@ -20,42 +20,45 @@ export default function registerSendTools(
   // ---------------------------------------------------------------------------
   // send_email
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'send_email',
-    'Send a new email. Supports plain text or HTML body, CC, BCC, and attachments ' +
-      '(from a local path, inline base64 bytes, or a reference to an attachment on an existing message). ' +
-      'HTML mail also carries a generated plain-text alternative. The whole message, attachments ' +
-      'encoded, must fit the size limit: on SMTP the limit the server announces (SIZE), or ' +
-      'max_message_mb when set in the account config; on Graph 35 MB by default (Exchange Online), ' +
-      'or max_message_mb. An oversized message is refused before anything is sent.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      to: z.array(z.string().email()).min(1).describe('Recipient email addresses'),
-      subject: z.string().describe('Email subject'),
-      body: z.string().describe('Email body content'),
-      cc: z.array(z.string().email()).optional().describe('CC recipients'),
-      bcc: z.array(z.string().email()).optional().describe('BCC recipients'),
-      html: z.boolean().default(false).describe('Send as HTML (default: plain text)'),
-      attachments: z
-        .array(attachmentInputSchema)
-        .optional()
-        .describe(
-          'Attachments to include. Each entry is one of: ' +
-            '{ path }: read bytes from a local file (use absolute path); ' +
-            '{ content_base64, filename }: provide bytes inline; ' +
-            '{ source_email_id, source_mailbox, filename }: carry an attachment from another message ' +
-            'without round-tripping bytes through this MCP. Strict failure: if any attachment cannot ' +
-            'be resolved, the email is NOT sent.',
-        ),
-      append_signature: z
-        .boolean()
-        .optional()
-        .describe(
-          "Append the account's configured signature (signature_path) below the body, with its " +
-            'logo/images embedded inline (cid). Forces HTML. Defaults to the account signature_default; pass false to disable.',
-        ),
+      description:
+        'Send a new email. Supports plain text or HTML body, CC, BCC, and attachments ' +
+        '(from a local path, inline base64 bytes, or a reference to an attachment on an existing message). ' +
+        'HTML mail also carries a generated plain-text alternative. The whole message, attachments ' +
+        'encoded, must fit the size limit: on SMTP the limit the server announces (SIZE), or ' +
+        'max_message_mb when set in the account config; on Graph 35 MB by default (Exchange Online), ' +
+        'or max_message_mb. An oversized message is refused before anything is sent.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        to: z.array(z.string().email()).min(1).describe('Recipient email addresses'),
+        subject: z.string().describe('Email subject'),
+        body: z.string().describe('Email body content'),
+        cc: z.array(z.string().email()).optional().describe('CC recipients'),
+        bcc: z.array(z.string().email()).optional().describe('BCC recipients'),
+        html: z.boolean().default(false).describe('Send as HTML (default: plain text)'),
+        attachments: z
+          .array(attachmentInputSchema)
+          .optional()
+          .describe(
+            'Attachments to include. Each entry is one of: ' +
+              '{ path }: read bytes from a local file (use absolute path); ' +
+              '{ content_base64, filename }: provide bytes inline; ' +
+              '{ source_email_id, source_mailbox, filename }: carry an attachment from another message ' +
+              'without round-tripping bytes through this MCP. Strict failure: if any attachment cannot ' +
+              'be resolved, the email is NOT sent.',
+          ),
+        append_signature: z
+          .boolean()
+          .optional()
+          .describe(
+            "Append the account's configured signature (signature_path) below the body, with its " +
+              'logo/images embedded inline (cid). Forces HTML. Defaults to the account signature_default; pass false to disable.',
+          ),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
-    { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (params) => {
       try {
         validateInputLength(params.subject, 998, 'Subject');
@@ -119,43 +122,46 @@ export default function registerSendTools(
   // ---------------------------------------------------------------------------
   // reply_email
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'reply_email',
-    'Reply to an email with proper threading (In-Reply-To & References headers). Use get_email first to read the original. ' +
-      'The original message is quoted below the reply by default (attribution line + quoted text: ' +
-      '"Le DATE, NAME a écrit :" in French by default, "On DATE, NAME wrote:" with reply_language = "en"; ' +
-      'on Graph accounts Exchange writes its own header in the mailbox language), ' +
-      'as desktop clients do — set quoteOriginal=false to send the bare body only.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      emailId: z.string().describe('Email ID to reply to (from list_emails or get_email)'),
-      mailbox: z.string().default('INBOX').describe('Mailbox where the original email is'),
-      body: z.string().describe('Reply body content'),
-      replyAll: z.boolean().default(false).describe('Reply to all recipients'),
-      html: z.boolean().default(false).describe('Send as HTML'),
-      includeAttachments: z
-        .boolean()
-        .default(false)
-        .describe(
-          'Re-attach attachments from the original email to this reply. Strict: if one cannot be ' +
-            'fetched (or exceeds 25 MB), nothing is sent and the error names it.',
-        ),
-      quoteOriginal: z
-        .boolean()
-        .default(true)
-        .describe(
-          'Quote the original message below the reply (default true). In an HTML reply the original ' +
-            'is quoted as escaped text inside <blockquote type="cite">. Set false for the bare body only.',
-        ),
-      appendSignature: z
-        .boolean()
-        .optional()
-        .describe(
-          "Append the account's configured signature (signature_path) below the reply, with its " +
-            'logo/images embedded inline (cid). Forces HTML. Defaults to the account signature_default; pass false to disable.',
-        ),
+      description:
+        'Reply to an email with proper threading (In-Reply-To & References headers). Use get_email first to read the original. ' +
+        'The original message is quoted below the reply by default (attribution line + quoted text: ' +
+        '"Le DATE, NAME a écrit :" in French by default, "On DATE, NAME wrote:" with reply_language = "en"; ' +
+        'on Graph accounts Exchange writes its own header in the mailbox language), ' +
+        'as desktop clients do — set quoteOriginal=false to send the bare body only.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        emailId: z.string().describe('Email ID to reply to (from list_emails or get_email)'),
+        mailbox: z.string().default('INBOX').describe('Mailbox where the original email is'),
+        body: z.string().describe('Reply body content'),
+        replyAll: z.boolean().default(false).describe('Reply to all recipients'),
+        html: z.boolean().default(false).describe('Send as HTML'),
+        includeAttachments: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Re-attach attachments from the original email to this reply. Strict: if one cannot be ' +
+              'fetched (or exceeds 25 MB), nothing is sent and the error names it.',
+          ),
+        quoteOriginal: z
+          .boolean()
+          .default(true)
+          .describe(
+            'Quote the original message below the reply (default true). In an HTML reply the original ' +
+              'is quoted as escaped text inside <blockquote type="cite">. Set false for the bare body only.',
+          ),
+        appendSignature: z
+          .boolean()
+          .optional()
+          .describe(
+            "Append the account's configured signature (signature_path) below the reply, with its " +
+              'logo/images embedded inline (cid). Forces HTML. Defaults to the account signature_default; pass false to disable.',
+          ),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
-    { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (params) => {
       try {
         const result = await smtpService.replyToEmail(params.account, params);
@@ -198,42 +204,45 @@ export default function registerSendTools(
   // ---------------------------------------------------------------------------
   // forward_email
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'forward_email',
-    'Forward an email to new recipients with optional additional message. The original is included ' +
-      'below (as readable text; an HTML original is converted, not pasted as markup) and its ' +
-      'attachments are carried across by default. Strict failure: if an attachment cannot be fetched, ' +
-      'nothing is sent (use includeAttachments=false to forward the body alone).',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      emailId: z.string().describe('Email ID to forward (from list_emails or get_email)'),
-      mailbox: z.string().default('INBOX').describe('Mailbox where the original email is'),
-      to: z.array(z.string().email()).min(1).describe('Forward to these recipients'),
-      body: z.string().optional().describe('Additional message above the forwarded content'),
-      cc: z.array(z.string().email()).optional().describe('CC recipients'),
-      includeAttachments: z
-        .boolean()
-        .default(true)
-        .describe(
-          "Carry the original email's attachments into the forward (default true). Set false for a body-only forward.",
-        ),
-      html: z
-        .boolean()
-        .default(false)
-        .describe(
-          'Also send an HTML part carrying the original HTML (default false: text only, the original ' +
-            'converted to readable text). On Graph accounts the server builds the forward and the ' +
-            'original always keeps its own format.',
-        ),
-      appendSignature: z
-        .boolean()
-        .optional()
-        .describe(
-          "Append the account's configured signature (signature_path) with its logo/images " +
-            'embedded inline (cid). Forces HTML. Defaults to the account signature_default.',
-        ),
+      description:
+        'Forward an email to new recipients with optional additional message. The original is included ' +
+        'below (as readable text; an HTML original is converted, not pasted as markup) and its ' +
+        'attachments are carried across by default. Strict failure: if an attachment cannot be fetched, ' +
+        'nothing is sent (use includeAttachments=false to forward the body alone).',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        emailId: z.string().describe('Email ID to forward (from list_emails or get_email)'),
+        mailbox: z.string().default('INBOX').describe('Mailbox where the original email is'),
+        to: z.array(z.string().email()).min(1).describe('Forward to these recipients'),
+        body: z.string().optional().describe('Additional message above the forwarded content'),
+        cc: z.array(z.string().email()).optional().describe('CC recipients'),
+        includeAttachments: z
+          .boolean()
+          .default(true)
+          .describe(
+            "Carry the original email's attachments into the forward (default true). Set false for a body-only forward.",
+          ),
+        html: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Also send an HTML part carrying the original HTML (default false: text only, the original ' +
+              'converted to readable text). On Graph accounts the server builds the forward and the ' +
+              'original always keeps its own format.',
+          ),
+        appendSignature: z
+          .boolean()
+          .optional()
+          .describe(
+            "Append the account's configured signature (signature_path) with its logo/images " +
+              'embedded inline (cid). Forces HTML. Defaults to the account signature_default.',
+          ),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
-    { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (params) => {
       try {
         const result = await smtpService.forwardEmail(params.account, params);

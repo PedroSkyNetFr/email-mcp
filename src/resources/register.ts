@@ -4,7 +4,7 @@
  * Registers all MCP resources with the server instance.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import type ConnectionManager from '../connections/manager.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import type SchedulerService from '../services/scheduler.service.js';

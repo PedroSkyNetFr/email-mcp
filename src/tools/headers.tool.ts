@@ -17,7 +17,7 @@
  * et ne marque pas le message comme lu.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type { IMailService } from '../services/mail-service.types.js';
@@ -142,36 +142,39 @@ export function formatHeaderDump(
 }
 
 export default function registerHeaderTools(server: McpServer, imapService: IMailService): void {
-  server.tool(
+  server.registerTool(
     'get_email_headers',
-    'Get the COMPLETE Internet headers of a message — every occurrence, unfolded, in message ' +
-      'order — plus a decoded analysis: the full Received chain in chronological order with the ' +
-      'delay at each hop, SPF/DKIM/DMARC verdicts from Authentication-Results, DKIM signatures, ' +
-      'and From/Return-Path/SPF/DKIM domain alignment. Use this (not get_email) to answer ' +
-      '"where did this message really come from", "is this phishing", or "why was it delayed". ' +
-      'Only the header block is fetched, so it is cheap even on huge messages, and the message ' +
-      'is NOT marked as read.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      emailId: z.string().describe('Email ID from list_emails or search_emails'),
-      mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
-      format: z
-        .enum(['summary', 'json'])
-        .default('summary')
-        .describe(
-          'summary=human/AI-readable report (default). json=full structured dump (headers, ' +
-            'grouped values, parsed Received chain, auth verdicts).',
-        ),
-      include_all_headers: z
-        .boolean()
-        .default(true)
-        .describe('summary only: list every header after the analysis'),
-      include_raw: z
-        .boolean()
-        .default(false)
-        .describe('Include the raw header block exactly as received'),
+      description:
+        'Get the COMPLETE Internet headers of a message — every occurrence, unfolded, in message ' +
+        'order — plus a decoded analysis: the full Received chain in chronological order with the ' +
+        'delay at each hop, SPF/DKIM/DMARC verdicts from Authentication-Results, DKIM signatures, ' +
+        'and From/Return-Path/SPF/DKIM domain alignment. Use this (not get_email) to answer ' +
+        '"where did this message really come from", "is this phishing", or "why was it delayed". ' +
+        'Only the header block is fetched, so it is cheap even on huge messages, and the message ' +
+        'is NOT marked as read.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        emailId: z.string().describe('Email ID from list_emails or search_emails'),
+        mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
+        format: z
+          .enum(['summary', 'json'])
+          .default('summary')
+          .describe(
+            'summary=human/AI-readable report (default). json=full structured dump (headers, ' +
+              'grouped values, parsed Received chain, auth verdicts).',
+          ),
+        include_all_headers: z
+          .boolean()
+          .default(true)
+          .describe('summary only: list every header after the analysis'),
+        include_raw: z
+          .boolean()
+          .default(false)
+          .describe('Include the raw header block exactly as received'),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async ({ account, emailId, mailbox, format, include_all_headers, include_raw }) => {
       try {
         const dump = await imapService.getEmailHeaders(account, emailId, mailbox);

@@ -2,7 +2,7 @@
  * MCP tools: save_draft, send_draft, update_draft
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import audit from '../safety/audit.js';
 
@@ -23,44 +23,47 @@ export default function registerDraftTools(
   // ---------------------------------------------------------------------------
   // save_draft
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'save_draft',
-    'Save an email draft to the Drafts folder. Compose over time, then use send_draft to send it. ' +
-      'Supports attachments from a local path, inline base64 bytes, or references to attachments on ' +
-      'an existing message (server-side carry — bytes do not traverse the MCP wire). ' +
-      'Use list_emails with the Drafts mailbox to see saved drafts.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      to: z
-        .array(z.string().email())
-        .default([])
-        .describe('Recipient email addresses (can be empty for drafts)'),
-      subject: z.string().describe('Email subject'),
-      body: z.string().describe('Email body content'),
-      cc: z.array(z.string().email()).optional().describe('CC recipients'),
-      bcc: z.array(z.string().email()).optional().describe('BCC recipients'),
-      html: z.boolean().default(false).describe('Send as HTML (default: plain text)'),
-      in_reply_to: z.string().optional().describe('Message-ID for threading (from get_email)'),
-      attachments: z
-        .array(attachmentInputSchema)
-        .optional()
-        .describe(
-          'Attachments to include. Each entry is one of: ' +
-            '{ path }: read bytes from a local file (use absolute path); ' +
-            '{ content_base64, filename }: provide bytes inline; ' +
-            '{ source_email_id, source_mailbox, filename }: carry an attachment from another message ' +
-            'without round-tripping bytes through this MCP. Strict failure: if any attachment cannot ' +
-            'be resolved, no draft is saved.',
-        ),
-      append_signature: z
-        .boolean()
-        .optional()
-        .describe(
-          "Append the account's configured signature (signature_path) below the body, with its " +
-            'logo/images embedded inline (cid). Forces HTML. Defaults to the account signature_default; pass false to disable.',
-        ),
+      description:
+        'Save an email draft to the Drafts folder. Compose over time, then use send_draft to send it. ' +
+        'Supports attachments from a local path, inline base64 bytes, or references to attachments on ' +
+        'an existing message (server-side carry — bytes do not traverse the MCP wire). ' +
+        'Use list_emails with the Drafts mailbox to see saved drafts.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        to: z
+          .array(z.string().email())
+          .default([])
+          .describe('Recipient email addresses (can be empty for drafts)'),
+        subject: z.string().describe('Email subject'),
+        body: z.string().describe('Email body content'),
+        cc: z.array(z.string().email()).optional().describe('CC recipients'),
+        bcc: z.array(z.string().email()).optional().describe('BCC recipients'),
+        html: z.boolean().default(false).describe('Send as HTML (default: plain text)'),
+        in_reply_to: z.string().optional().describe('Message-ID for threading (from get_email)'),
+        attachments: z
+          .array(attachmentInputSchema)
+          .optional()
+          .describe(
+            'Attachments to include. Each entry is one of: ' +
+              '{ path }: read bytes from a local file (use absolute path); ' +
+              '{ content_base64, filename }: provide bytes inline; ' +
+              '{ source_email_id, source_mailbox, filename }: carry an attachment from another message ' +
+              'without round-tripping bytes through this MCP. Strict failure: if any attachment cannot ' +
+              'be resolved, no draft is saved.',
+          ),
+        append_signature: z
+          .boolean()
+          .optional()
+          .describe(
+            "Append the account's configured signature (signature_path) below the body, with its " +
+              'logo/images embedded inline (cid). Forces HTML. Defaults to the account signature_default; pass false to disable.',
+          ),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    { readOnlyHint: false, destructiveHint: false },
     async ({
       account,
       to,
@@ -125,23 +128,26 @@ export default function registerDraftTools(
   // ---------------------------------------------------------------------------
   // send_draft
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'send_draft',
-    'Send an existing draft email and remove it from Drafts. The draft is fetched, sent via SMTP, then deleted. ' +
-      'Once the message is sent, the result never reports a failure: if filing the Sent copy failed the draft ' +
-      'is kept, and if deleting the draft failed a warning says so — in both cases the message WAS sent, do not ' +
-      'resend it. Use list_emails with the Drafts mailbox to find draft IDs.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      id: z
-        .union([z.number().int(), z.string()])
-        .describe(
-          'Draft id from list_emails on the Drafts mailbox: a numeric UID on IMAP accounts, an ' +
-            'opaque string id on Graph-backed (Exchange) accounts.',
-        ),
-      mailbox: z.string().optional().describe('Drafts folder path (auto-detected if omitted)'),
+      description:
+        'Send an existing draft email and remove it from Drafts. The draft is fetched, sent via SMTP, then deleted. ' +
+        'Once the message is sent, the result never reports a failure: if filing the Sent copy failed the draft ' +
+        'is kept, and if deleting the draft failed a warning says so — in both cases the message WAS sent, do not ' +
+        'resend it. Use list_emails with the Drafts mailbox to find draft IDs.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        id: z
+          .union([z.number().int(), z.string()])
+          .describe(
+            'Draft id from list_emails on the Drafts mailbox: a numeric UID on IMAP accounts, an ' +
+              'opaque string id on Graph-backed (Exchange) accounts.',
+          ),
+        mailbox: z.string().optional().describe('Drafts folder path (auto-detected if omitted)'),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    { readOnlyHint: false, destructiveHint: true },
     async ({ account, id, mailbox }) => {
       try {
         const result = await smtpService.sendDraft(account, id, mailbox);
@@ -178,70 +184,76 @@ export default function registerDraftTools(
   // ---------------------------------------------------------------------------
   // update_draft
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'update_draft',
-    'Replace an existing draft with new content while preserving (or modifying) its attachments. ' +
-      'Use this to rewrite a draft body without losing attached files, or to carry attachments from ' +
-      'another message into a draft. IMAP has no in-place edit, so the implementation APPENDs a new ' +
-      'copy first, then deletes the old UID only after the APPEND succeeds. If anything fails before ' +
-      'APPEND, the old draft is left intact. Returns the NEW draft UID. ' +
-      'Omitted fields (subject, body, recipients) keep the existing draft values. ' +
-      'attachments_keep defaults to ALL existing attachments; pass [] to drop them all. ' +
-      'Never adds the account signature implicitly (signature_default does not apply here): a new ' +
-      'body replaces the old one as given, and an omitted body is kept as is — with its signature ' +
-      'and inline (cid) images if it had them. Pass append_signature: true with a new body to ' +
-      'sign it.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      draft_id: z
-        .union([z.number().int(), z.string()])
-        .describe(
-          'Id of the existing draft: a numeric UID on IMAP accounts, an opaque string id on ' +
-            'Graph-backed (Exchange) accounts.',
-        ),
-      mailbox: z.string().optional().describe('Drafts folder path (auto-detected if omitted)'),
-      subject: z.string().optional().describe('New subject (omit to keep existing)'),
-      body: z.string().optional().describe('New body content (omit to keep existing)'),
-      html: z.boolean().optional().describe('Body is HTML (omit to inherit from existing draft)'),
-      to: z
-        .array(z.string().email())
-        .optional()
-        .describe('New recipient list (omit to keep existing). Pass [] for none.'),
-      cc: z.array(z.string().email()).optional().describe('New CC list (omit to keep existing)'),
-      bcc: z.array(z.string().email()).optional().describe('New BCC list (omit to keep existing)'),
-      in_reply_to: z.string().optional().describe('New In-Reply-To (omit to keep existing)'),
-      attachments_keep: z
-        .array(z.string())
-        .optional()
-        .describe(
-          'Filenames of existing attachments to keep. Omit = keep ALL. Pass [] to drop all. ' +
-            'Filenames not present on the draft are ignored (with a warning in the response).',
-        ),
-      attachments_add: z
-        .array(attachmentInputSchema)
-        .optional()
-        .describe(
-          'New attachments to add — same input shape as save_draft.attachments (path / base64 / ' +
-            'message-reference). Use the message-reference form to carry attachments from another ' +
-            'draft or any message without round-tripping bytes through this MCP.',
-        ),
-      attachments_remove: z
-        .array(z.string())
-        .optional()
-        .describe(
-          'Filenames to drop from the existing draft (subtracted from attachments_keep set)',
-        ),
-      append_signature: z
-        .boolean()
-        .optional()
-        .describe(
-          "Append the account's configured signature (signature_path) below the NEW body, with " +
-            'its images embedded inline (cid). Forces HTML. Default false — unlike save_draft, ' +
-            'the account signature_default is NOT applied. Ignored (with a warning) when body ' +
-            'is omitted, since the kept body already carries its signature if it had one.',
-        ),
+      description:
+        'Replace an existing draft with new content while preserving (or modifying) its attachments. ' +
+        'Use this to rewrite a draft body without losing attached files, or to carry attachments from ' +
+        'another message into a draft. IMAP has no in-place edit, so the implementation APPENDs a new ' +
+        'copy first, then deletes the old UID only after the APPEND succeeds. If anything fails before ' +
+        'APPEND, the old draft is left intact. Returns the NEW draft UID. ' +
+        'Omitted fields (subject, body, recipients) keep the existing draft values. ' +
+        'attachments_keep defaults to ALL existing attachments; pass [] to drop them all. ' +
+        'Never adds the account signature implicitly (signature_default does not apply here): a new ' +
+        'body replaces the old one as given, and an omitted body is kept as is — with its signature ' +
+        'and inline (cid) images if it had them. Pass append_signature: true with a new body to ' +
+        'sign it.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        draft_id: z
+          .union([z.number().int(), z.string()])
+          .describe(
+            'Id of the existing draft: a numeric UID on IMAP accounts, an opaque string id on ' +
+              'Graph-backed (Exchange) accounts.',
+          ),
+        mailbox: z.string().optional().describe('Drafts folder path (auto-detected if omitted)'),
+        subject: z.string().optional().describe('New subject (omit to keep existing)'),
+        body: z.string().optional().describe('New body content (omit to keep existing)'),
+        html: z.boolean().optional().describe('Body is HTML (omit to inherit from existing draft)'),
+        to: z
+          .array(z.string().email())
+          .optional()
+          .describe('New recipient list (omit to keep existing). Pass [] for none.'),
+        cc: z.array(z.string().email()).optional().describe('New CC list (omit to keep existing)'),
+        bcc: z
+          .array(z.string().email())
+          .optional()
+          .describe('New BCC list (omit to keep existing)'),
+        in_reply_to: z.string().optional().describe('New In-Reply-To (omit to keep existing)'),
+        attachments_keep: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Filenames of existing attachments to keep. Omit = keep ALL. Pass [] to drop all. ' +
+              'Filenames not present on the draft are ignored (with a warning in the response).',
+          ),
+        attachments_add: z
+          .array(attachmentInputSchema)
+          .optional()
+          .describe(
+            'New attachments to add — same input shape as save_draft.attachments (path / base64 / ' +
+              'message-reference). Use the message-reference form to carry attachments from another ' +
+              'draft or any message without round-tripping bytes through this MCP.',
+          ),
+        attachments_remove: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Filenames to drop from the existing draft (subtracted from attachments_keep set)',
+          ),
+        append_signature: z
+          .boolean()
+          .optional()
+          .describe(
+            "Append the account's configured signature (signature_path) below the NEW body, with " +
+              'its images embedded inline (cid). Forces HTML. Default false — unlike save_draft, ' +
+              'the account signature_default is NOT applied. Ignored (with a warning) when body ' +
+              'is omitted, since the kept body already carries its signature if it had one.',
+          ),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    { readOnlyHint: false, destructiveHint: true },
     async ({
       account,
       draft_id: draftId,

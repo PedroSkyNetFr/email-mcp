@@ -10,10 +10,10 @@
  *   scheduler Email scheduling management
  */
 
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 
 import { loadConfig } from './config/loader.js';
-import { bindServer, markInitialized, mcpLog } from './logging.js';
+import { mcpLog } from './logging.js';
 import registerAllPrompts from './prompts/register.js';
 import registerAllResources from './resources/register.js';
 import createServer, { PKG_VERSION } from './server.js';
@@ -100,7 +100,6 @@ async function runServer(): Promise<void> {
   const searchPresetRegistry = new SearchPresetRegistry(config.searches);
 
   const server = createServer();
-  bindServer(server);
 
   registerAllTools(
     server,
@@ -124,6 +123,13 @@ async function runServer(): Promise<void> {
   registerAllResources(server, connections, mailService, templateService, schedulerService);
   registerAllPrompts(server);
 
+  // Transport stdio branché à la main (SDK v2) plutôt que `serveStdio()` : la
+  // connexion reste une session 2025 classique (`initialize` puis
+  // `notifications/initialized`), la seule que parle Claude Desktop. Les
+  // révisions 2024-10-07 à 2025-11-25 restent négociées. `serveStdio()`
+  // ajouterait l'ère 2026-07-28, mais sans poignée de main — donc sans
+  // `oninitialized` pour lancer les services ci-dessous — et sans
+  // `createMessage` poussé du serveur, dont dépend le tri des hooks.
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
@@ -141,8 +147,6 @@ async function runServer(): Promise<void> {
   let stopSentPruning: () => void = () => {};
 
   lowLevelServer.oninitialized = () => {
-    markInitialized();
-
     // eslint-disable-next-line no-void
     void (async () => {
       try {
@@ -165,7 +169,7 @@ async function runServer(): Promise<void> {
           );
         }
       } catch (err) {
-        // Log to stderr — mcpLog may not be safe if init itself errored
+        // Écriture directe sur stderr : ne dépend d'aucun module qui aurait pu échouer.
         process.stderr.write(
           `[email-mcp] post-init error: ${err instanceof Error ? err.message : String(err)}\n`,
         );

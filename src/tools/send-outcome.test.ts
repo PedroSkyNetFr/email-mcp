@@ -1,4 +1,4 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import type { IMailService } from '../services/mail-service.types.js';
 import type { ISendService } from '../services/send-service.types.js';
 import registerDraftTools from './drafts.tool.js';
@@ -35,13 +35,13 @@ describe('describeSendOutcome', () => {
 
 describe('send_draft tool outcome', () => {
   function handlerFor(sendDraft: ReturnType<typeof vi.fn>) {
-    const tool = vi.fn();
+    const registerTool = vi.fn();
     registerDraftTools(
-      { tool } as unknown as McpServer,
+      { registerTool } as unknown as McpServer,
       {} as IMailService,
       { sendDraft } as unknown as ISendService,
     );
-    const call = tool.mock.calls.find((c) => c[0] === 'send_draft');
+    const call = registerTool.mock.calls.find((c) => c[0] === 'send_draft');
     return call?.at(-1) as (args: Record<string, unknown>) => Promise<{
       isError?: boolean;
       content: { text: string }[];

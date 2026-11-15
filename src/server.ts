@@ -1,12 +1,12 @@
 /**
  * MCP Server factory.
  *
- * Creates and configures the McpServer instance with capabilities.
+ * Creates and configures the McpServer instance (SDK MCP v2) with capabilities.
  */
 
 import { createRequire } from 'node:module';
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
 
 const esmRequire = createRequire(import.meta.url);
 const pkg = esmRequire('../package.json') as { version: string };
@@ -27,7 +27,8 @@ export default function createServer(): McpServer {
         tools: { listChanged: true },
         prompts: { listChanged: true },
         resources: { subscribe: true, listChanged: true },
-        logging: {},
+        // Pas de capacité `logging` : dépréciée en 2026-07-28 (SEP-2577), le
+        // serveur journalise sur stderr (voir logging.ts).
       },
     },
   );

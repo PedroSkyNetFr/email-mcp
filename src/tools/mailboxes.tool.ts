@@ -2,19 +2,22 @@
  * MCP tool: list_mailboxes
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type { IMailService } from '../services/mail-service.types.js';
 
 export default function registerMailboxesTools(server: McpServer, imapService: IMailService): void {
-  server.tool(
+  server.registerTool(
     'list_mailboxes',
-    'List all mailbox folders for an account with unread counts and special-use flags. Use list_accounts first to get the account name.',
     {
-      account: z.string().describe('Account name from list_accounts'),
+      description:
+        'List all mailbox folders for an account with unread counts and special-use flags. Use list_accounts first to get the account name.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async ({ account }) => {
       try {
         const mailboxes = await imapService.listMailboxes(account);

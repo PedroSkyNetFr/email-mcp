@@ -53,18 +53,16 @@ function fakeService(): never {
   }) as never;
 }
 
-/** Capture la forme d'entrée de chaque `server.tool(nom, description, forme, …)`. */
+/** Capture la forme d'entrée de chaque `server.registerTool(nom, { inputSchema: z.object(forme) }, …)`. */
 function collectShapes(): Map<string, Shape> {
   const shapes = new Map<string, Shape>();
   const server = {
-    tool: (name: string, ...rest: unknown[]) => {
-      const shape = rest.find(
-        (arg): arg is Shape =>
-          typeof arg === 'object' &&
-          arg !== null &&
-          Object.values(arg).some((v) => v instanceof z.ZodType),
-      );
-      if (shape) shapes.set(name, shape);
+    registerTool: (name: string, config: { inputSchema?: unknown }) => {
+      // SDK v2 : le schéma d'entrée est un `z.object(...)` ; sa forme porte les champs.
+      if (config.inputSchema instanceof z.ZodObject) {
+        const shape: Shape = config.inputSchema.shape;
+        if (Object.keys(shape).length > 0) shapes.set(name, shape);
+      }
     },
   };
   const f = fakeService;

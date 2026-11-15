@@ -34,6 +34,11 @@ v0.4.0, summarised by theme. The package version is still 0.4.0.
 - (**cli**) `test` checks each account over the transport it actually uses - ([d6dda40](https://github.com/PedroSkyNetFr/email-mcp/commit/d6dda40))
 - (**signature**) windows-1252 signatures decoded reliably - ([a9f0c3e](https://github.com/PedroSkyNetFr/email-mcp/commit/a9f0c3e))
 
+#### 🔌 MCP SDK
+
+- (**sdk**) migrated from `@modelcontextprotocol/sdk` 1.x to `@modelcontextprotocol/server` 2.4 (stdio transport wired by hand, 2025-era handshake kept: protocol revisions 2024-10-07 to 2025-11-25 still negotiated, so Claude Desktop is unaffected). Tools, prompts and resources go through `registerTool` / `registerPrompt` / `registerResource`; names, descriptions, input schemas and annotations are unchanged. Visible differences: tool input schemas declare JSON Schema 2020-12 instead of draft-07, the experimental `execution.taskSupport` field is gone, prompt arguments that have a default are no longer marked required, and an unknown tool name is answered with a JSON-RPC error instead of an `isError` result
+- (**logging**) server logs go to stderr, one timestamped line per message, instead of MCP `notifications/message`; the deprecated `logging` capability (SEP-2577) is no longer advertised
+
 #### 📦 Build
 
 - (**deps**) imapflow 2.4, nodemailer 10, node-ical 0.27 and dev dependency updates - ([2ef0501](https://github.com/PedroSkyNetFr/email-mcp/commit/2ef0501), [2e4106d](https://github.com/PedroSkyNetFr/email-mcp/commit/2e4106d), [d70a1b4](https://github.com/PedroSkyNetFr/email-mcp/commit/d70a1b4), [3e43084](https://github.com/PedroSkyNetFr/email-mcp/commit/3e43084))

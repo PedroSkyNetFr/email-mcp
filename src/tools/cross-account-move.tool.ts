@@ -11,7 +11,7 @@
  * registration, not a runtime error). For same-account moves use move_email.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
@@ -57,23 +57,26 @@ export default function registerCrossAccountMoveTool(
   const logRepo = new MoveLogRepository(config.database?.url);
   const mover = new CrossAccountMover(connections, logRepo);
 
-  server.tool(
+  server.registerTool(
     'cross_account_move',
-    'Move an email between two DIFFERENT configured accounts, preserving raw ' +
-      'headers, flags, and original date (the message looks natively delivered ' +
-      "at the destination). The source copy is moved to the source account's " +
-      'Trash. For moves within ONE account use move_email instead. Requires the ' +
-      'routing Postgres database to be configured (the move is audit-logged).',
     {
-      sourceAccount: z.string().describe('Source account name (from list_accounts)'),
-      sourceMailbox: z.string().describe('Source mailbox, e.g. INBOX'),
-      emailId: z
-        .union([z.string(), z.array(z.string())])
-        .describe('Source UID, or an array of UIDs for a bulk move (sequential)'),
-      destAccount: z.string().describe('Destination account name (must differ from source)'),
-      destMailbox: z.string().default('INBOX').describe('Destination mailbox (default INBOX)'),
+      description:
+        'Move an email between two DIFFERENT configured accounts, preserving raw ' +
+        'headers, flags, and original date (the message looks natively delivered ' +
+        "at the destination). The source copy is moved to the source account's " +
+        'Trash. For moves within ONE account use move_email instead. Requires the ' +
+        'routing Postgres database to be configured (the move is audit-logged).',
+      inputSchema: z.object({
+        sourceAccount: z.string().describe('Source account name (from list_accounts)'),
+        sourceMailbox: z.string().describe('Source mailbox, e.g. INBOX'),
+        emailId: z
+          .union([z.string(), z.array(z.string())])
+          .describe('Source UID, or an array of UIDs for a bulk move (sequential)'),
+        destAccount: z.string().describe('Destination account name (must differ from source)'),
+        destMailbox: z.string().default('INBOX').describe('Destination mailbox (default INBOX)'),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
     },
-    { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
     async ({ sourceAccount, sourceMailbox, emailId, destAccount, destMailbox }) => {
       const cleanSource = sanitizeMailboxName(sourceMailbox);
       const cleanDest = sanitizeMailboxName(destMailbox);

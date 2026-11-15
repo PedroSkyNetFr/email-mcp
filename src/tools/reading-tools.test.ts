@@ -7,7 +7,7 @@
  * leur schéma (défauts compris), puis gestionnaire appelé.
  */
 
-import { z } from 'zod';
+import type { z } from 'zod';
 
 import type { Email, EmailMeta, PaginatedResult } from '../types/index.js';
 import { DEFAULT_MULTI_BODY_MAX, DEFAULT_SINGLE_BODY_MAX } from '../utils/body-format.js';
@@ -21,16 +21,17 @@ type Handler = (args: Record<string, unknown>) => Promise<{
 
 /** Serveur factice : garde la forme d'entrée et le gestionnaire de chaque outil. */
 function captureTools(register: (server: never) => void) {
-  const tools = new Map<string, { shape: Record<string, z.ZodType>; handler: Handler }>();
+  const tools = new Map<string, { schema: z.ZodType; handler: Handler }>();
   register({
-    tool: (name: string, _desc: string, shape: Record<string, z.ZodType>, ...rest: unknown[]) => {
-      tools.set(name, { shape, handler: rest[rest.length - 1] as Handler });
+    // SDK v2 : registerTool(nom, { description, inputSchema, annotations }, gestionnaire)
+    registerTool: (name: string, config: { inputSchema: z.ZodType }, handler: Handler) => {
+      tools.set(name, { schema: config.inputSchema, handler });
     },
   } as never);
   return async (name: string, input: Record<string, unknown>) => {
     const tool = tools.get(name);
     if (!tool) throw new Error(`unknown tool ${name}`);
-    const args = z.object(tool.shape).parse(input);
+    const args = tool.schema.parse(input) as Record<string, unknown>;
     const result = await tool.handler(args);
     return { ...result, text: result.content.map((c) => c.text).join('\n') };
   };

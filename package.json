@@ -93,7 +93,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.8.1",
-    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@modelcontextprotocol/server": "^2.4.0",
     "html-to-text": "^10.0.1",
     "imapflow": "^2.5.2",
     "mailparser": "^3.9.40",

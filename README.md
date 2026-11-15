@@ -1253,7 +1253,8 @@ instance:
 - the 29 write tools are **not registered** — the model cannot even see them
   (sending, drafts, moves, deletions, flags, labels, folders, templates,
   scheduling, rules, automatic reply, `configure_alerts`);
-- the scheduled queue is not processed (the server logs `Scheduler disabled`);
+- the scheduled queue is not processed (the server logs `Scheduler disabled` on
+  stderr, which the MCP client keeps in its server log);
 - tools that write only locally remain: the `save_*` / `export_*` tools (files),
   `add_to_calendar` and `create_reminder` (local calendar), `test_notification`.
 

@@ -1301,7 +1301,8 @@ instance :
   dossiers, modèles, envois programmés, règles, réponse automatique,
   `configure_alerts`) ;
 - la file des envois programmés n'est pas traitée (le serveur consigne
-  `Scheduler disabled`) ;
+  `Scheduler disabled` sur stderr, que le client MCP conserve dans le journal
+  du serveur) ;
 - les outils qui n'écrivent que localement restent : les outils `save_*` /
   `export_*` (fichiers), `add_to_calendar` et `create_reminder` (calendrier
   local), `test_notification`.

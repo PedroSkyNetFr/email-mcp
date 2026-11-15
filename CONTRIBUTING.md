@@ -68,7 +68,7 @@ test: add rate limiter unit tests
 src/
 ├── main.ts              # CLI entry point
 ├── server.ts            # MCP server factory
-├── logging.ts           # Protocol logging bridge
+├── logging.ts           # Structured logging to stderr (never stdout)
 ├── cli/                 # CLI commands (setup, test, config)
 ├── config/              # Config loading + validation
 ├── connections/         # IMAP/SMTP connection management
@@ -130,7 +130,8 @@ underneath you.
 
 1. Create a new file in `src/tools/` (e.g., `my-feature.tool.ts`)
 2. Export a default function that takes the MCP server + services
-3. Use `server.tool()` with Zod schemas for input validation
+3. Use `server.registerTool()` (MCP SDK v2, `@modelcontextprotocol/server`) with a
+   `z.object({...})` `inputSchema` for input validation
 4. Add tool annotations (`readOnlyHint`, `destructiveHint`, etc.)
 5. Put the logic in a service method, not in the tool handler — the handler should
    parse input, call the service and format the response, so the behaviour stays
