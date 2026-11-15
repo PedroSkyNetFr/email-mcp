@@ -28,6 +28,7 @@ import type {
   EmailSaveResult,
   LabelInfo,
   Mailbox,
+  MailboxSnapshot,
   PaginatedResult,
   SearchCoverage,
 } from '../../types/index.js';
@@ -569,6 +570,36 @@ export default class GraphService {
       totalMessages: folder.totalItemCount ?? 0,
       unseenMessages: folder.unreadItemCount ?? 0,
     }));
+  }
+
+  /**
+   * Compteurs d'un dossier pour la ressource `stats`, côté Graph : le total et
+   * les non-lus viennent des propriétés du dossier (`totalItemCount`,
+   * `unreadItemCount`) — une seule requête, sans parcourir les messages —, le
+   * nombre du jour d'un `$count` filtré sur `receivedDateTime` qui ne renvoie
+   * qu'un identifiant.
+   */
+  async getMailboxSnapshot(accountName: string, mailbox = 'INBOX'): Promise<MailboxSnapshot> {
+    const client = this.client(accountName);
+    const folderId = await this.resolveFolderId(accountName, mailbox);
+    const folder = await client.request<GraphFolder>(
+      'GET',
+      `/me/mailFolders/${folderId}?$select=totalItemCount,unreadItemCount`,
+    );
+
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    const filter = encodeURIComponent(`receivedDateTime ge ${midnight.toISOString()}`);
+    const today = await client.request<{ value: unknown[]; '@odata.count'?: number }>(
+      'GET',
+      `/me/mailFolders/${folderId}/messages?$select=id&$top=1&$count=true&$filter=${filter}`,
+    );
+
+    return {
+      total: folder.totalItemCount ?? 0,
+      unread: folder.unreadItemCount ?? 0,
+      receivedToday: today['@odata.count'] ?? today.value.length,
+    };
   }
 
   // -------------------------------------------------------------------------

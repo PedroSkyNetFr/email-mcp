@@ -16,18 +16,25 @@ import {
   note,
   outro,
   password as p_password,
-  spinner as p_spinner,
   select,
   text,
 } from '@clack/prompts';
 
-import { CONFIG_FILE, configExists, loadRawConfig, saveConfig } from '../config/loader.js';
+import {
+  CONFIG_FILE,
+  configExists,
+  loadRawConfig,
+  normalizeAccount,
+  saveConfig,
+} from '../config/loader.js';
 import type { RawAccountConfig, RawAppConfig } from '../config/schema.js';
 import { AppConfigFileSchema } from '../config/schema.js';
-import ConnectionManager from '../connections/manager.js';
+import { resolveSecretCommands } from '../config/secret-command.js';
+import OAuthService from '../services/oauth.service.js';
 import type { AccountConfig } from '../types/index.js';
 import ensureInteractive from './guard.js';
 import { detectProvider } from './providers.js';
+import { testAccount as probeAccount } from './test.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,7 +72,7 @@ function getSmtpLabel(starttls: boolean, tls: boolean): string {
 // Reusable prompts
 // ---------------------------------------------------------------------------
 
-interface ServerSettings {
+export interface ServerSettings {
   imapHost: string;
   imapPort: number;
   imapTls: boolean;
@@ -234,12 +241,39 @@ async function promptAccountIdentity(defaults?: {
 }
 
 /**
+ * Identifiants saisis. `password` vide = aucun mot de passe saisi : l'entrée
+ * existante garde alors sa source de secret (password, password_command,
+ * oauth2) telle quelle.
+ */
+export interface Credentials {
+  username: string;
+  password: string;
+}
+
+/**
+ * Le secret de ce compte vient-il d'ailleurs que d'un mot de passe en clair ?
+ * Une `password_command` (gestionnaire de mots de passe) ou un bloc oauth2 —
+ * avec ses `*_command` éventuelles — ne se ressaisit pas dans l'assistant.
+ */
+export function externalSecretSource(account?: RawAccountConfig): string | undefined {
+  if (!account) return undefined;
+  if (account.oauth2) return `oauth2 (${account.oauth2.provider})`;
+  if (account.password_command) return 'password_command';
+  return undefined;
+}
+
+/**
  * Prompt for credentials (username, password).
+ *
+ * `askPassword: false` ne demande que l'identifiant : le compte tient son
+ * secret d'une commande ou d'OAuth2, et proposer un mot de passe ici l'aurait
+ * remplacé par un secret en clair.
  */
 async function promptCredentials(defaults?: {
   username?: string;
   email?: string;
-}): Promise<{ username: string; password: string }> {
+  askPassword?: boolean;
+}): Promise<Credentials> {
   const username = await text({
     message: 'Username',
     placeholder: defaults?.email ?? 'you@example.com',
@@ -247,6 +281,10 @@ async function promptCredentials(defaults?: {
     initialValue: defaults?.username ?? defaults?.email,
   });
   assertNotCancel(username);
+
+  if (defaults?.askPassword === false) {
+    return { username, password: '' };
+  }
 
   const password = await p_password({
     message: 'Password / App Password',
@@ -307,66 +345,41 @@ async function resolveServerSettings(
 }
 
 /**
- * Build a normalized AccountConfig for connection testing.
+ * Prépare le compte à tester : exactement la forme que le serveur utilisera,
+ * secrets des `*_command` résolus (le test exerce le vrai secret, pas un mot
+ * de passe vide), sans jamais écrire ces secrets résolus dans le fichier —
+ * seul le compte brut, non résolu, est enregistré.
  */
-function buildTestAccount(
-  identity: { name: string; email: string; fullName: string },
-  creds: { username: string; password: string },
-  server: ServerSettings,
-): AccountConfig {
-  return {
-    name: identity.name,
-    email: identity.email,
-    fullName: identity.fullName || undefined,
-    username: creds.username || identity.email,
-    password: creds.password,
-    imap: {
-      host: server.imapHost,
-      port: server.imapPort,
-      tls: server.imapTls,
-      starttls: !server.imapTls,
-      verifySsl: true,
-    },
-    smtp: {
-      host: server.smtpHost,
-      port: server.smtpPort,
-      tls: server.smtpTls,
-      starttls: server.smtpStarttls,
-      verifySsl: true,
-      pool: {
-        enabled: server.smtpPoolEnabled,
-        maxConnections: server.smtpPoolMaxConnections,
-        maxMessages: server.smtpPoolMaxMessages,
-      },
-    },
-  };
+async function buildTestAccount(raw: RawAccountConfig): Promise<AccountConfig> {
+  // resolveSecretCommands ne lit que `accounts` : une configuration réduite à ce
+  // seul compte suffit, et ne lance pas les commandes des autres comptes.
+  const resolved = await resolveSecretCommands({ accounts: [raw] } as unknown as RawAppConfig);
+  return normalizeAccount(resolved.accounts[0]);
 }
 
 /**
- * Test IMAP and SMTP connections. Returns true if both succeed or user opts to proceed.
+ * Teste le compte par le transport qu'il utilisera réellement — Microsoft Graph
+ * pour `backend = "graph"`, IMAP + SMTP sinon — avec un vrai jeton d'accès pour
+ * un compte OAuth2. Le test d'origine sondait toujours IMAP/SMTP avec le mot de
+ * passe : un compte Graph ou OAuth2 « échouait » à chaque édition, alors que le
+ * serveur, lui, s'y connectait sans peine.
+ *
+ * Renvoie true si tout passe ou si l'utilisateur choisit d'enregistrer quand même.
  */
-async function testConnections(account: AccountConfig): Promise<boolean> {
-  const spinner = p_spinner();
-
-  spinner.start('Testing IMAP connection…');
-  const imapResult = await ConnectionManager.testImap(account);
-  if (imapResult.success) {
-    spinner.stop(
-      `IMAP ✓ ${account.imap.host}:${account.imap.port} — ${imapResult.details?.messages} messages, ${imapResult.details?.folders} folders`,
+async function testConnections(raw: RawAccountConfig): Promise<boolean> {
+  let ok: boolean;
+  try {
+    const account = await buildTestAccount(raw);
+    ok = await probeAccount(account, new OAuthService());
+  } catch (err) {
+    // Typiquement une `password_command` qui échoue (coffre verrouillé).
+    log.error(
+      `Could not prepare the connection test: ${err instanceof Error ? err.message : String(err)}`,
     );
-  } else {
-    spinner.stop(`IMAP ✗ ${imapResult.error}`);
+    ok = false;
   }
 
-  spinner.start('Testing SMTP connection…');
-  const smtpResult = await ConnectionManager.testSmtp(account);
-  if (smtpResult.success) {
-    spinner.stop(`SMTP ✓ ${account.smtp.host}:${account.smtp.port} — authenticated`);
-  } else {
-    spinner.stop(`SMTP ✗ ${smtpResult.error}`);
-  }
-
-  if (!imapResult.success || !smtpResult.success) {
+  if (!ok) {
     const proceed = await confirm({
       message: 'Some connections failed. Save config anyway?',
       initialValue: false,
@@ -381,32 +394,76 @@ async function testConnections(account: AccountConfig): Promise<boolean> {
 }
 
 /**
- * Build a RawAccountConfig from collected data.
+ * Les clés de secret à écrire, d'après ce qui a été saisi.
+ *
+ * Un mot de passe saisi remplace la source existante et retire la
+ * `password_command`, pour qu'une commande périmée ne reprenne pas la main au
+ * chargement (le schéma refuse d'ailleurs les deux à la fois). Rien de saisi :
+ * aucune clé — l'entrée existante garde son mot de passe, sa commande ou son
+ * bloc oauth2. L'ancien code écrivait `password = ""` dans ce cas, ce qui
+ * cassait tout compte dont le secret venait d'une commande ou d'OAuth2.
  */
-function buildRawAccount(
+export function credentialFields(creds: Credentials): Partial<RawAccountConfig> {
+  if (creds.password) {
+    return { password: creds.password, password_command: undefined };
+  }
+  return {};
+}
+
+/**
+ * Construit le compte brut à enregistrer.
+ *
+ * Avec `existing` (édition), les modifications sont FUSIONNÉES dans l'entrée
+ * existante : tout champ que l'assistant ne gère pas — `password_command`,
+ * `oauth2`, `backend = "graph"`, `signature_path`, `signature_default`,
+ * `sent_folder`, `save_to_sent`, `gmail_auto_save`, `verify_ssl`… — est
+ * conservé tel quel. L'ancien code reconstruisait le compte de zéro et les
+ * supprimait tous à la première édition, même d'un simple nom d'affichage.
+ */
+export function buildRawAccount(
   identity: { name: string; email: string; fullName: string },
-  creds: { username: string; password: string },
+  creds: Credentials,
   server: ServerSettings,
+  existing?: RawAccountConfig,
 ): RawAccountConfig {
+  // STARTTLS IMAP : l'assistant ne pose que la question « TLS ? ». Sans TLS
+  // direct, on garde le choix STARTTLS déjà présent dans le fichier ; un compte
+  // qui passe de TLS à « pas de TLS » demande STARTTLS (le défaut historique).
+  let imapStarttls = true;
+  if (server.imapTls) {
+    imapStarttls = false;
+  } else if (existing && !existing.imap.tls) {
+    imapStarttls = existing.imap.starttls;
+  }
+
+  // L'identifiant par défaut est l'adresse : ne pas l'écrire explicitement dans
+  // une entrée qui l'omettait et dont l'identifiant n'a pas changé.
+  const username = creds.username || identity.email;
+  const keepUsernameImplicit =
+    existing !== undefined && existing.username === undefined && username === identity.email;
+
   return {
+    ...existing,
     name: identity.name,
     email: identity.email,
     full_name: identity.fullName || undefined,
-    username: creds.username || identity.email,
-    password: creds.password,
+    username: keepUsernameImplicit ? undefined : username,
+    ...credentialFields(creds),
     imap: {
+      ...existing?.imap,
       host: server.imapHost,
       port: server.imapPort,
       tls: server.imapTls,
-      starttls: !server.imapTls,
-      verify_ssl: true,
+      starttls: imapStarttls,
+      verify_ssl: existing?.imap.verify_ssl ?? true,
     },
     smtp: {
+      ...existing?.smtp,
       host: server.smtpHost,
       port: server.smtpPort,
       tls: server.smtpTls,
       starttls: server.smtpStarttls,
-      verify_ssl: true,
+      verify_ssl: existing?.smtp.verify_ssl ?? true,
       pool: {
         enabled: server.smtpPoolEnabled,
         max_connections: server.smtpPoolMaxConnections,
@@ -465,8 +522,13 @@ async function addAccount(): Promise<void> {
   if (exists) {
     try {
       existingConfig = await loadRawConfig();
-    } catch {
-      log.warning('Could not parse existing config. A new config will be created.');
+    } catch (err) {
+      // Ne JAMAIS repartir d'une configuration neuve ici : elle remplacerait le
+      // fichier existant, et tous ses comptes seraient perdus pour une faute de
+      // syntaxe. On montre l'erreur (fichier, ligne, champ) et on s'arrête.
+      log.error(err instanceof Error ? err.message : String(err));
+      cancel(`Fix ${CONFIG_FILE} first — it was left untouched.`);
+      return;
     }
   }
 
@@ -487,12 +549,11 @@ async function addAccount(): Promise<void> {
   const creds = await promptCredentials({ email: identity.email });
 
   // 4. Test connections
-  const testAccount = buildTestAccount(identity, creds, server);
-  const ok = await testConnections(testAccount);
+  const newAccount = buildRawAccount(identity, creds, server);
+  const ok = await testConnections(newAccount);
   if (!ok) return;
 
-  // 5. Build and save
-  const newAccount = buildRawAccount(identity, creds, server);
+  // 5. Save
   const config: RawAppConfig = existingConfig
     ? {
         ...existingConfig,
@@ -616,7 +677,9 @@ async function editAccount(nameArg?: string): Promise<void> {
       },
       {
         value: 'credentials',
-        label: 'Username or password',
+        // Un compte dont le secret vient d'une commande ou d'OAuth2 n'a pas de
+        // mot de passe à ressaisir ici : seul l'identifiant est proposé.
+        label: externalSecretSource(current) ? 'Username' : 'Username or password',
         hint: current.username ?? current.email,
       },
       {
@@ -645,10 +708,13 @@ async function editAccount(nameArg?: string): Promise<void> {
     smtpPoolMaxConnections: current.smtp.pool?.max_connections ?? 1,
     smtpPoolMaxMessages: current.smtp.pool?.max_messages ?? 100,
   };
-  let creds = {
+  // Mot de passe vide = « non ressaisi » : l'entrée existante garde sa source
+  // de secret (voir credentialFields). Le secret actuel n'est jamais recopié.
+  let creds: Credentials = {
     username: current.username ?? current.email,
-    password: current.password ?? '',
+    password: '',
   };
+  const secretSource = externalSecretSource(current);
 
   if (fields === 'identity' || fields === 'all') {
     identity = await promptAccountIdentity(identity);
@@ -671,11 +737,22 @@ async function editAccount(nameArg?: string): Promise<void> {
   }
 
   if (fields === 'credentials' || fields === 'all') {
+    if (secretSource) {
+      log.info(
+        `The secret of "${current.name}" comes from ${secretSource}; it is kept as is. ` +
+          `To change it, edit ${CONFIG_FILE}.`,
+      );
+    }
     creds = await promptCredentials({
       username: creds.username,
       email: identity.email,
+      askPassword: !secretSource,
     });
   }
+
+  // Les modifications sont fusionnées dans l'entrée existante : tout champ non
+  // édité (backend, oauth2, *_command, signature…) est conservé.
+  const updatedAccount = buildRawAccount(identity, creds, server, current);
 
   // Test connections
   const shouldTest = await confirm({
@@ -685,13 +762,11 @@ async function editAccount(nameArg?: string): Promise<void> {
   assertNotCancel(shouldTest);
 
   if (shouldTest) {
-    const testAccount = buildTestAccount(identity, creds, server);
-    const ok = await testConnections(testAccount);
+    const ok = await testConnections(updatedAccount);
     if (!ok) return;
   }
 
   // Save updated account
-  const updatedAccount = buildRawAccount(identity, creds, server);
   const updatedAccounts = [...accounts];
   updatedAccounts[accountIndex] = updatedAccount;
 

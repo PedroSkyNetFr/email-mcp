@@ -139,14 +139,61 @@ function loadFromEnv(): RawAppConfig | null {
 // TOML file loader
 // ---------------------------------------------------------------------------
 
+/**
+ * Lit et analyse le fichier TOML.
+ *
+ * Ne renvoie `null` que si le fichier n'existe vraiment pas — le signal « pas
+ * encore configuré » que les appelants traduisent en consignes d'installation.
+ * Tout autre échec lève : une erreur de syntaxe ou un fichier illisible étaient
+ * auparavant avalés dans ce même `null`, si bien qu'une faute d'un caractère
+ * était annoncée « No configuration found » et envoyait l'utilisateur créer un
+ * fichier qu'il avait déjà.
+ */
 async function loadFromFile(filePath: string = CONFIG_FILE): Promise<RawAppConfig | null> {
+  let content: string;
   try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    const parsed = parseTOML(content);
-    return parsed as unknown as RawAppConfig;
-  } catch {
-    return null;
+    content = await fs.readFile(filePath, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`Cannot read config file at ${filePath}: ${detail}`);
   }
+
+  try {
+    return parseTOML(content) as unknown as RawAppConfig;
+  } catch (err) {
+    // smol-toml fournit la ligne et la colonne (propriétés de TomlError) et un
+    // extrait du fichier avec un repère sous le caractère fautif.
+    const detail = err instanceof Error ? err.message : String(err);
+    const { line, column } = err as { line?: unknown; column?: unknown };
+    const where =
+      typeof line === 'number'
+        ? ` (line ${line}${typeof column === 'number' ? `, column ${column}` : ''})`
+        : '';
+    throw new Error(`TOML syntax error in ${filePath}${where}:\n${detail}`);
+  }
+}
+
+/**
+ * Valide une configuration brute en citant chaque champ fautif par son chemin
+ * (`accounts.0.imap.port`). Un `.parse()` nu remontait un bloc ZodError brut
+ * comme erreur fatale du processus, sans dire quel fichier ni quel compte.
+ */
+function validateRawConfig(raw: unknown, source: string): RawAppConfig {
+  const result = AppConfigFileSchema.safeParse(raw);
+  if (result.success) return result.data;
+
+  const accounts = (raw as { accounts?: { name?: unknown }[] } | null)?.accounts;
+  const lines = result.error.issues.map((issue) => {
+    const where = issue.path.length > 0 ? issue.path.join('.') : '(root)';
+    // « accounts.2 » ne dit rien : nommer le compte quand il a un nom.
+    const [section, index] = issue.path;
+    const accountName =
+      section === 'accounts' && typeof index === 'number' ? accounts?.[index]?.name : undefined;
+    const label = typeof accountName === 'string' ? ` (account "${accountName}")` : '';
+    return `  - ${where}${label}: ${issue.message}`;
+  });
+  throw new Error(`Invalid configuration in ${source}:\n${lines.join('\n')}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +278,12 @@ function normalizeOAuth2(
   };
 }
 
-function normalizeAccount(raw: RawAccountConfig): AccountConfig {
+/**
+ * Convertit un compte brut (snake_case, secrets déjà résolus) en `AccountConfig`.
+ * Exportée pour `account add/edit`, qui teste la connexion du compte saisi avec
+ * exactement la forme que le serveur utilisera.
+ */
+export function normalizeAccount(raw: RawAccountConfig): AccountConfig {
   return {
     name: raw.name,
     email: raw.email,
@@ -356,6 +408,7 @@ function normalizeConfig(raw: RawAppConfig): AppConfig {
       // tightens it: a client entry can make one instance read-only, never
       // lift a read_only set in the file.
       readOnly: raw.settings.read_only || process.env.MCP_EMAIL_READ_ONLY === 'true',
+      sentRetentionDays: raw.settings.scheduler?.sent_retention_days,
       watcher: {
         enabled: raw.settings.watcher.enabled,
         folders: raw.settings.watcher.folders,
@@ -412,7 +465,7 @@ export async function loadRawConfig(configPath?: string): Promise<RawAppConfig> 
   if (!fileConfig) {
     throw new Error(`No config file found at: ${filePath}`);
   }
-  return AppConfigFileSchema.parse(fileConfig);
+  return validateRawConfig(fileConfig, filePath);
 }
 
 /**
@@ -423,14 +476,14 @@ export async function loadConfig(configPath?: string): Promise<AppConfig> {
   // 1. Try environment variables first
   const envConfig = loadFromEnv();
   if (envConfig) {
-    const validated = AppConfigFileSchema.parse(envConfig);
+    const validated = validateRawConfig(envConfig, 'MCP_EMAIL_* environment variables');
     return normalizeConfig(await resolveSecretCommands(applyAccountFilter(validated)));
   }
 
   // 2. Fall back to TOML config file
   const fileConfig = await loadFromFile(configPath);
   if (fileConfig) {
-    const validated = AppConfigFileSchema.parse(fileConfig);
+    const validated = validateRawConfig(fileConfig, configPath ?? CONFIG_FILE);
     return normalizeConfig(await resolveSecretCommands(applyAccountFilter(validated)));
   }
 
@@ -464,7 +517,10 @@ export function generateTemplate(): string {
 
 [settings]
 rate_limit = 10  # max emails per minute per account
-read_only = false  # true: send nothing (scheduled emails included), change no mailbox
+read_only = false  # true: send nothing (scheduled emails included), change no mailbox (hook actions included)
+
+# [settings.scheduler]
+# sent_retention_days = 90  # days of sent scheduled-email history kept (0 = keep all)
 
 # [settings.watcher]
 # enabled = false        # enable IMAP IDLE real-time monitoring

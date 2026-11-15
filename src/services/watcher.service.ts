@@ -11,10 +11,12 @@
  */
 
 import { ImapFlow } from 'imapflow';
+import { buildImapFlowOptions, resolveImapAuth } from '../connections/manager.js';
 import { mcpLog } from '../logging.js';
 import type { AccountConfig, EmailMeta, WatcherConfig } from '../types/index.js';
 import eventBus from './event-bus.js';
 import { hasAttachments as hasAttachmentsLenient, safeIsoDate } from './imap.service.js';
+import type OAuthService from './oauth.service.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,17 +68,41 @@ export default class WatcherService {
 
   private accounts: AccountConfig[];
 
-  constructor(config: WatcherConfig, accounts: AccountConfig[]) {
+  private oauthService?: OAuthService;
+
+  /**
+   * @param oauthService service de jetons partagé avec le reste du serveur :
+   *   un compte OAuth2 s'authentifie en IDLE avec un vrai jeton d'accès, et un
+   *   seul rafraîchissement sert toutes les connexions du compte.
+   */
+  constructor(config: WatcherConfig, accounts: AccountConfig[], oauthService?: OAuthService) {
     this.config = config;
     this.accounts = accounts;
+    this.oauthService = oauthService;
   }
 
   async start(): Promise<void> {
     if (!this.config.enabled) return;
 
+    // Un compte servi par Microsoft Graph n'a pas de session IMAP utilisable :
+    // ses identifiants sont consentis pour Graph, et l'IMAP d'Exchange masque
+    // des dossiers. Le surveiller en IDLE échouerait en boucle (reconnexion
+    // toutes les minutes au mieux) : il est écarté, en le disant.
+    const graphAccounts = this.accounts.filter((account) => account.backend === 'graph');
+    if (graphAccounts.length > 0) {
+      mcpLog(
+        'info',
+        'watcher',
+        `IDLE watcher skips Graph-backed account(s): ${graphAccounts
+          .map((account) => account.name)
+          .join(', ')} — real-time watching is IMAP-only.`,
+      ).catch(() => {});
+    }
+    const watchable = this.accounts.filter((account) => account.backend !== 'graph');
+
     const { folders } = this.config;
     const startOps: Promise<void>[] = [];
-    this.accounts.forEach((account) => {
+    watchable.forEach((account) => {
       folders.forEach((folder) => {
         startOps.push(this.startIdle(account, folder));
       });
@@ -144,55 +170,79 @@ export default class WatcherService {
     const state = this.idleStates.get(key);
     if (!state || state.stopped) return;
 
+    let client: ImapFlow | null = null;
     try {
-      const auth = state.account.oauth2
-        ? { user: state.account.username, accessToken: state.account.password }
-        : { user: state.account.username, pass: state.account.password };
+      // Un compte OAuth2 s'authentifie avec un JETON D'ACCÈS obtenu par le
+      // service de jetons, exactement comme le client du ConnectionManager.
+      // L'ancien code passait `account.password` comme jeton — vide ou faux
+      // pour un compte OAuth2 —, si bien que l'IDLE d'un tel compte échouait
+      // à chaque tentative, en boucle de reconnexion.
+      if (state.account.oauth2 && !this.oauthService) {
+        throw new Error('OAuth2 account but no token service was provided to the watcher');
+      }
+      const auth = await resolveImapAuth(state.account, this.oauthService);
 
-      const client = new ImapFlow({
-        host: state.account.imap.host,
-        port: state.account.imap.port,
-        secure: state.account.imap.tls,
-        tls: { rejectUnauthorized: state.account.imap.verifySsl },
-        auth,
-        logger: false,
-        maxIdleTime: this.config.idleTimeout * 1000,
+      const created = new ImapFlow(
+        buildImapFlowOptions(state.account, auth, {
+          maxIdleTime: this.config.idleTimeout * 1000,
+        }),
+      );
+      client = created;
+
+      // Écouteurs posés AVANT connect() : une erreur de socket émise pendant la
+      // connexion, sans écouteur 'error', faisait planter tout le processus.
+      created.on('error', (err: unknown) => {
+        // Suivie d'un 'close', qui déclenche la reconnexion.
+        const errMsg = err instanceof Error ? err.message : String(err);
+        mcpLog(
+          'debug',
+          'watcher',
+          `IDLE client error for ${state.account.name}/${state.folder}: ${errMsg}`,
+        ).catch(() => {});
       });
 
-      await client.connect();
+      // Reconnexion automatique — seulement pour le client ENREGISTRÉ. Un
+      // client qui se ferme avant d'avoir été enregistré (échec de connect ou
+      // de SELECT) est déjà pris en charge par le `catch` ci-dessous : sans ce
+      // garde-fou, les deux chemins programmaient chacun une reconnexion.
+      created.on('close', () => {
+        const current = this.idleStates.get(key);
+        if (current?.client !== created) return;
+        this.updateState(key, { lock: null, client: null });
+        if (!current.stopped) {
+          this.scheduleReconnect(key);
+        }
+      });
 
-      const lock = await client.getMailboxLock(state.folder);
-      const { mailbox } = client;
+      // Listen for new messages
+      created.on('exists', (data: { path: string; count: number; prevCount: number }) => {
+        if (data.count > data.prevCount) {
+          this.handleNewEmails(key).catch(() => {});
+        }
+      });
+
+      await created.connect();
+
+      const lock = await created.getMailboxLock(state.folder);
+
+      // Arrêt demandé pendant la connexion : ne rien laisser ouvert derrière.
+      if (this.idleStates.get(key) !== state || state.stopped) {
+        lock.release();
+        await created.logout().catch(() => {});
+        return;
+      }
+
+      const { mailbox } = created;
       const uidNext =
         mailbox && typeof mailbox === 'object'
           ? ((mailbox as { uidNext?: number }).uidNext ?? 1)
           : 1;
 
       this.updateState(key, {
-        client,
+        client: created,
         lock,
         lastSeenUid: uidNext - 1,
         backoffMs: INITIAL_BACKOFF_MS,
-      });
-
-      // Listen for new messages
-      client.on('exists', (data: { path: string; count: number; prevCount: number }) => {
-        if (data.count > data.prevCount) {
-          this.handleNewEmails(key).catch(() => {});
-        }
-      });
-
-      // Auto-reconnect on close
-      client.on('close', () => {
-        this.updateState(key, { lock: null, client: null });
-        const current = this.idleStates.get(key);
-        if (current && !current.stopped) {
-          this.scheduleReconnect(key);
-        }
-      });
-
-      client.on('error', () => {
-        // Error will be followed by 'close' event
       });
 
       await mcpLog(
@@ -201,6 +251,16 @@ export default class WatcherService {
         `IDLE started: ${state.account.name}/${state.folder} (uid > ${uidNext - 1})`,
       );
     } catch (err) {
+      // Connexion établie mais SELECT refusé (dossier absent, droits) : fermer
+      // le client, sinon chaque tentative de reconnexion laissait une session
+      // IMAP ouverte de plus.
+      if (client) {
+        try {
+          client.close();
+        } catch {
+          /* déjà fermé */
+        }
+      }
       const errMsg = err instanceof Error ? err.message : String(err);
       await mcpLog(
         'warning',
@@ -243,13 +303,22 @@ export default class WatcherService {
       const emails: EmailMeta[] = [];
       let maxUid = state.lastSeenUid;
 
+      // `{ uid: true }` en TROISIÈME argument : c'est lui qui fait lire la plage
+      // comme des UID. Le `uid: true` de la requête ne fait que demander l'UID
+      // dans la réponse — sans l'option, « 101:* » était lu comme des numéros
+      // de séquence, et un nouveau message pouvait être manqué ou un ancien
+      // renvoyé.
       // eslint-disable-next-line no-restricted-syntax -- need sequential async iteration
-      for await (const msg of state.client.fetch(searchRange, {
-        uid: true,
-        envelope: true,
-        flags: true,
-        bodyStructure: true,
-      })) {
+      for await (const msg of state.client.fetch(
+        searchRange,
+        {
+          uid: true,
+          envelope: true,
+          flags: true,
+          bodyStructure: true,
+        },
+        { uid: true },
+      )) {
         if (msg.uid > state.lastSeenUid) {
           emails.push(WatcherService.buildEmailMeta(msg));
           maxUid = Math.max(maxUid, msg.uid);

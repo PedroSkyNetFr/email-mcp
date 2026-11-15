@@ -36,17 +36,22 @@ export default function registerStatsResource(
     async (uri, { account }) => {
       const accountName = account as string;
 
-      // Lightweight STATUS query (fast, no envelope fetch)
-      const stats = await imapService.getEmailStats(accountName, 'INBOX', 'day');
+      // Compteurs bon marché (STATUS sur IMAP, propriétés du dossier sur
+      // Graph) : `inbox_total` est désormais le vrai total du dossier, et non
+      // plus une copie du nombre de messages du jour.
+      const mailbox = await imapService.getMailboxSnapshot(accountName, 'INBOX');
 
-      const quota = await imapService.getQuota(accountName);
+      // Le quota n'existe que sur IMAP (extension QUOTA) : un compte Graph, ou
+      // un serveur qui refuse GETQUOTAROOT, rend simplement la ressource sans
+      // quota au lieu de la faire échouer entière.
+      const quota = await imapService.getQuota(accountName).catch(() => null);
 
       const snapshot = {
         account: accountName,
         date: new Date().toISOString().split('T')[0],
-        inbox_total: stats.totalReceived,
-        inbox_unread: stats.unreadCount,
-        inbox_today: stats.totalReceived,
+        inbox_total: mailbox.total,
+        inbox_unread: mailbox.unread,
+        inbox_today: mailbox.receivedToday,
         quota: quota ?? undefined,
       };
 

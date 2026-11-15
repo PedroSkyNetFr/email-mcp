@@ -32,6 +32,11 @@ export interface MailBackends {
   mailService: IMailService;
   /** Sending, routed to SMTP or Graph per account */
   sendService: ISendService;
+  /**
+   * Service de jetons OAuth2 partagé : la veille IDLE doit s'en servir aussi,
+   * pour qu'un seul rafraîchissement serve toutes les connexions d'un compte.
+   */
+  oauthService: OAuthService;
 }
 
 export default function createMailBackends(config: AppConfig): MailBackends {
@@ -60,5 +65,5 @@ export default function createMailBackends(config: AppConfig): MailBackends {
   const graphSendService = new GraphSendService(graphClients, requireAccount);
   const sendService = createSendRouter(smtpService, graphSendService, findAccount);
 
-  return { connections, imapService, graphService, mailService, sendService };
+  return { connections, imapService, graphService, mailService, sendService, oauthService };
 }

@@ -3,10 +3,16 @@ import eventBus from './event-bus.js';
 import WatcherService from './watcher.service.js';
 
 // Instances créées par le mock, pour piloter les événements IMAP d'un test.
-const { imapInstances } = vi.hoisted(() => ({
+const { imapInstances, mockControl } = vi.hoisted(() => ({
+  /** `failNextLock` : la prochaine instance refuse le SELECT (getMailboxLock). */
+  mockControl: { failNextLock: false },
   imapInstances: [] as {
+    options: Record<string, unknown>;
     on: ReturnType<typeof vi.fn>;
     fetch: ReturnType<typeof vi.fn>;
+    connect: ReturnType<typeof vi.fn>;
+    close: ReturnType<typeof vi.fn>;
+    getMailboxLock: ReturnType<typeof vi.fn>;
   }[],
 }));
 
@@ -20,8 +26,15 @@ vi.mock('imapflow', () => {
     getMailboxLock = vi.fn().mockResolvedValue({ release: vi.fn() });
     on = vi.fn();
     fetch = vi.fn();
+    close = vi.fn();
+    options: Record<string, unknown>;
 
-    constructor() {
+    constructor(options: Record<string, unknown>) {
+      this.options = options;
+      if (mockControl.failNextLock) {
+        mockControl.failNextLock = false;
+        this.getMailboxLock = vi.fn().mockRejectedValue(new Error('NONEXISTENT'));
+      }
       imapInstances.push(this);
     }
   }
@@ -117,6 +130,93 @@ describe('WatcherService', () => {
     await watcher.start();
     const status = watcher.getStatus();
     expect(status).toHaveLength(2);
+    await watcher.stop();
+  });
+
+  // -------------------------------------------------------------------------
+  // Lot connexions (point 8)
+  // -------------------------------------------------------------------------
+
+  it('authenticates an OAuth2 account with an access token from the token service', async () => {
+    const config: WatcherConfig = { enabled: true, folders: ['INBOX'], idleTimeout: 1740 };
+    const oauthAccount: AccountConfig = {
+      ...testAccount,
+      password: undefined,
+      oauth2: { provider: 'google', clientId: 'id', clientSecret: 's', refreshToken: 'r' },
+    };
+    const oauthService = { getAccessToken: vi.fn().mockResolvedValue('ya29.token') };
+    const watcher = new WatcherService(config, [oauthAccount], oauthService as never);
+    await watcher.start();
+
+    const client = imapInstances[imapInstances.length - 1];
+    // Avant : `accessToken: account.password` — vide pour un compte OAuth2.
+    expect(client.options.auth).toEqual({ user: 'test@example.com', accessToken: 'ya29.token' });
+    expect(oauthService.getAccessToken).toHaveBeenCalledWith(oauthAccount.oauth2);
+    await watcher.stop();
+  });
+
+  it('skips Graph-backed accounts', async () => {
+    const config: WatcherConfig = { enabled: true, folders: ['INBOX'], idleTimeout: 1740 };
+    const before = imapInstances.length;
+    const watcher = new WatcherService(config, [{ ...testAccount, backend: 'graph' }]);
+    await watcher.start();
+    expect(watcher.getStatus()).toHaveLength(0);
+    expect(imapInstances.length).toBe(before);
+    await watcher.stop();
+  });
+
+  it('requires STARTTLS when the account asks for it', async () => {
+    const config: WatcherConfig = { enabled: true, folders: ['INBOX'], idleTimeout: 1740 };
+    const watcher = new WatcherService(config, [
+      { ...testAccount, imap: { ...testAccount.imap, port: 143, tls: false, starttls: true } },
+    ]);
+    await watcher.start();
+    const client = imapInstances[imapInstances.length - 1];
+    expect(client.options).toMatchObject({ doSTARTTLS: true, secure: false, maxIdleTime: 1740000 });
+    await watcher.stop();
+  });
+
+  it('fetches new mail by UID range (third fetch argument)', async () => {
+    const config: WatcherConfig = { enabled: true, folders: ['INBOX'], idleTimeout: 1740 };
+    const watcher = new WatcherService(config, [testAccount]);
+    await watcher.start();
+    const client = imapInstances[imapInstances.length - 1];
+    client.fetch.mockReturnValue(
+      // eslint-disable-next-line @stylistic/wrap-iife -- même motif que les autres mocks de fetch
+      (async function* gen() {})(),
+    );
+    const existsHandler = client.on.mock.calls.find(
+      ([event]) => event === 'exists',
+    )?.[1] as (data: { path: string; count: number; prevCount: number }) => void;
+
+    existsHandler({ path: 'INBOX', count: 2, prevCount: 1 });
+
+    await vi.waitFor(() => {
+      expect(client.fetch).toHaveBeenCalled();
+    });
+    const [range, , options] = client.fetch.mock.calls[0] as [string, unknown, unknown];
+    expect(range).toBe('100:*');
+    expect(options).toEqual({ uid: true });
+    await watcher.stop();
+  });
+
+  it('closes the client when SELECT fails after connect, and registers listeners before connect', async () => {
+    const config: WatcherConfig = { enabled: true, folders: ['Missing'], idleTimeout: 1740 };
+    const watcher = new WatcherService(config, [testAccount]);
+    const before = imapInstances.length;
+    mockControl.failNextLock = true;
+    await watcher.start();
+    const client = imapInstances[before];
+
+    // Avant : le client connecté mais sans dossier restait ouvert, et chaque
+    // reconnexion en ajoutait un.
+    expect(client.close).toHaveBeenCalled();
+    expect(client.on.mock.invocationCallOrder[0]).toBeLessThan(
+      client.connect.mock.invocationCallOrder[0],
+    );
+    const events = client.on.mock.calls.map(([event]) => event);
+    expect(events).toEqual(expect.arrayContaining(['error', 'close', 'exists']));
+    // stop() annule la reconnexion programmée.
     await watcher.stop();
   });
 });

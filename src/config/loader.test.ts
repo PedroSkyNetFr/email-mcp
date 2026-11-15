@@ -122,6 +122,56 @@ describe('Config Loader', () => {
       await expect(loadConfig(badPath)).rejects.toThrow('No configuration found');
     });
 
+    // Avant : toute erreur de lecture était avalée en « No configuration found ».
+    it('reports a TOML syntax error with the file and the line, not "no configuration"', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        `${MINIMAL_TOML}
+[settings
+rate_limit = 5
+`,
+      );
+
+      const err = await loadConfig(configPath).then(
+        () => new Error('expected a rejection'),
+        (e: unknown) => e as Error,
+      );
+
+      expect(err.message).toContain(`TOML syntax error in ${configPath}`);
+      expect(err.message).toMatch(/line \d+/i);
+      expect(err.message).not.toContain('No configuration found');
+    });
+
+    it('reports schema errors by field path and account name', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        MINIMAL_TOML.replace('host = "imap.example.com"', 'host = "imap.example.com"\nport = 0'),
+      );
+
+      const err = await loadConfig(configPath).then(
+        () => new Error('expected a rejection'),
+        (e: unknown) => e as Error,
+      );
+
+      expect(err.message).toContain(`Invalid configuration in ${configPath}`);
+      expect(err.message).toContain('accounts.0.imap.port (account "test")');
+      expect(err.message).not.toContain('No configuration found');
+    });
+
+    it('reads [settings.scheduler] sent_retention_days', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        `[settings.scheduler]
+sent_retention_days = 30
+${MINIMAL_TOML}`,
+      );
+      const config = await loadConfig(configPath);
+      expect(config.settings.sentRetentionDays).toBe(30);
+    });
+
     it('normalizes snake_case to camelCase', async () => {
       const toml = `
 [[accounts]]

@@ -29,6 +29,11 @@ export interface AlertPayload {
   priority: UrgencyLevel;
   labels?: string[];
   ruleName?: string;
+  /** UID du message — permet au consommateur d'un webhook d'agir dessus (le relire). */
+  uid?: string;
+  /** Dossier où le message a été vu. */
+  folder?: string;
+  hasAttachments?: boolean;
 }
 
 export interface PlatformDiagnostics {
@@ -387,6 +392,11 @@ export default class NotifierService {
       priority: payload.priority,
       labels: payload.labels ?? [],
       rule: payload.ruleName ?? null,
+      // Sans ces trois champs, le consommateur n'avait qu'un expéditeur et un
+      // sujet : impossible de relire le message ou de savoir où il est.
+      uid: payload.uid ?? null,
+      folder: payload.folder ?? null,
+      hasAttachments: payload.hasAttachments ?? false,
       timestamp: new Date().toISOString(),
     });
 
@@ -401,6 +411,10 @@ export default class NotifierService {
         headers: { 'Content-Type': 'application/json' },
         body,
         signal: controller.signal,
+        // Un point d'accès compromis ou mal configuré pourrait rediriger (302)
+        // cette requête vers une adresse interne APRÈS la validation de l'URL :
+        // une redirection fait échouer l'envoi au lieu d'être suivie.
+        redirect: 'error',
       });
       if (!resp.ok) {
         await mcpLog('warning', 'notifier', `Webhook returned ${resp.status}`);

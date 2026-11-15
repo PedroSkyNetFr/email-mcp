@@ -159,6 +159,8 @@ export interface AppConfig {
     readOnly: boolean;
     watcher: WatcherConfig;
     hooks: HooksConfig;
+    /** Jours d'historique d'envois programmés conservés (0 = tout garder). */
+    sentRetentionDays?: number;
   };
   accounts: AccountConfig[];
   /** Saved-search presets from `[[searches]]` in config.toml. Empty when none. */
@@ -229,6 +231,16 @@ export interface Mailbox {
   specialUse?: string;
   totalMessages: number;
   unseenMessages: number;
+}
+
+/** Compteurs bon marché d'un dossier, pour la ressource `email://{compte}/stats`. */
+export interface MailboxSnapshot {
+  /** Messages dans le dossier. */
+  total: number;
+  /** Messages non lus. */
+  unread: number;
+  /** Messages reçus depuis minuit (heure locale). */
+  receivedToday: number;
 }
 
 // ---------------------------------------------------------------------------

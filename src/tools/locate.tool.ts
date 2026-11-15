@@ -14,7 +14,8 @@ import type { IMailService } from '../services/mail-service.types.js';
 export default function registerLocateTools(server: McpServer, imapService: IMailService): void {
   server.tool(
     'find_email_folder',
-    'Find which real mailbox folder(s) an email belongs to. ' +
+    'Find the real mailbox folder an email belongs to (the search stops at the first match, ' +
+      'trying INBOX, Sent, Drafts and Archive first). ' +
       'Required before move_email or delete_email when the email was found in a virtual folder ' +
       '(e.g., "All Mail", "Starred"). Returns the real folder path to use as sourceMailbox.',
     {
@@ -46,10 +47,9 @@ export default function registerLocateTools(server: McpServer, imapService: IMai
         }
 
         const lines = [
-          `📁 Email ${emailId} found in ${folders.length} folder(s):`,
-          ...folders.map((f) => `  • ${f}`),
+          `📁 Email ${emailId} found in real folder: ${folders[0]}`,
           '',
-          `Use the first folder as sourceMailbox for move_email or delete_email.`,
+          `Use it as sourceMailbox for move_email or delete_email.`,
         ];
         if (messageId) {
           lines.push(`Message-ID: ${messageId}`);

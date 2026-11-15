@@ -23,9 +23,14 @@ import LocalCalendarService from './services/local-calendar.service.js';
 import createMailBackends from './services/mail-backends.js';
 import RemindersService from './services/reminders.service.js';
 import SchedulerService from './services/scheduler.service.js';
+import {
+  DEFAULT_SENT_RETENTION_DAYS,
+  startSentHistoryPruning,
+} from './services/scheduler-retention.js';
 import { SearchPresetRegistry } from './services/search-presets.js';
 import TemplateService from './services/template.service.js';
 import WatcherService from './services/watcher.service.js';
+import { createShutdown, installShutdownTriggers } from './shutdown.js';
 import registerAllTools from './tools/register.js';
 
 const HELP = `
@@ -71,7 +76,7 @@ async function runServer(): Promise<void> {
   const config = await loadConfig();
 
   // IMAP/SMTP or Microsoft Graph, per account — the same wiring as the CLI.
-  const { connections, imapService, graphService, mailService, sendService } =
+  const { connections, imapService, graphService, mailService, sendService, oauthService } =
     createMailBackends(config);
   const templateService = new TemplateService();
   const calendarService = new CalendarService();
@@ -82,8 +87,16 @@ async function runServer(): Promise<void> {
     mailService,
     config.accounts.map((account) => account.name),
   );
-  const watcherService = new WatcherService(config.settings.watcher, config.accounts);
-  const hooksService = new HooksService(config.settings.hooks, imapService);
+  // La veille IDLE reçoit le service de jetons du serveur : un compte OAuth2 s'y
+  // authentifie avec un vrai jeton d'accès. Elle écarte d'elle-même les comptes
+  // Graph, qui n'ont pas de session IMAP.
+  const watcherService = new WatcherService(config.settings.watcher, config.accounts, oauthService);
+  // Les hooks ne reçoivent d'événements que de la veille IDLE, donc de comptes
+  // IMAP : ils gardent le service IMAP. En lecture seule, leurs actions sur la
+  // boîte (libellés, drapeaux, marquer lu) sont désactivées dès la construction.
+  const hooksService = new HooksService(config.settings.hooks, imapService, {
+    readOnly: config.settings.readOnly,
+  });
   const searchPresetRegistry = new SearchPresetRegistry(config.searches);
 
   const server = createServer();
@@ -105,7 +118,10 @@ async function runServer(): Promise<void> {
     searchPresetRegistry,
     graphService,
   );
-  registerAllResources(server, connections, imapService, templateService, schedulerService);
+  // Les ressources passent par le routeur, comme les outils : `stats`,
+  // `unread` et `mailboxes` d'un compte Graph partaient sur IMAP — un compte
+  // dont la session IMAP n'existe pas — et échouaient.
+  registerAllResources(server, connections, mailService, templateService, schedulerService);
   registerAllPrompts(server);
 
   const transport = new StdioServerTransport();
@@ -120,6 +136,9 @@ async function runServer(): Promise<void> {
   // --------------------------------------------------------------------------
 
   const lowLevelServer = server.server;
+
+  // Arrêt de la purge d'historique, remplacé quand elle démarre.
+  let stopSentPruning: () => void = () => {};
 
   lowLevelServer.oninitialized = () => {
     markInitialized();
@@ -137,6 +156,14 @@ async function runServer(): Promise<void> {
         // Sends overdue scheduled emails now and every minute — unless the
         // server is read-only, in which case it logs why and does nothing.
         await schedulerService.start({ readOnly: config.settings.readOnly });
+
+        // Historique des envois programmés borné dans le temps (même règle
+        // que le planificateur : rien en lecture seule).
+        if (!config.settings.readOnly) {
+          stopSentPruning = startSentHistoryPruning(
+            config.settings.sentRetentionDays ?? DEFAULT_SENT_RETENTION_DAYS,
+          );
+        }
       } catch (err) {
         // Log to stderr — mcpLog may not be safe if init itself errored
         process.stderr.write(
@@ -146,17 +173,24 @@ async function runServer(): Promise<void> {
     })();
   };
 
-  // Graceful shutdown
-  const shutdown = async () => {
-    schedulerService.stop();
-    hooksService.stop();
-    await watcherService.stop();
-    await connections.closeAll();
-    await server.close();
-  };
+  // Arrêt propre, idempotent et borné à 5 s (voir shutdown.ts). Sous Windows,
+  // Claude Desktop ferme stdin au lieu d'envoyer un signal : sans les
+  // déclencheurs stdin/transport, le processus restait orphelin, connexions
+  // IMAP ouvertes.
+  const shutdown = createShutdown([
+    { name: 'scheduler', run: () => schedulerService.stop() },
+    { name: 'sent-history pruning', run: () => stopSentPruning() },
+    { name: 'hooks', run: () => hooksService.stop() },
+    { name: 'watcher', run: async () => watcherService.stop() },
+    { name: 'connections', run: async () => connections.closeAll() },
+    { name: 'transport', run: async () => server.close() },
+  ]);
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  installShutdownTriggers(shutdown);
+  // Fermeture du transport MCP (le client a raccroché) : même arrêt.
+  lowLevelServer.onclose = () => {
+    shutdown('transport closed').catch(() => {});
+  };
 }
 
 async function main(): Promise<void> {

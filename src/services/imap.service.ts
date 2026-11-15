@@ -25,6 +25,7 @@ import type {
   FacetResult,
   LabelInfo,
   Mailbox,
+  MailboxSnapshot,
   PaginatedResult,
   QuotaInfo,
   SearchCoverage,
@@ -40,6 +41,7 @@ import {
   splitHeaderBlock,
 } from '../utils/headers.js';
 import { htmlToPlainText } from '../utils/html-text.js';
+import { imapCommand } from '../utils/imap-error.js';
 import { buildReferences, composeMessage } from '../utils/mime-headers.js';
 import type { AttachmentInput, ResolvedAttachment } from './attachment-resolver.js';
 import { resolveAttachments } from './attachment-resolver.js';
@@ -1081,11 +1083,18 @@ export default class ImapService {
     if (pending) return pending;
 
     const promise = (async () => {
-      const client = await this.connections.getImapClient(accountName);
-      const strategy = await detectLabelStrategy(client);
-      this.labelStrategies.set(accountName, strategy);
-      this.labelStrategyPending.delete(accountName);
-      return strategy;
+      try {
+        const client = await this.connections.getImapClient(accountName);
+        const strategy = await detectLabelStrategy(client);
+        this.labelStrategies.set(accountName, strategy);
+        return strategy;
+      } finally {
+        // Retirée à l'issue, succès OU échec. Retirée sur succès seulement, une
+        // promesse rejetée restait dans la table et était resservie à chaque
+        // appel : un seul échec IMAP passager pendant la détection cassait
+        // toutes les opérations de libellés du compte jusqu'au redémarrage.
+        this.labelStrategyPending.delete(accountName);
+      }
     })();
 
     this.labelStrategyPending.set(accountName, promise);
@@ -2055,9 +2064,18 @@ export default class ImapService {
       return true;
     });
 
-    // 3. Search each real mailbox for the Message-ID (sequential — each needs its own lock)
+    // 3. Chercher le Message-ID dossier par dossier, en s'ARRÊTANT au premier
+    // trouvé. Chaque dossier coûte un SELECT et un SEARCH sur en-tête —
+    // généralement un balayage non indexé côté serveur : continuer après une
+    // trouvaille faisait payer ce prix sur tous les dossiers restants (des
+    // dizaines de secondes sur une grosse boîte) pour bâtir une liste dont
+    // l'appelant ne devait de toute façon utiliser que la première entrée.
+    // Les dossiers probables passent en tête, pour que l'unique résultat soit
+    // aussi le plus utile.
+    const searchOrder = ImapService.orderByLikelihood(realMailboxes);
+
     const folders: string[] = [];
-    const searchMailbox = async (mbPath: string): Promise<void> => {
+    const findInMailbox = async (mbPath: string): Promise<boolean> => {
       try {
         const lock = await client.getMailboxLock(mbPath);
         try {
@@ -2065,23 +2083,46 @@ export default class ImapService {
             { header: { 'message-id': messageId } },
             { uid: true },
           );
-          if (results && Array.isArray(results) && results.length > 0) {
-            folders.push(mbPath);
-          }
+          return Array.isArray(results) && results.length > 0;
         } finally {
           lock.release();
         }
       } catch {
         // Skip folders that can't be selected or searched (e.g. \Noselect, INBOX on some providers)
+        return false;
       }
     };
     // eslint-disable-next-line no-restricted-syntax
-    for (const mb of realMailboxes) {
+    for (const mb of searchOrder) {
       // eslint-disable-next-line no-await-in-loop
-      await searchMailbox(mb.path);
+      if (await findInMailbox(mb.path)) {
+        folders.push(mb.path);
+        break;
+      }
     }
 
     return { folders, messageId };
+  }
+
+  /** Dossiers où un message a le plus de chances d'être, dans l'ordre où les chercher. */
+  private static readonly LIKELY_SPECIAL_USE = ['\\Sent', '\\Drafts', '\\Archive'];
+
+  /**
+   * Ordonne les dossiers pour que le premier trouvé soit celui sur lequel
+   * l'appelant voudra agir : INBOX, puis Envoyés / Brouillons / Archives, puis
+   * le reste dans l'ordre du serveur (tri stable).
+   */
+  private static orderByLikelihood<T extends { path: string; specialUse?: string }>(
+    mailboxes: T[],
+  ): T[] {
+    const rank = (mailbox: T): number => {
+      if (mailbox.path.toUpperCase() === 'INBOX') return 0;
+      const specialIndex = mailbox.specialUse
+        ? ImapService.LIKELY_SPECIAL_USE.indexOf(mailbox.specialUse)
+        : -1;
+      return specialIndex === -1 ? ImapService.LIKELY_SPECIAL_USE.length + 1 : specialIndex + 1;
+    };
+    return [...mailboxes].sort((a, b) => rank(a) - rank(b));
   }
 
   // -------------------------------------------------------------------------
@@ -2100,7 +2141,9 @@ export default class ImapService {
     await ImapService.assertRealMailbox(client, safeSource);
     const lock = await client.getMailboxLock(safeSource);
     try {
-      const ok = await client.messageMove(emailId, safeDest, { uid: true });
+      const ok = await imapCommand(`Moving message to "${safeDest}"`, async () =>
+        client.messageMove(emailId, safeDest, { uid: true }),
+      );
       if (!ok) {
         throw new Error(`IMAP server rejected the move from "${safeSource}" to "${safeDest}".`);
       }
@@ -2136,7 +2179,9 @@ export default class ImapService {
 
       const lock = await client.getMailboxLock(safeMailbox);
       try {
-        const ok = await client.messageMove(emailId, trashPath, { uid: true });
+        const ok = await imapCommand(`Moving message to "${trashPath}"`, async () =>
+          client.messageMove(emailId, trashPath, { uid: true }),
+        );
         if (!ok) {
           throw new Error('IMAP server rejected the move to Trash.');
         }
@@ -2249,7 +2294,9 @@ export default class ImapService {
     };
     try {
       const range = ids.join(',');
-      const ok = await client.messageMove(range, destination, { uid: true });
+      const ok = await imapCommand(`Moving messages to "${destination}"`, async () =>
+        client.messageMove(range, destination, { uid: true }),
+      );
       if (ok) {
         result.succeeded = ids.length;
       } else {
@@ -2306,7 +2353,9 @@ export default class ImapService {
       const lock = await client.getMailboxLock(mailbox);
       try {
         const range = ids.join(',');
-        const ok = await client.messageMove(range, trashPath, { uid: true });
+        const ok = await imapCommand(`Moving messages to "${trashPath}"`, async () =>
+          client.messageMove(range, trashPath, { uid: true }),
+        );
         if (ok) {
           result.succeeded = ids.length;
         } else {
@@ -2919,19 +2968,27 @@ export default class ImapService {
     return uid;
   }
 
+  // imapCommand : un refus du serveur (« NO [ALREADYEXISTS] … ») remonte avec
+  // ses propres mots au lieu du « Command failed » générique d'ImapFlow.
   async createMailbox(accountName: string, folderPath: string): Promise<void> {
     const client = await this.connections.getImapClient(accountName);
-    await client.mailboxCreate(folderPath);
+    await imapCommand(`Creating mailbox "${folderPath}"`, async () =>
+      client.mailboxCreate(folderPath),
+    );
   }
 
   async renameMailbox(accountName: string, folderPath: string, newPath: string): Promise<void> {
     const client = await this.connections.getImapClient(accountName);
-    await client.mailboxRename(folderPath, newPath);
+    await imapCommand(`Renaming mailbox "${folderPath}" to "${newPath}"`, async () =>
+      client.mailboxRename(folderPath, newPath),
+    );
   }
 
   async deleteMailbox(accountName: string, folderPath: string): Promise<void> {
     const client = await this.connections.getImapClient(accountName);
-    await client.mailboxDelete(folderPath);
+    await imapCommand(`Deleting mailbox "${folderPath}"`, async () =>
+      client.mailboxDelete(folderPath),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -3517,6 +3574,42 @@ export default class ImapService {
   // -------------------------------------------------------------------------
   // Quota
   // -------------------------------------------------------------------------
+
+  /**
+   * Compteurs d'un dossier pour la ressource `stats` : un STATUS pour le total
+   * et les non-lus (sans SELECT), puis un SEARCH réduit aux UID pour les
+   * messages du jour — jamais de FETCH.
+   *
+   * La ressource appelait `getEmailStats`, qui lance un SEARCH SINCE puis
+   * FETCH enveloppe, drapeaux et structure de CHAQUE message de la période,
+   * pour n'en garder que trois compteurs ; et elle publiait comme « total » le
+   * nombre de messages du jour.
+   */
+  async getMailboxSnapshot(accountName: string, mailbox = 'INBOX'): Promise<MailboxSnapshot> {
+    const client = await this.connections.getImapClient(accountName);
+    const path = sanitizeMailboxName(mailbox);
+
+    const status = await client.status(path, { messages: true, unseen: true });
+    // `false` : STATUS refusé sur un dossier existant ; compteurs à zéro.
+    const counts = status === false ? undefined : status;
+
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    const lock = await client.getMailboxLock(path);
+    let receivedToday = 0;
+    try {
+      const uids = await client.search({ since: midnight }, { uid: true });
+      receivedToday = Array.isArray(uids) ? uids.length : 0;
+    } finally {
+      lock.release();
+    }
+
+    return {
+      total: counts?.messages ?? 0,
+      unread: counts?.unseen ?? 0,
+      receivedToday,
+    };
+  }
 
   async getQuota(accountName: string): Promise<QuotaInfo | null> {
     const client = await this.connections.getImapClient(accountName);
