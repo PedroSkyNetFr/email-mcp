@@ -27,15 +27,22 @@
  *     d'import, documenté par Microsoft) ; `POST /me/mailFolders/{id}/messages`
  *     n'accepte que du JSON. La copie ne ressemblerait pas à un message reçu.
  *
- * Volontairement distinct de CrossAccountMover : son code n'est pas modifié
- * (seuls trois utilitaires y sont exportés pour être partagés ici).
+ * Lecture d'une source Graph, dédoublonnage + APPEND et refus d'une
+ * destination Graph sont partagés avec CrossAccountMover
+ * (cross-account-transfer.ts) : les deux outils ne peuvent pas diverger.
  */
 
 import type ConnectionManager from '../connections/manager.js';
-import { GraphError } from '../services/graph/graph.client.js';
 import type { IMailService } from '../services/mail-service.types.js';
-import { firstHeader, parseHeaderBlock, splitHeaderBlock } from '../utils/headers.js';
-import { classifyImapError, formatFrom, toDate } from './cross-account-mover.js';
+import type { SourceMessage } from './cross-account-transfer.js';
+import {
+  appendAtDestination,
+  emailIdError,
+  formatFrom,
+  graphDestinationRefusal,
+  readGraphSource,
+  toDate,
+} from './cross-account-transfer.js';
 import type { ErrorKind, MoveWarning } from './error-kinds.js';
 import { ERROR_KIND, MoveError, WARNING_KIND } from './error-kinds.js';
 import type { MoveLogEntry, MoveLogRepository } from './log-repository.js';
@@ -79,23 +86,6 @@ export type CopyResult =
       source_id: string;
     };
 
-/** Message source lu, quel que soit son backend. */
-interface SourceMessage {
-  raw: Buffer;
-  flags: string[];
-  internalDate: Date | undefined;
-  messageId: string | null;
-  subject: string | null;
-  from: string | null;
-}
-
-/** Message-ID lu dans le bloc d'en-têtes d'un MIME brut. */
-function messageIdOf(raw: Buffer): string | null {
-  const value = firstHeader(parseHeaderBlock(splitHeaderBlock(raw)), 'message-id');
-  const trimmed = (value ?? '').trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
 export class CrossAccountCopier {
   constructor(
     private readonly connections: ConnectionManager,
@@ -133,11 +123,16 @@ export class CrossAccountCopier {
     try {
       // 1. Lecture de la source, sans jamais la modifier.
       const src = this.isGraphAccount(sourceAccount)
-        ? await this.readGraphSource(sourceAccount, sourceMailbox, emailId)
+        ? await readGraphSource(this.mailService, sourceAccount, sourceMailbox, emailId)
         : await this.readImapSource(sourceAccount, sourceMailbox, Number(emailId));
 
       // 2-3. Dédoublonnage par Message-ID puis APPEND sur la destination.
-      const { destUid, dedupHit } = await this.appendAtDestination(destAccount, destMailbox, src);
+      const { destUid, dedupHit } = await appendAtDestination(
+        this.connections,
+        destAccount,
+        destMailbox,
+        src,
+      );
 
       // Journal facultatif : n'échoue jamais, ne bloque jamais la copie.
       const status: 'success' | 'duplicate_skipped' = dedupHit ? 'duplicate_skipped' : 'success';
@@ -212,28 +207,9 @@ export class CrossAccountCopier {
       };
     }
     if (this.isGraphAccount(destAccount)) {
-      return {
-        kind: ERROR_KIND.DEST_BACKEND_UNSUPPORTED,
-        message:
-          `destination "${destAccount}" is served by Microsoft Graph, which can only import a raw ` +
-          'message as a DRAFT (isDraft, received date = import time): the copy would not look ' +
-          'natively delivered, so it is refused. Copy into an IMAP account, or use forward_email.',
-      };
+      return graphDestinationRefusal(destAccount, 'copy');
     }
-    if (this.isGraphAccount(sourceAccount)) {
-      if (emailId.trim() === '') {
-        return { kind: ERROR_KIND.INVALID_EMAIL_ID, message: 'email_id is empty' };
-      }
-    } else {
-      const uid = Number(emailId);
-      if (!/^\d+$/.test(emailId) || !Number.isInteger(uid) || uid <= 0) {
-        return {
-          kind: ERROR_KIND.INVALID_EMAIL_ID,
-          message: `email_id "${emailId}" is not a positive integer`,
-        };
-      }
-    }
-    return null;
+    return emailIdError(emailId, this.isGraphAccount(sourceAccount));
   }
 
   /**
@@ -271,80 +247,6 @@ export class CrossAccountCopier {
       };
     } finally {
       lock.release();
-    }
-  }
-
-  /**
-   * Source Graph : MIME brut (`/$value`) et état du message, lus par le
-   * routeur. Graph n'a d'équivalent qu'à \Seen (isRead) et \Flagged (flag) ;
-   * la date de réception tient lieu d'INTERNALDATE.
-   */
-  private async readGraphSource(
-    account: string,
-    mailbox: string,
-    emailId: string,
-  ): Promise<SourceMessage> {
-    let state: Awaited<ReturnType<IMailService['getEmailFlags']>>;
-    let raw: Buffer;
-    try {
-      state = await this.mailService.getEmailFlags(account, emailId, mailbox);
-      raw = await this.mailService.getEmailRaw(account, emailId, mailbox);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const notFound = err instanceof GraphError && err.status === 404;
-      throw new MoveError(
-        notFound ? ERROR_KIND.SOURCE_NOT_FOUND : ERROR_KIND.CONNECTION_ERROR,
-        `could not read ${emailId} from ${account}: ${message}`,
-      );
-    }
-    const flags = [...(state.seen ? ['\\Seen'] : []), ...(state.flagged ? ['\\Flagged'] : [])];
-    return {
-      raw,
-      flags,
-      internalDate: toDate(state.date),
-      messageId: messageIdOf(raw),
-      subject: state.subject || null,
-      from: state.from || null,
-    };
-  }
-
-  /**
-   * Dédoublonnage par Message-ID puis APPEND (drapeaux + date conservés). Un
-   * message déjà présent n'est pas ajouté une seconde fois ; rien n'est jamais
-   * supprimé côté destination.
-   */
-  private async appendAtDestination(
-    destAccount: string,
-    destMailbox: string,
-    src: SourceMessage,
-  ): Promise<{ destUid: number | null; dedupHit: boolean }> {
-    const destClient = await this.connections.getImapClient(destAccount);
-    const destLock = await destClient.getMailboxLock(destMailbox);
-    try {
-      if (src.messageId) {
-        const found = await destClient.search(
-          { header: { 'message-id': src.messageId } },
-          { uid: true },
-        );
-        if (found && found.length > 0) {
-          return { destUid: found[0], dedupHit: true };
-        }
-      }
-      // \Recent est posé par le serveur seul : le transmettre ferait refuser l'APPEND.
-      const flags = src.flags.filter((flag) => flag.toLowerCase() !== '\\recent');
-      const appended = await destClient.append(destMailbox, src.raw, flags, src.internalDate);
-      if (appended === false) {
-        throw new MoveError(ERROR_KIND.APPEND_FAILED, 'destination APPEND failed');
-      }
-      // Sans UIDPLUS, le serveur ne rend pas l'UID : la copie a réussi quand même.
-      return {
-        destUid: typeof appended.uid === 'number' ? appended.uid : null,
-        dedupHit: false,
-      };
-    } catch (err) {
-      throw classifyImapError(err, ERROR_KIND.APPEND_FAILED);
-    } finally {
-      destLock.release();
     }
   }
 

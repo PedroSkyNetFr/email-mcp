@@ -127,6 +127,9 @@ export default function registerSendTools(
     {
       description:
         'Reply to an email with proper threading (In-Reply-To & References headers). Use get_email first to read the original. ' +
+        'Recipients follow mail clients and RFC 5322: the reply goes to the Reply-To address(es) when the ' +
+        'original has one, otherwise to the sender; with replyAll, the original To and Cc are added, minus ' +
+        "this account's own address (same behaviour on IMAP and Graph accounts). " +
         'The original message is quoted below the reply by default (attribution line + quoted text: ' +
         '"Le DATE, NAME a écrit :" in French by default, "On DATE, NAME wrote:" with reply_language = "en"; ' +
         'on Graph accounts Exchange writes its own header in the mailbox language), ' +
@@ -137,7 +140,10 @@ export default function registerSendTools(
         emailId: z.string().describe('Email ID to reply to (from list_emails or get_email)'),
         mailbox: z.string().default('INBOX').describe('Mailbox where the original email is'),
         body: z.string().describe('Reply body content'),
-        replyAll: z.boolean().default(false).describe('Reply to all recipients'),
+        replyAll: z
+          .boolean()
+          .default(false)
+          .describe('Reply to all: Reply-To (or sender) + original To and Cc, minus yourself'),
         html: z.boolean().default(false).describe('Send as HTML'),
         includeAttachments: z
           .boolean()

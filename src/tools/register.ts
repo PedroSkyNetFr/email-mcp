@@ -95,7 +95,8 @@ export default function registerAllTools(
     registerLabelTools(server, imapService);
     registerBulkTools(server, imapService);
     registerDraftTools(server, imapService, smtpService);
-    registerCrossAccountMoveTool(server, connections, config);
+    // Source IMAP ou Graph, destination IMAP (mêmes briques que la copie).
+    registerCrossAccountMoveTool(server, connections, config, imapService);
     // Copie non destructive : source IMAP ou Graph, destination IMAP.
     registerCrossAccountCopyTool(server, connections, config, imapService);
     // Server-side rules and the automatic reply change mailbox state, so they

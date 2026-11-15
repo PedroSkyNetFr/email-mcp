@@ -77,6 +77,8 @@ interface GraphMessage {
   toRecipients?: { emailAddress?: { name?: string; address?: string } }[];
   ccRecipients?: { emailAddress?: { name?: string; address?: string } }[];
   bccRecipients?: { emailAddress?: { name?: string; address?: string } }[];
+  /** Adresses Reply-To ; tableau vide quand l'expéditeur n'en a pas posé. */
+  replyTo?: { emailAddress?: { name?: string; address?: string } }[];
   receivedDateTime?: string;
   sentDateTime?: string;
   isRead?: boolean;
@@ -127,7 +129,7 @@ const SCAN_SELECT =
   'id,subject,from,receivedDateTime,sentDateTime,isRead,flag,hasAttachments,bodyPreview,categories';
 const SCAN_SELECT_WITH_TO = `${SCAN_SELECT},toRecipients`;
 
-const FULL_SELECT = `${META_SELECT},ccRecipients,bccRecipients,sentDateTime,internetMessageId,body,internetMessageHeaders`;
+const FULL_SELECT = `${META_SELECT},ccRecipients,bccRecipients,replyTo,sentDateTime,internetMessageId,body,internetMessageHeaders`;
 
 /**
  * Convertit la liste d'en-têtes de Graph vers la représentation partagée avec
@@ -709,6 +711,9 @@ export default class GraphService {
       ...toEmailMeta(message),
       cc: toAddresses(message.ccRecipients),
       bcc: toAddresses(message.bccRecipients),
+      // Pour l'affichage seulement : la réponse Graph (`/reply`, `createReply`)
+      // suit déjà `replyTo` côté serveur.
+      ...(message.replyTo?.length ? { replyTo: toAddresses(message.replyTo) } : {}),
       ...(isHtml ? { bodyHtml: content } : { bodyText: content }),
       messageId: message.internetMessageId ?? '',
       attachments: attachments.map((a) => ({

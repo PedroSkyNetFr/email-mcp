@@ -314,6 +314,13 @@ export interface AttachmentMeta {
 export interface Email extends EmailMeta {
   cc?: EmailAddress[];
   bcc?: EmailAddress[];
+  /**
+   * Adresses de l'en-tête Reply-To (RFC 5322 §3.6.2), seulement quand
+   * l'expéditeur l'a posé : une réponse leur est adressée à la place de From.
+   * Absent (ou vide) : on répond à From. IMAP : lu par mailparser ; Graph :
+   * propriété `replyTo` du message.
+   */
+  replyTo?: EmailAddress[];
   bodyText?: string;
   bodyHtml?: string;
   /**

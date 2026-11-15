@@ -76,6 +76,21 @@ function imapSetup(accountOverrides: Record<string, unknown> = {}) {
 }
 
 describe('SmtpService.saveReplyDraft (IMAP)', () => {
+  it('adresse le brouillon au Reply-To, et en replyAll y ajoute To/Cc sans soi-même', async () => {
+    const { service, imap } = imapSetup();
+    imap.getEmail.mockResolvedValue(
+      original({ replyTo: [{ address: 'devis@example.com' }, { address: 'ME@example.com' }] }),
+    );
+    await service.saveReplyDraft('perso', { emailId: '42', body: 'x', replyAll: true });
+    expect(imap.saveDraft).toHaveBeenCalledWith(
+      'perso',
+      expect.objectContaining({
+        to: ['devis@example.com', 'bob@example.com'],
+        cc: ['carol@example.com'],
+      }),
+    );
+  });
+
   it('saves a threaded reply to Drafts and sends nothing', async () => {
     const { service, imap, transport, rateLimiter } = imapSetup();
 

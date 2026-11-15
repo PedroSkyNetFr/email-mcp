@@ -628,7 +628,7 @@ en-têtes d'un message en liste.
 | `add_label` / `remove_label` | Pose / retire un libellé sur un message. | both | — |
 | `create_label` / `delete_label` | Crée / supprime un libellé. | both | — |
 | `create_mailbox` / `rename_mailbox` / `delete_mailbox` | Gestion des dossiers (`delete_mailbox` supprime aussi le contenu). | both | — |
-| `cross_account_move` | Déplace des messages vers un autre compte en gardant en-têtes, indicateurs et date. Exige Postgres. | IMAP | — |
+| `cross_account_move` | Déplace des messages vers un autre compte en gardant en-têtes, indicateurs et date. Exige Postgres. | source : both · destination : IMAP | — |
 | `cross_account_copy` | Copie des messages vers un autre compte en gardant en-têtes, indicateurs et date ; la source n'est jamais modifiée. Sans base de données. | source : both · destination : IMAP | — |
 | `list_mail_rules` | Règles de boîte de réception côté serveur. | Graph | — |
 | `create_mail_rule` / `delete_mail_rule` | Crée / supprime une règle côté serveur. | Graph | — |
@@ -668,7 +668,7 @@ en-têtes d'un message en liste.
 | Libellés | libellés Gmail, dossiers-libellés ProtonMail, mots clés IMAP | catégories Outlook |
 | `save_all_attachments_from_search`, `extract_contacts`, `get_email_stats`, `find_email_folder` | ✅ | — |
 | Extraction d'événements (`extract_calendar`, `analyze_email_for_scheduling`, `add_to_calendar`) | ✅ | — |
-| `cross_account_move` | ✅ | — |
+| `cross_account_move` | ✅ | comme source seulement — une destination Graph est refusée |
 | `cross_account_copy` | ✅ | comme source seulement — une destination Graph est refusée |
 | Surveillance (IMAP IDLE) et ressources par compte (`mailboxes`, `unread`, `stats`) | ✅ | — (elles passent par IMAP) |
 | Règles côté serveur, réponse automatique | — | ✅ |
@@ -970,6 +970,15 @@ taille :
 
 ### Réponses, transferts et suites de l'envoi
 
+- Les destinataires de `reply_email` et `reply_draft` suivent les clients de
+  messagerie (RFC 5322 §3.6.2) : la réponse va à **toutes les adresses de
+  `Reply-To`** quand l'original porte cet en-tête (liste de diffusion,
+  expéditeur `noreply@` qui renvoie vers un support), sinon à `From`. Avec
+  `replyAll`, les To et Cc de l'original s'ajoutent (To reste To, Cc reste Cc),
+  moins l'adresse du compte, doublons fusionnés sans tenir compte de la casse.
+  Graph `/reply`, `/replyAll`, `createReply` et `createReplyAll` appliquent la
+  même règle côté serveur : les deux backends adressent une réponse de la même
+  façon. `get_email` affiche une ligne `Reply-To:` quand l'en-tête est présent.
 - `reply_email` cite l'original sous la réponse par défaut (une ligne
   d'introduction puis des lignes préfixées par `>` ; dans une réponse HTML, un
   `<blockquote type="cite">` contenant l'original en texte échappé, jamais son
@@ -1062,8 +1071,8 @@ avertissement.
   **nouvel** identifiant. Les images intégrées référencées par le corps sont
   conservées ; un `cid:` sans image correspondante produit un avertissement.
 - `reply_draft` compose une réponse exactement comme `reply_email` — sujet
-  `Re:`, destinataires (`replyAll` ajoute les To/Cc de l'original, sauf
-  vous-même), `In-Reply-To` / `References`, original cité (`quoteOriginal`, dans
+  `Re:`, destinataires (`Reply-To`, sinon l'expéditeur ; `replyAll` ajoute les
+  To/Cc de l'original, sauf vous-même), `In-Reply-To` / `References`, original cité (`quoteOriginal`, dans
   la `reply_language` du compte), signature, pièces de l'original avec
   `includeAttachments`, `attachments` supplémentaires et `bcc` — puis
   l'enregistre dans Brouillons au lieu de l'envoyer. Il renvoie l'identifiant du
@@ -1267,13 +1276,30 @@ le dossier et son contenu.
 
 ### Déplacement entre comptes
 
-`cross_account_move` déplace des messages entre deux comptes IMAP configurés : il
+`cross_account_move` déplace des messages entre deux comptes configurés : il
 récupère le message brut, l'ajoute à la destination avec ses indicateurs et sa
 date d'origine (il paraît livré nativement), consigne le déplacement, puis
 déplace la copie source dans la Corbeille du compte source. Un message déjà
-présent à la destination est ignoré. Le journal des déplacements vit dans
-**PostgreSQL** ; sans base, cet outil refuse et tous les autres fonctionnent
-normalement.
+présent à la destination (même `Message-ID`) n'est pas ajouté deux fois. Le
+journal des déplacements vit dans **PostgreSQL** ; sans base, cet outil refuse
+et tous les autres fonctionnent normalement.
+
+- **Source IMAP** : `UID MOVE` vers le dossier `\Trash` (SPECIAL-USE), seulement
+  si le serveur annonce `MOVE` et que l'UIDVALIDITY du dossier n'a pas changé —
+  sinon la source reste en place (jamais d'`EXPUNGE`).
+- **Source Graph** (Exchange / Outlook.com) : `email_id` est l'id Graph opaque ;
+  le message brut est lu par `GET /messages/{id}/$value` (lu et suivi deviennent
+  `\Seen` / `\Flagged`), puis, une fois le dépôt confirmé, la source part dans
+  les **Éléments supprimés** (`POST /messages/{id}/move`), jamais supprimée
+  définitivement. `sourceMailbox` n'y est qu'indicatif : un id Graph vaut pour
+  toute la boîte. Le journal inscrit `source_uid = 0` pour un tel déplacement ;
+  le `Message-ID` l'identifie.
+- **Destination Graph** : refusée (`dest_backend_unsupported`) avant toute
+  lecture de la source, pour la même raison que `cross_account_copy` ci-dessous.
+- Quand la source ne peut pas être retirée (pas de Corbeille, pas de `MOVE`,
+  erreur Graph…), le résultat le dit — `source_cleanup_error` et un
+  avertissement `source_not_removed` : le message est à destination et la source
+  est toujours là.
 
 ```toml
 [database]

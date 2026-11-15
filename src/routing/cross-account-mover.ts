@@ -22,16 +22,47 @@
  *      proven-safe-EXPUNGE fallback needs a per-account operator assertion that
  *      is out of scope here, so we fail closed instead of risking the footgun.
  *   9. recordSourceCleanup
+ *
+ * Deux backends en source, par compte (mail-router.ts) :
+ *   - source IMAP : la saga ci-dessus, inchangée ;
+ *   - source Graph : lecture par `GET /me/messages/{id}/$value` + état du
+ *     message (readGraphSource, partagé avec la copie), id opaque accepté ;
+ *     après APPEND vérifié (UID rendu) et journal écrit, nettoyage par
+ *     `POST /me/messages/{id}/move` vers `deleteditems` (Éléments supprimés) —
+ *     jamais un DELETE définitif. Graph n'a ni UIDVALIDITY ni capacité MOVE à
+ *     vérifier : un id qui ne désigne plus le message fait échouer le
+ *     déplacement (404), rapporté comme nettoyage échoué ;
+ *   - destination Graph : refusée avant toute lecture (dest_backend_unsupported,
+ *     même raison que la copie : Graph n'importe un MIME brut qu'en brouillon).
+ *
+ * Un nettoyage de source qui n'aboutit pas n'est jamais un succès muet : le
+ * résultat porte `source_cleanup` différent de moved_to_trash,
+ * `source_cleanup_error` et un avertissement `source_not_removed` (message
+ * déposé, source conservée).
  */
 
 import type ConnectionManager from '../connections/manager.js';
-import type { ErrorKind, MoveWarning, SourceCleanup } from './error-kinds.js';
+import type { IMailService } from '../services/mail-service.types.js';
+import type { SourceMessage } from './cross-account-transfer.js';
+import {
+  appendAtDestination,
+  emailIdError,
+  formatFrom,
+  graphDestinationRefusal,
+  readGraphSource,
+  toDate,
+} from './cross-account-transfer.js';
+import type { MoveWarning, SourceCleanup } from './error-kinds.js';
 import { ERROR_KIND, MoveError, WARNING_KIND } from './error-kinds.js';
 import type { MoveLogRepository } from './log-repository.js';
+
+// Réexportés pour les appelants historiques ; la définition vit dans le module partagé.
+export { classifyImapError, formatFrom, toDate } from './cross-account-transfer.js';
 
 export interface MoveArgs {
   sourceAccount: string;
   sourceMailbox: string;
+  /** UID IMAP, ou id Graph opaque pour un compte Graph. */
   emailId: string;
   destAccount: string;
   destMailbox: string;
@@ -43,7 +74,10 @@ export type MoveResult =
       status: 'success' | 'duplicate_skipped';
       source_account: string;
       source_mailbox: string;
-      source_uid: number;
+      /** UID IMAP de la source ; null pour une source Graph (id opaque). */
+      source_uid: number | null;
+      /** UID IMAP ou id Graph de la source, tel que fourni. */
+      source_id: string;
       dest_account: string;
       dest_mailbox: string;
       dest_uid: number | null;
@@ -52,6 +86,11 @@ export type MoveResult =
       from: string | null;
       size_bytes: number | null;
       source_cleanup: SourceCleanup;
+      /**
+       * Pourquoi la source n'a pas été retirée (message déposé à destination,
+       * source conservée). Absent quand le nettoyage a abouti.
+       */
+      source_cleanup_error?: { kind: string; message: string };
       move_log_id: number;
       warnings: MoveWarning[];
     }
@@ -62,57 +101,31 @@ export type MoveResult =
       source_account: string;
       source_mailbox: string;
       source_uid: number | null;
+      source_id: string;
       move_log_id?: number;
     };
 
-interface FetchedSource {
-  raw: Buffer;
-  flags: string[];
-  internalDate: Date | undefined;
-  messageId: string | null;
-  subject: string | null;
-  from: string | null;
+interface FetchedSource extends SourceMessage {
   sizeBytes: number | null;
+  /** UIDVALIDITY de la boîte source IMAP ; 0n pour une source Graph. */
   uidValidity: bigint;
 }
 
-export function toDate(v: unknown): Date | undefined {
-  if (v instanceof Date) {
-    return v;
-  }
-  if (typeof v === 'string' || typeof v === 'number') {
-    const d = new Date(v);
-    return Number.isNaN(d.getTime()) ? undefined : d;
-  }
-  return undefined;
-}
-
-export function formatFrom(addr?: { name?: string; address?: string }): string | null {
-  if (!addr) {
-    return null;
-  }
-  const name = addr.name ? `${addr.name} ` : '';
-  return `${name}<${addr.address ?? ''}>`.trim();
-}
-
-/** Map a raw IMAP/imapflow error to a typed MoveError. */
-export function classifyImapError(err: unknown, fallback: ErrorKind): MoveError {
-  if (err instanceof MoveError) {
-    return err;
-  }
-  const msg = err instanceof Error ? err.message : String(err);
-  if (/quota|OVERQUOTA|LIMIT/i.test(msg)) {
-    return new MoveError(ERROR_KIND.QUOTA_EXCEEDED, `destination over quota: ${msg}`);
-  }
-  if (/connection|ECONNRESET|ETIMEDOUT|socket/i.test(msg)) {
-    return new MoveError(ERROR_KIND.CONNECTION_ERROR, msg);
-  }
-  return new MoveError(fallback, msg);
+/** Issue du nettoyage de la source, quel que soit son backend. */
+interface CleanupOutcome {
+  deleted: boolean;
+  kind: SourceCleanup;
+  warning?: MoveWarning;
+  errorKind?: string;
+  errorMessage?: string;
 }
 
 export class CrossAccountMover {
   constructor(
     private readonly connections: ConnectionManager,
+    /** Routeur IMAP / Graph : lecture et nettoyage d'une source Graph. */
+    private readonly mailService: IMailService,
+    private readonly isGraphAccount: (name: string) => boolean,
     private readonly logRepo: MoveLogRepository,
   ) {}
 
@@ -129,7 +142,10 @@ export class CrossAccountMover {
 
   async moveOne(args: MoveArgs): Promise<MoveResult> {
     const { sourceAccount, sourceMailbox, emailId, destAccount, destMailbox } = args;
-    const uid = Number.parseInt(emailId, 10);
+    const sourceIsGraph = this.isGraphAccount(sourceAccount);
+    // Une source Graph n'a pas d'UID : elle est désignée par son id opaque.
+    const parsedUid = sourceIsGraph ? Number.NaN : Number.parseInt(emailId, 10);
+    const sourceUid = Number.isFinite(parsedUid) ? parsedUid : null;
 
     const fail = (kind: string, message: string, moveLogId?: number): MoveResult => ({
       success: false,
@@ -137,13 +153,13 @@ export class CrossAccountMover {
       error_message: message,
       source_account: sourceAccount,
       source_mailbox: sourceMailbox,
-      source_uid: Number.isFinite(uid) ? uid : null,
+      source_uid: sourceUid,
+      source_id: emailId,
       move_log_id: moveLogId,
     });
 
-    if (!Number.isInteger(uid) || uid <= 0) {
-      return fail(ERROR_KIND.INVALID_EMAIL_ID, `email_id "${emailId}" is not a positive integer`);
-    }
+    // Contrôles sans réseau. Une destination Graph est refusée ici, avant
+    // toute lecture ou modification de la source.
     const accounts = new Set(this.connections.getAccountNames());
     if (!accounts.has(sourceAccount)) {
       return fail(ERROR_KIND.SOURCE_NOT_FOUND, `source account "${sourceAccount}" not configured`);
@@ -160,67 +176,35 @@ export class CrossAccountMover {
         'source and destination are the same account — use move_email instead',
       );
     }
+    if (this.isGraphAccount(destAccount)) {
+      const refusal = graphDestinationRefusal(destAccount, 'move');
+      return fail(refusal.kind, refusal.message);
+    }
+    const badId = emailIdError(emailId, sourceIsGraph);
+    if (badId) {
+      return fail(badId.kind, badId.message);
+    }
+    // Colonne BIGINT du journal : une source Graph y est inscrite 0.
+    const uid = sourceUid ?? 0;
 
     const warnings: MoveWarning[] = [];
 
     try {
       // 1. FETCH source.
-      const src = await this.fetchSource(sourceAccount, sourceMailbox, uid);
+      const src = sourceIsGraph
+        ? await this.fetchGraphSource(sourceAccount, sourceMailbox, emailId)
+        : await this.fetchSource(sourceAccount, sourceMailbox, uid);
 
       // 2-4. Destination work: dedup, APPEND, $Routed.
-      const destClient = await this.connections.getImapClient(destAccount);
-      let destUid: number | null = null;
-      let dedupHit = false;
-      const destLock = await destClient.getMailboxLock(destMailbox);
-      try {
-        if (src.messageId) {
-          const found = await destClient.search(
-            { header: { 'message-id': src.messageId } },
-            { uid: true },
-          );
-          if (found && found.length > 0) {
-            dedupHit = true;
-            [destUid] = found;
-          }
-        }
-        if (!dedupHit) {
-          const appended = await destClient.append(
-            destMailbox,
-            src.raw,
-            src.flags,
-            src.internalDate,
-          );
-          if (appended === false || typeof appended.uid !== 'number') {
-            throw new MoveError(
-              ERROR_KIND.APPEND_FAILED,
-              'destination APPEND failed or returned no UID',
-            );
-          }
-          destUid = appended.uid;
-          // 4. $Routed keyword, capability-gated on PERMANENTFLAGS.
-          const mb = destClient.mailbox;
-          const permFlags = mb && mb.permanentFlags ? mb.permanentFlags : new Set<string>();
-          if (permFlags.has('\\*') || permFlags.has('$Routed')) {
-            await destClient
-              .messageFlagsAdd(String(destUid), ['$Routed'], { uid: true })
-              .catch(() => {
-                warnings.push({
-                  kind: WARNING_KIND.FLAG_NOT_SET,
-                  message: '$Routed STORE failed on destination',
-                });
-              });
-          } else {
-            warnings.push({
-              kind: WARNING_KIND.FLAG_NOT_SET,
-              message: 'destination PERMANENTFLAGS does not accept custom keywords',
-            });
-          }
-        }
-      } catch (err) {
-        throw classifyImapError(err, ERROR_KIND.APPEND_FAILED);
-      } finally {
-        destLock.release();
-      }
+      // Le Message-ID est cherché à destination AVANT tout APPEND, et l'APPEND
+      // doit rendre un UID : la source n'est touchée qu'après ce dépôt vérifié.
+      const { destUid, dedupHit } = await appendAtDestination(
+        this.connections,
+        destAccount,
+        destMailbox,
+        src,
+        { requireUid: true, routedKeyword: true, warnings },
+      );
 
       // 5. Synchronous audit INSERT (D-Premise-2 — part of the move contract).
       // claim() throws a typed MoveError on DB-down/misconfig (→ outer catch);
@@ -229,6 +213,8 @@ export class CrossAccountMover {
       const claimed = await this.logRepo.claim({
         source_account: sourceAccount,
         source_mailbox: sourceMailbox,
+        // Source Graph (id opaque) : 0, identifiée par son Message-ID — même
+        // convention que le journal des copies.
         source_uid: uid,
         dest_account: destAccount,
         dest_mailbox: destMailbox,
@@ -258,7 +244,8 @@ export class CrossAccountMover {
           status: 'duplicate_skipped',
           source_account: sourceAccount,
           source_mailbox: sourceMailbox,
-          source_uid: uid,
+          source_uid: sourceUid,
+          source_id: emailId,
           dest_account: destAccount,
           dest_mailbox: destMailbox,
           dest_uid: claimed.existing.dest_uid,
@@ -274,7 +261,9 @@ export class CrossAccountMover {
       const moveLogId = claimed.id;
 
       // 6-8. Source cleanup, capability-gated UID MOVE to source Trash.
-      const cleanup = await this.cleanupSource(sourceAccount, sourceMailbox, uid, src.uidValidity);
+      const cleanup = sourceIsGraph
+        ? await this.cleanupGraphSource(sourceAccount, sourceMailbox, emailId)
+        : await this.cleanupSource(sourceAccount, sourceMailbox, uid, src.uidValidity);
       await this.logRepo.recordSourceCleanup(moveLogId, {
         source_deleted: cleanup.deleted,
         source_cleanup: cleanup.kind,
@@ -284,13 +273,28 @@ export class CrossAccountMover {
       if (cleanup.warning) {
         warnings.push(cleanup.warning);
       }
+      // Jamais de succès muet : un message déposé dont la source reste en
+      // place est dit dans le résultat, sur les deux backends.
+      const cleanupError =
+        !cleanup.deleted && cleanup.errorKind
+          ? { kind: cleanup.errorKind, message: cleanup.errorMessage ?? cleanup.errorKind }
+          : undefined;
+      if (cleanupError) {
+        warnings.push({
+          kind: WARNING_KIND.SOURCE_NOT_REMOVED,
+          message:
+            `message ${dedupHit ? 'already present' : 'copied'} at the destination, but the ` +
+            `source was NOT removed (${cleanupError.kind}: ${cleanupError.message})`,
+        });
+      }
 
       return {
         success: true,
         status,
         source_account: sourceAccount,
         source_mailbox: sourceMailbox,
-        source_uid: uid,
+        source_uid: sourceUid,
+        source_id: emailId,
         dest_account: destAccount,
         dest_mailbox: destMailbox,
         dest_uid: destUid,
@@ -299,6 +303,7 @@ export class CrossAccountMover {
         from: src.from,
         size_bytes: src.sizeBytes,
         source_cleanup: cleanup.kind,
+        ...(cleanupError ? { source_cleanup_error: cleanupError } : {}),
         move_log_id: moveLogId,
         warnings,
       };
@@ -317,13 +322,14 @@ export class CrossAccountMover {
     const client = await this.connections.getImapClient(account);
     const lock = await client.getMailboxLock(mailbox);
     try {
-      const uidValidity = client.mailbox && client.mailbox.uidValidity;
+      const mb = client.mailbox;
+      const uidValidity = mb === false ? undefined : mb.uidValidity;
       const msg = await client.fetchOne(
         String(uid),
         { uid: true, source: true, flags: true, envelope: true, internalDate: true },
         { uid: true },
       );
-      if (!msg || !msg.source) {
+      if (msg === false || !msg.source) {
         throw new MoveError(
           ERROR_KIND.SOURCE_NOT_FOUND,
           `email ${uid} not found in ${account}/${mailbox}`,
@@ -351,13 +357,7 @@ export class CrossAccountMover {
     mailbox: string,
     uid: number,
     expectedUidValidity: bigint,
-  ): Promise<{
-    deleted: boolean;
-    kind: SourceCleanup;
-    warning?: MoveWarning;
-    errorKind?: string;
-    errorMessage?: string;
-  }> {
+  ): Promise<CleanupOutcome> {
     const client = await this.connections.getImapClient(account);
 
     // 7. Resolve source \Trash via SPECIAL-USE.
@@ -380,7 +380,8 @@ export class CrossAccountMover {
     const lock = await client.getMailboxLock(mailbox);
     try {
       // 6. Re-verify UIDVALIDITY — the UID must still mean the same message.
-      const nowUidValidity = client.mailbox && client.mailbox.uidValidity;
+      const nowMb = client.mailbox;
+      const nowUidValidity = nowMb === false ? undefined : nowMb.uidValidity;
       if (
         expectedUidValidity !== 0n &&
         typeof nowUidValidity === 'bigint' &&
@@ -415,6 +416,40 @@ export class CrossAccountMover {
       };
     } finally {
       lock.release();
+    }
+  }
+
+  /** Source Graph : lecture partagée avec la copie, sans UIDVALIDITY. */
+  private async fetchGraphSource(
+    account: string,
+    mailbox: string,
+    emailId: string,
+  ): Promise<FetchedSource> {
+    const src = await readGraphSource(this.mailService, account, mailbox, emailId);
+    return { ...src, sizeBytes: src.raw.length, uidValidity: 0n };
+  }
+
+  /**
+   * Nettoyage d'une source Graph : `POST /me/messages/{id}/move` vers
+   * `deleteditems` (Éléments supprimés), via `deleteEmail(…, permanent=false)`
+   * du routeur — jamais le DELETE définitif. Un échec n'est pas levé : il est
+   * rendu, le message étant déjà déposé et journalisé à destination.
+   */
+  private async cleanupGraphSource(
+    account: string,
+    mailbox: string,
+    emailId: string,
+  ): Promise<CleanupOutcome> {
+    try {
+      await this.mailService.deleteEmail(account, emailId, mailbox, false);
+      return { deleted: true, kind: 'moved_to_trash' };
+    } catch (err) {
+      return {
+        deleted: false,
+        kind: 'skipped_unsafe',
+        errorKind: ERROR_KIND.SOURCE_CLEANUP_FAILED,
+        errorMessage: `Graph move to Deleted Items failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
   }
 

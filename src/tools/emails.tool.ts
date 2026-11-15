@@ -478,6 +478,13 @@ export default function registerEmailsTools(
           parts.push(`CC:     ${email.cc.map((a) => a.address).join(', ')}`);
         }
 
+        // Reply-To posé par l'expéditeur : c'est là que reply_email répondra.
+        if (email.replyTo?.length) {
+          parts.push(
+            `Reply-To: ${email.replyTo.map((a) => (a.name ? `${a.name} <${a.address}>` : a.address)).join(', ')}`,
+          );
+        }
+
         parts.push(`Date:   ${email.date}`);
         parts.push(`ID:     ${email.messageId}`);
 

@@ -144,6 +144,43 @@ export function normalizeEnvelopeRecipients(addrs: string[]): string[] {
   ).list;
 }
 
+/**
+ * Destinataires d'une réponse composée localement (IMAP / SMTP), comme le font
+ * les clients de messagerie (RFC 5322 §3.6.2) et Graph `/reply` :
+ *
+ * - destinataire principal : toutes les adresses de Reply-To quand l'original
+ *   en porte un, sinon From ;
+ * - `replyAll` : principal + To de l'original en To, Cc de l'original en Cc,
+ *   moins les adresses du compte (`selfAddresses`), sans tenir compte de la
+ *   casse. Si ce retrait vide To (réponse à tous à un message qu'on s'est
+ *   envoyé à soi seul), le principal est gardé tel quel plutôt que de
+ *   composer une réponse sans destinataire.
+ *
+ * Une adresse présente à la fois en To et en Cc n'est gardée qu'en To ; les
+ * doublons (casse différente comprise) sont fusionnés. Exportée pour les tests.
+ */
+export function computeReplyRecipients(
+  original: Pick<Email, 'from' | 'to' | 'cc' | 'replyTo'>,
+  selfAddresses: string[],
+  replyAll: boolean,
+): { to: string[]; cc: string[] } {
+  const replyTo = (original.replyTo ?? []).map((a) => a.address).filter(Boolean);
+  const primary = replyTo.length > 0 ? replyTo : [original.from.address];
+  if (!replyAll) return { to: normalizeEnvelopeRecipients(primary), cc: [] };
+
+  const self = new Set(selfAddresses.map((a) => a.trim().toLowerCase()));
+  const notSelf = (address: string) => !self.has(address.trim().toLowerCase());
+  let toList = normalizeEnvelopeRecipients(
+    [...primary, ...original.to.map((a) => a.address)].filter(notSelf),
+  );
+  if (toList.length === 0) toList = normalizeEnvelopeRecipients(primary);
+  const toKeys = new Set(toList.map((a) => a.toLowerCase()));
+  const ccList = normalizeEnvelopeRecipients(
+    (original.cc ?? []).map((a) => a.address).filter(notSelf),
+  ).filter((a) => !toKeys.has(a.toLowerCase()));
+  return { to: toList, cc: ccList };
+}
+
 export default class SmtpService {
   constructor(
     private connections: IConnectionManager,
@@ -358,28 +395,14 @@ export default class SmtpService {
     const mailbox = options.mailbox ?? 'INBOX';
     const original = await this.imapService.getEmail(accountName, options.emailId, mailbox);
 
-    // Build recipient list. Self is recognised case-insensitively, and an
-    // address present in both To and Cc is kept once (in To).
-    const self = account.email.toLowerCase();
-    const isSelf = (address: string) => address.trim().toLowerCase() === self;
-    const to = [original.from.address];
-    const cc: string[] = [];
-
-    if (options.replyAll) {
-      original.to
-        .filter((addr) => !isSelf(addr.address))
-        .forEach((addr) => {
-          to.push(addr.address);
-        });
-      (original.cc ?? [])
-        .filter((addr) => !isSelf(addr.address))
-        .forEach((addr) => {
-          cc.push(addr.address);
-        });
-    }
-    const toList = normalizeEnvelopeRecipients(to);
-    const toKeys = new Set(toList.map((a) => a.toLowerCase()));
-    const ccList = normalizeEnvelopeRecipients(cc).filter((a) => !toKeys.has(a.toLowerCase()));
+    // Destinataires : Reply-To prioritaire sur From, soi-même retiré en
+    // réponse à tous (voir computeReplyRecipients). Le compte n'a pas d'alias
+    // déclarés dans la config : seule son adresse principale est « soi ».
+    const { to: toList, cc: ccList } = computeReplyRecipients(
+      original,
+      [account.email],
+      options.replyAll === true,
+    );
 
     // Build threading headers
     const references = [...(original.references ?? []), original.messageId].filter(Boolean);

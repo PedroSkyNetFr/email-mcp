@@ -613,7 +613,7 @@ Microsoft Graph does not serve message headers in a listing.
 | `add_label` / `remove_label` | Label a message / remove the label. | both | — |
 | `create_label` / `delete_label` | Create / delete a label. | both | — |
 | `create_mailbox` / `rename_mailbox` / `delete_mailbox` | Folder management (`delete_mailbox` deletes the content too). | both | — |
-| `cross_account_move` | Move messages to another account, keeping headers, flags and date. Needs Postgres. | IMAP | — |
+| `cross_account_move` | Move messages to another account, keeping headers, flags and date. Needs Postgres. | source: both · destination: IMAP | — |
 | `cross_account_copy` | Copy messages to another account, keeping headers, flags and date; the source is never touched. No database needed. | source: both · destination: IMAP | — |
 | `list_mail_rules` | Server-side inbox rules. | Graph | — |
 | `create_mail_rule` / `delete_mail_rule` | Create / delete a server-side rule. | Graph | — |
@@ -653,7 +653,7 @@ Microsoft Graph does not serve message headers in a listing.
 | Labels | Gmail labels, ProtonMail label folders, IMAP keywords | Outlook categories |
 | `save_all_attachments_from_search`, `extract_contacts`, `get_email_stats`, `find_email_folder` | ✅ | — |
 | Calendar extraction (`extract_calendar`, `analyze_email_for_scheduling`, `add_to_calendar`) | ✅ | — |
-| `cross_account_move` | ✅ | — |
+| `cross_account_move` | ✅ | as source only — a Graph destination is refused |
 | `cross_account_copy` | ✅ | as source only — a Graph destination is refused |
 | Watcher (IMAP IDLE) and per-account resources (`mailboxes`, `unread`, `stats`) | ✅ | — (they go through IMAP) |
 | Server-side rules, automatic reply | — | ✅ |
@@ -937,6 +937,15 @@ base64-encoded, which adds about 37 % — must fit the size limit:
 
 ### Replies, forwards and what happens after sending
 
+- Recipients of `reply_email` and `reply_draft` follow mail clients
+  (RFC 5322 §3.6.2): the reply goes to **all the `Reply-To` addresses** when the
+  original carries that header (a mailing list, a `noreply@` sender pointing to
+  a support address), otherwise to `From`. With `replyAll`, the original To and
+  Cc are added (To stays To, Cc stays Cc), minus the account's own address,
+  duplicates merged regardless of case. Graph `/reply`, `/replyAll`,
+  `createReply` and `createReplyAll` apply the same rule server-side, so both
+  backends address a reply the same way. `get_email` shows a `Reply-To:` line
+  when the header is present.
 - `reply_email` quotes the original below the reply by default (an attribution
   line and `>`-prefixed lines; in an HTML reply, a `<blockquote type="cite">`
   holding the original as escaped text, never its raw HTML). `quoteOriginal:
@@ -1024,7 +1033,7 @@ ignored with a warning.
   afterwards; the tool returns the **new** id. Inline images referenced by the
   body are kept; a `cid:` with no matching image produces a warning.
 - `reply_draft` builds a reply exactly as `reply_email` does — `Re:` subject,
-  recipients (`replyAll` adds the original To/Cc minus yourself),
+  recipients (`Reply-To`, else the sender; `replyAll` adds the original To/Cc minus yourself),
   `In-Reply-To` / `References`, the quoted original (`quoteOriginal`, in the
   `reply_language` of the account), the signature, the original attachments with
   `includeAttachments`, extra `attachments` and `bcc` — and saves it to Drafts
@@ -1223,12 +1232,28 @@ content.
 
 ### Cross-account move
 
-`cross_account_move` moves messages between two configured IMAP accounts: it
+`cross_account_move` moves messages between two configured accounts: it
 fetches the raw message, appends it to the destination with its flags and
 original date (it looks natively delivered), records the move, then moves the
 source copy to the source account's Trash. A message already present at the
-destination is skipped. The move log lives in **PostgreSQL**; without a database,
-this tool refuses and every other tool works normally.
+destination (same `Message-ID`) is not appended twice. The move log lives in
+**PostgreSQL**; without a database, this tool refuses and every other tool works
+normally.
+
+- **IMAP source**: `UID MOVE` into the `\Trash` folder (SPECIAL-USE), only if
+  the server advertises `MOVE` and the folder's UIDVALIDITY has not changed —
+  otherwise the source is left in place (never an `EXPUNGE`).
+- **Graph source** (Exchange / Outlook.com): `email_id` is the opaque Graph id;
+  the raw message is read through `GET /messages/{id}/$value` (read and flagged
+  become `\Seen` / `\Flagged`), and once the append is confirmed the source is
+  moved to **Deleted Items** (`POST /messages/{id}/move`), never permanently
+  deleted. `sourceMailbox` is informative there: a Graph id is mailbox-wide.
+  The log stores `source_uid = 0` for such a move; the `Message-ID` identifies it.
+- **Graph destination**: refused (`dest_backend_unsupported`) before the source
+  is read, for the same reason as `cross_account_copy` below.
+- When the source cannot be removed (no Trash, no `MOVE`, Graph error…), the
+  result says so — `source_cleanup_error` and a `source_not_removed` warning:
+  the message is at the destination and the source is still there.
 
 ```toml
 [database]

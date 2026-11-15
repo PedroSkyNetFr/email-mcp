@@ -135,7 +135,8 @@ export default function registerDraftTools(
       description:
         'Save a threaded REPLY to an email in the Drafts folder WITHOUT sending it — the review-first ' +
         'counterpart of reply_email. The draft is built like reply_email builds a reply: "Re:" subject, ' +
-        'recipients (the sender; with replyAll also the original To/Cc minus yourself), In-Reply-To and ' +
+        'recipients (the Reply-To address(es) when the original has one, otherwise the sender; with replyAll ' +
+        'also the original To/Cc minus yourself), In-Reply-To and ' +
         'References so it joins the conversation, the original quoted below by default and the account ' +
         'signature when configured. Nothing is sent. Returns the draft id to pass to send_draft (to send ' +
         'it) or update_draft (to rewrite it). On Graph-backed (Exchange) accounts the draft comes from ' +

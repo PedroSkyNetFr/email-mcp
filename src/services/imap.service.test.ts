@@ -1907,6 +1907,52 @@ describe('ImapService', () => {
   // a single MIME-aware simpleParser walk of the already-fetched source.
   // -------------------------------------------------------------------------
 
+  describe('messageToEmail — Reply-To', () => {
+    const mime = (lines: string[]): Buffer => Buffer.from(lines.join('\r\n'), 'utf-8');
+
+    function primeReplyTo(source: Buffer): void {
+      (client as unknown as { fetchOne: ReturnType<typeof vi.fn> }).fetchOne = vi
+        .fn()
+        .mockResolvedValue({
+          uid: 7,
+          // Comme un vrai serveur : l'ENVELOPE recopie From quand Reply-To manque.
+          envelope: {
+            subject: 'S',
+            from: [{ address: 'alice@example.com' }],
+            to: [],
+            replyTo: [{ address: 'alice@example.com' }],
+          },
+          flags: [],
+          source,
+        });
+    }
+
+    it('expose toutes les adresses de Reply-To, groupes aplatis', async () => {
+      primeReplyTo(
+        mime([
+          'From: Alice <alice@example.com>',
+          'Reply-To: Support <support@example.com>, Liste: list@example.com, ventes@example.com;',
+          'Subject: S',
+          '',
+          'corps',
+          '',
+        ]),
+      );
+      const email = await service.getEmail('test', '7', 'INBOX');
+      expect(email.replyTo).toEqual([
+        { name: 'Support', address: 'support@example.com' },
+        { name: undefined, address: 'list@example.com' },
+        { name: undefined, address: 'ventes@example.com' },
+      ]);
+    });
+
+    it("n'invente pas de Reply-To quand l'en-tête manque (ENVELOPE recopiant From ignorée)", async () => {
+      primeReplyTo(mime(['From: alice@example.com', 'Subject: S', '', 'corps', '']));
+      const email = await service.getEmail('test', '7', 'INBOX');
+      expect(email.replyTo).toBeUndefined();
+    });
+  });
+
   describe('messageToEmail body extraction (multipart/Gmail/forwarded)', () => {
     const CRLF = '\r\n';
     /** Joins lines with CRLF (RFC822 wire format mailparser expects). */

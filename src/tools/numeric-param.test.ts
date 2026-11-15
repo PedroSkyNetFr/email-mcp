@@ -88,7 +88,7 @@ function collectShapes(): Map<string, Shape> {
     () => registerLabelTools(server as never, f()),
     () => registerBulkTools(server as never, f()),
     () => registerDraftTools(server as never, f(), f()),
-    () => registerCrossAccountMoveTool(server as never, f(), f()),
+    () => registerCrossAccountMoveTool(server as never, f(), f(), f()),
     () => registerExchangeTools(server as never, f(), f()),
     () => registerFolderTools(server as never, f()),
     () => registerTemplateWriteTools(server as never, f(), f(), f()),

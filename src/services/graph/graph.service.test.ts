@@ -518,3 +518,37 @@ describe('GraphService — save_draft with in_reply_to (6)', () => {
     expect(calls()).toEqual(['POST /me/messages']);
   });
 });
+
+describe('GraphService.getEmail — Reply-To', () => {
+  it('demande replyTo et l’expose quand l’expéditeur en a posé un', async () => {
+    const { client, service } = build();
+    client.request.mockResolvedValueOnce({
+      id: 'AAMk1',
+      subject: 'S',
+      from: { emailAddress: { address: 'alice@example.com' } },
+      toRecipients: [],
+      replyTo: [{ emailAddress: { name: 'Support', address: 'support@example.com' } }],
+      body: { contentType: 'text', content: 'corps' },
+    });
+
+    const email = await service.getEmail('graph', 'AAMk1');
+
+    expect(client.request.mock.calls[0][1]).toContain('replyTo');
+    expect(email.replyTo).toEqual([{ name: 'Support', address: 'support@example.com' }]);
+  });
+
+  it('laisse replyTo absent quand Graph rend un tableau vide', async () => {
+    const { client, service } = build();
+    client.request.mockResolvedValueOnce({
+      id: 'AAMk2',
+      from: { emailAddress: { address: 'alice@example.com' } },
+      toRecipients: [],
+      replyTo: [],
+      body: { contentType: 'text', content: '' },
+    });
+
+    const email = await service.getEmail('graph', 'AAMk2');
+
+    expect(email.replyTo).toBeUndefined();
+  });
+});

@@ -7,7 +7,11 @@ import type RateLimiter from '../safety/rate-limiter.js';
 import { formatQuoteDate } from '../utils/quote.js';
 import type { ResolvedAttachment } from './attachment-resolver.js';
 import type ImapService from './imap.service.js';
-import SmtpService, { normalizeEnvelopeRecipients, stripBccHeader } from './smtp.service.js';
+import SmtpService, {
+  computeReplyRecipients,
+  normalizeEnvelopeRecipients,
+  stripBccHeader,
+} from './smtp.service.js';
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -437,6 +441,21 @@ describe('SmtpService', () => {
         'cc1@example.com',
       ]);
       expect(call.envelope.to).not.toContain('test@example.com');
+    });
+  });
+
+  describe('replyToEmail — Reply-To', () => {
+    it("répond au Reply-To plutôt qu'à From (enveloppe et en-tête To)", async () => {
+      imapService.getEmail = vi
+        .fn()
+        .mockResolvedValue(
+          createMockEmail({ replyTo: [{ name: 'Support', address: 'support@example.com' }] }),
+        );
+      await service.replyToEmail('test', { emailId: '42', body: 'Reply body' });
+      const call = transport.sendMail.mock.calls[0][0];
+      expect(call.envelope.to).toEqual(['support@example.com']);
+      const parsed = await simpleParser(call.raw as Buffer);
+      expect(parsed.to).toMatchObject({ text: 'support@example.com' });
     });
   });
 
@@ -884,6 +903,96 @@ describe('SmtpService', () => {
       );
       const out = stripBccHeader(raw);
       expect(out.equals(raw)).toBe(true);
+    });
+  });
+
+  describe('computeReplyRecipients', () => {
+    const from = { name: 'Alice', address: 'alice@example.com' };
+    const self = ['me@example.com'];
+
+    it('Reply-To unique : remplace From', () => {
+      const r = computeReplyRecipients(
+        { from, to: [{ address: 'me@example.com' }], replyTo: [{ address: 'help@example.com' }] },
+        self,
+        false,
+      );
+      expect(r).toEqual({ to: ['help@example.com'], cc: [] });
+    });
+
+    it('Reply-To multiple : toutes ses adresses', () => {
+      const r = computeReplyRecipients(
+        { from, to: [], replyTo: [{ address: 'a@example.com' }, { address: 'b@example.com' }] },
+        self,
+        false,
+      );
+      expect(r.to).toEqual(['a@example.com', 'b@example.com']);
+    });
+
+    it('Reply-To absent ou vide : From', () => {
+      expect(computeReplyRecipients({ from, to: [] }, self, false).to).toEqual([
+        'alice@example.com',
+      ]);
+      expect(computeReplyRecipients({ from, to: [], replyTo: [] }, self, false).to).toEqual([
+        'alice@example.com',
+      ]);
+    });
+
+    it('replyAll : Reply-To + To en To, Cc en Cc, soi-même retiré partout', () => {
+      const r = computeReplyRecipients(
+        {
+          from,
+          replyTo: [{ address: 'list@example.com' }, { address: 'ME@example.com' }],
+          to: [{ address: 'Me@Example.com' }, { address: 'bob@example.com' }],
+          cc: [{ address: 'me@example.com' }, { address: 'carol@example.com' }],
+        },
+        self,
+        true,
+      );
+      expect(r).toEqual({ to: ['list@example.com', 'bob@example.com'], cc: ['carol@example.com'] });
+    });
+
+    it('replyAll sans Reply-To : From + To + Cc', () => {
+      const r = computeReplyRecipients(
+        { from, to: [{ address: 'bob@example.com' }], cc: [{ address: 'carol@example.com' }] },
+        self,
+        true,
+      );
+      expect(r).toEqual({
+        to: ['alice@example.com', 'bob@example.com'],
+        cc: ['carol@example.com'],
+      });
+    });
+
+    it('casse différente : dédoublonné, To prioritaire sur Cc, première graphie gardée', () => {
+      const r = computeReplyRecipients(
+        {
+          from,
+          replyTo: [{ address: 'Bob@Example.com' }],
+          to: [{ address: 'bob@example.com' }, { address: 'ALICE@example.com' }],
+          cc: [{ address: 'BOB@EXAMPLE.COM' }, { address: 'alice@example.com' }],
+        },
+        self,
+        true,
+      );
+      expect(r).toEqual({ to: ['Bob@Example.com', 'ALICE@example.com'], cc: [] });
+    });
+
+    it('replyAll à un message envoyé à soi seul : le principal est gardé plutôt que rien', () => {
+      const r = computeReplyRecipients(
+        { from: { address: 'me@example.com' }, to: [{ address: 'Me@example.com' }] },
+        self,
+        true,
+      );
+      expect(r).toEqual({ to: ['me@example.com'], cc: [] });
+    });
+
+    it('réponse simple : soi-même en Reply-To est gardé (pas de retrait hors replyAll)', () => {
+      const r = computeReplyRecipients(
+        { from, to: [], replyTo: [{ address: 'me@example.com' }] },
+        self,
+        false,
+      );
+      expect(r.to).toEqual(['me@example.com']);
     });
   });
 

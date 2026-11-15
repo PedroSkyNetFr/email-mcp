@@ -180,6 +180,36 @@ function parseAddresses(addrs: { name?: string; address?: string }[] | undefined
   return addrs.map(parseAddress);
 }
 
+/** Forme minimale d'un `AddressObject` de mailparser (adresses et groupes). */
+interface ParsedAddressNode {
+  name?: string;
+  address?: string;
+  group?: ParsedAddressNode[];
+}
+
+/**
+ * Aplatit un en-tête d'adresses tel que mailparser le rend (`AddressObject`
+ * ou tableau d'`AddressObject`, groupes RFC 5322 compris) en liste
+ * d'adresses. Les entrées sans adresse (groupe vide, nom seul) sont écartées.
+ */
+export function flattenParsedAddresses(
+  value: { value?: ParsedAddressNode[] } | { value?: ParsedAddressNode[] }[] | undefined,
+): EmailAddress[] {
+  if (!value) return [];
+  const objects = Array.isArray(value) ? value : [value];
+  const out: EmailAddress[] = [];
+  const walk = (nodes: ParsedAddressNode[] | undefined) => {
+    (nodes ?? []).forEach((node) => {
+      if (node.group) walk(node.group);
+      else if (node.address) out.push({ name: nonEmpty(node.name), address: node.address });
+    });
+  };
+  objects.forEach((obj) => {
+    walk(obj.value);
+  });
+  return out;
+}
+
 /**
  * Walk a bodyStructure tree and collect attachment metadata.
  *
@@ -966,6 +996,7 @@ async function messageToEmail(msg: Record<string, unknown>): Promise<Email> {
   let raw: string | undefined;
   let bodyWarning: string | undefined;
   let parsedReferences: string[] | undefined;
+  let replyTo: EmailAddress[] | undefined;
   const headers: Record<string, string> = {};
 
   const { source } = msg;
@@ -994,6 +1025,10 @@ async function messageToEmail(msg: Record<string, unknown>): Promise<Email> {
         const parsed = await simpleParser(source);
         bodyText = nonEmpty(parsed.text);
         bodyHtml = nonEmpty(typeof parsed.html === 'string' ? parsed.html : undefined);
+        // Reply-To tel que posé par l'expéditeur : mailparser ne le remplit que
+        // si l'en-tête existe (contrairement à l'ENVELOPE IMAP, où le serveur
+        // recopie From quand Reply-To manque — RFC 3501 §7.4.2).
+        replyTo = flattenParsedAddresses(parsed.replyTo);
         // mailparser's reference extraction handles header folding and
         // LF-only line endings that the lightweight CRLF header scan above
         // does not — prefer it for the threading-critical references list.
@@ -1028,10 +1063,20 @@ async function messageToEmail(msg: Record<string, unknown>): Promise<Email> {
     }
   }
 
+  // Source non analysée (trop grosse, ou erreur MIME) : l'ENVELOPE du serveur
+  // porte encore Reply-To, mais n'est fiable que si l'en-tête existe vraiment
+  // (sinon le serveur y a recopié From).
+  if (replyTo === undefined && headers['reply-to'] !== undefined) {
+    replyTo = parseAddresses(envelope.replyTo as Record<string, string>[]).filter(
+      (a) => a.address !== 'unknown',
+    );
+  }
+
   return {
     ...meta,
     cc: parseAddresses(envelope.cc as Record<string, string>[]),
     bcc: parseAddresses(envelope.bcc as Record<string, string>[]),
+    ...(replyTo && replyTo.length > 0 ? { replyTo } : {}),
     bodyText,
     bodyHtml,
     ...(raw !== undefined ? { raw } : {}),
