@@ -12,7 +12,7 @@ plusieurs comptes. Les boîtes sont jointes en **IMAP + SMTP**, ou via
 **Microsoft Graph** pour les comptes Exchange Online et Outlook.com, dont l'accès
 IMAP masque une partie de la boîte.
 
-Le serveur expose **64 outils** (35 en lecture seule), **7 prompts** et
+Le serveur expose **67 outils** (35 en lecture seule), **7 prompts** et
 **6 ressources**.
 
 > **À propos de ce fork.** Ce dépôt est un fork maintenu par
@@ -403,7 +403,7 @@ du tout `config.toml`** (aucun autre compte, aucune `[[searches]]`).
 |----------|-------|
 | `MCP_EMAIL_ACCOUNTS` | Noms des comptes, séparés par des virgules, que l'instance expose ([ci-dessous](#plusieurs-connecteurs-sur-une-même-configuration)). |
 | `MCP_EMAIL_READ_ONLY` | `true` passe l'instance en lecture seule. Elle ne peut que restreindre : elle ne lève jamais un `read_only = true` posé dans le fichier. |
-| `EMAIL_MCP_DATABASE_URL` | URL Postgres pour `cross_account_move` ; prime sur `[database].url`. |
+| `EMAIL_MCP_DATABASE_URL` | URL Postgres pour `cross_account_move` (et le journal facultatif de `cross_account_copy`) ; prime sur `[database].url`. |
 | `MAIL_ALLOWED_SAVE_DIRS` | Dossiers supplémentaires (séparés par `;`) où des fichiers peuvent être écrits ([détails](#où-les-fichiers-peuvent-être-écrits)). |
 | `MAIL_ALLOW_ANY_SAVE_DIR` | `true` désactive la liste blanche des dossiers d'écriture. |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | Déplacent les dossiers listés [plus haut](#emplacement-de-la-configuration). |
@@ -523,7 +523,7 @@ outils du serveur compilé comme le ferait un client), `db:migrate`.
 
 ## Référence des outils
 
-**64 outils.** *Backend* indique quels comptes un outil sert : **both** (IMAP et
+**67 outils.** *Backend* indique quels comptes un outil sert : **both** (IMAP et
 Graph), **IMAP** seulement (un compte Graph reçoit une erreur explicite « not
 supported yet »), **Graph** seulement (l'outil refuse un compte IMAP), ou
 **local** (aucune boîte en jeu). *Lecture seule* indique si l'outil reste
@@ -604,6 +604,7 @@ en-têtes d'un message en liste.
 |-------|---------------|---------|---------------|
 | `send_email` | Nouveau message : texte ou HTML, cc/cci, pièces jointes, images intégrées, signature. | both | — |
 | `reply_email` | Réponse dans le fil, original cité (`replyAll`, `quoteOriginal`, `includeAttachments`, `appendSignature`). | both | — |
+| `reply_draft` | La même réponse dans le fil, enregistrée dans Brouillons **sans être envoyée** — renvoie l'identifiant du brouillon pour `send_draft` / `update_draft` ([détails](#brouillons)). | both | — |
 | `forward_email` | Transfert de l'original et de ses pièces jointes (`cc`, `includeAttachments`, `html`, `appendSignature`). | both | — |
 | `save_draft` | Enregistre un brouillon (pièces jointes, `in_reply_to`, signature). | both | — |
 | `update_draft` | Réécrit un brouillon en gardant ou modifiant ses pièces jointes. | both | — |
@@ -619,6 +620,7 @@ en-têtes d'un message en liste.
 | Outil | Ce qu'il fait | Backend | Lecture seule |
 |-------|---------------|---------|---------------|
 | `move_email` | Déplace vers un autre dossier du même compte. | both | — |
+| `copy_email` | Copie vers un autre dossier du même compte ; l'original reste en place. | both | — |
 | `delete_email` | Vers la Corbeille, ou définitivement avec `permanent: true`. | both | — |
 | `mark_email` | Lu / non lu / suivi / non suivi. | both | — |
 | `bulk_action` | Même action sur jusqu'à 100 messages. | both | — |
@@ -627,6 +629,7 @@ en-têtes d'un message en liste.
 | `create_label` / `delete_label` | Crée / supprime un libellé. | both | — |
 | `create_mailbox` / `rename_mailbox` / `delete_mailbox` | Gestion des dossiers (`delete_mailbox` supprime aussi le contenu). | both | — |
 | `cross_account_move` | Déplace des messages vers un autre compte en gardant en-têtes, indicateurs et date. Exige Postgres. | IMAP | — |
+| `cross_account_copy` | Copie des messages vers un autre compte en gardant en-têtes, indicateurs et date ; la source n'est jamais modifiée. Sans base de données. | source : both · destination : IMAP | — |
 | `list_mail_rules` | Règles de boîte de réception côté serveur. | Graph | — |
 | `create_mail_rule` / `delete_mail_rule` | Crée / supprime une règle côté serveur. | Graph | — |
 | `get_auto_reply` / `set_auto_reply` | Lit / règle la réponse automatique (absence). | Graph | — |
@@ -666,6 +669,7 @@ en-têtes d'un message en liste.
 | `save_all_attachments_from_search`, `extract_contacts`, `get_email_stats`, `find_email_folder` | ✅ | — |
 | Extraction d'événements (`extract_calendar`, `analyze_email_for_scheduling`, `add_to_calendar`) | ✅ | — |
 | `cross_account_move` | ✅ | — |
+| `cross_account_copy` | ✅ | comme source seulement — une destination Graph est refusée |
 | Surveillance (IMAP IDLE) et ressources par compte (`mailboxes`, `unread`, `stats`) | ✅ | — (elles passent par IMAP) |
 | Règles côté serveur, réponse automatique | — | ✅ |
 
@@ -710,6 +714,7 @@ jeu de filtres. Les filtres se combinent en ET. Les résultats sont paginés
 | Paramètre | Correspond à |
 |-----------|--------------|
 | `query` | Texte libre dans le sujet, l'expéditeur et le corps (`search_emails` et les outils multi-comptes / d'export). |
+| `deep` | `false` limite `query` aux en-têtes — sujet, expéditeur et destinataires, jamais le corps (`search_emails`, `search_all_accounts` ; `true` par défaut). |
 | `from`, `to`, `cc`, `bcc`, `subject` | En-tête, **comparé par le serveur de messagerie** (voir plus bas). |
 | `from_contains`, `to_contains`, `subject_contains` | Sous-chaîne littérale, sans tenir compte de la casse, de l'en-tête décodé, vérifiée par email-mcp. |
 | `body`, `text` | Corps / en-têtes + corps. |
@@ -1056,6 +1061,16 @@ avertissement.
   d'abord et l'ancienne supprimée seulement ensuite ; l'outil renvoie le
   **nouvel** identifiant. Les images intégrées référencées par le corps sont
   conservées ; un `cid:` sans image correspondante produit un avertissement.
+- `reply_draft` compose une réponse exactement comme `reply_email` — sujet
+  `Re:`, destinataires (`replyAll` ajoute les To/Cc de l'original, sauf
+  vous-même), `In-Reply-To` / `References`, original cité (`quoteOriginal`, dans
+  la `reply_language` du compte), signature, pièces de l'original avec
+  `includeAttachments`, `attachments` supplémentaires et `bcc` — puis
+  l'enregistre dans Brouillons au lieu de l'envoyer. Il renvoie l'identifiant du
+  brouillon : relisez-le dans votre client, puis `send_draft` ou `update_draft`.
+  Sur un compte Graph, le brouillon vient du `createReply` / `createReplyAll`
+  d'Exchange, qui rattache la réponse au fil et écrit l'en-tête de citation dans
+  la langue de la boîte.
 
 ### Modèles
 
@@ -1277,6 +1292,26 @@ Les migrations vont uniquement vers l'avant et sont consignées dans
 `ALTER SCHEMA public OWNER TO email_mcp;` dans cette base, sans quoi la première
 migration échoue avec « permission denied for schema public ».
 
+### Copies
+
+`copy_email` copie un message dans un autre dossier du **même** compte et laisse
+l'original en place : `COPY` IMAP côté serveur (le nouvel UID est indiqué quand
+le serveur gère UIDPLUS), ou `POST /messages/{id}/copy` sur un compte Graph. Pas
+idempotent : un second appel crée une seconde copie.
+
+`cross_account_copy` dépose une copie dans un **autre** compte — les trois
+premières étapes de `cross_account_move`, et rien de plus : il lit le message
+brut, l'ignore si son `Message-ID` est déjà à la destination, et l'ajoute avec
+ses indicateurs et sa date d'origine. La source n'est jamais modifiée : ouverte
+en lecture seule, ni Corbeille, ni `\Deleted`, ni mot-clé `$Routed`. La source
+peut être un compte IMAP ou Graph (lue par `GET /messages/{id}/$value`) ; la
+destination doit être IMAP. Une destination Graph est refusée : Graph n'importe
+un message brut que comme **brouillon** (date de réception = date d'import), qui
+n'aurait pas l'air d'un message reçu. Aucune base n'est exigée : avec
+`[database]`, chaque copie est journalisée dans `email_move_log` avec
+`operation = 'copy'` (migration `002`) ; sans, la copie réussit avec un
+avertissement `audit_log_skipped`.
+
 ### Règles et réponse automatique Exchange
 
 Sur les comptes Graph, `create_mail_rule` crée une règle de boîte de réception
@@ -1370,7 +1405,7 @@ src/
 │   ├── watcher, hooks, notifier, presets     surveillance IDLE, tri, alertes
 │   └── scheduler, calendar, reminders, templates, signature-loader, …
 ├── routing/           déplacement entre comptes et son journal Postgres
-├── tools/ prompts/ resources/   surface MCP (64 outils, 7 prompts, 6 ressources)
+├── tools/ prompts/ resources/   surface MCP (67 outils, 7 prompts, 6 ressources)
 ├── safety/            validation, limite d'envoi, journal d'audit
 └── utils/             dates, en-têtes, mise en forme du corps, informations de build
 ```

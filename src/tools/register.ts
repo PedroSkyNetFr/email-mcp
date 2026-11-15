@@ -25,6 +25,7 @@ import registerAttachmentTools from './attachments.tool.js';
 import registerBulkTools from './bulk.tool.js';
 import registerCalendarTools from './calendar.tool.js';
 import registerContactsTools from './contacts.tool.js';
+import registerCrossAccountCopyTool from './cross-account-copy.tool.js';
 import registerCrossAccountMoveTool from './cross-account-move.tool.js';
 import registerDraftTools from './drafts.tool.js';
 import registerEmailsTools from './emails.tool.js';
@@ -95,6 +96,8 @@ export default function registerAllTools(
     registerBulkTools(server, imapService);
     registerDraftTools(server, imapService, smtpService);
     registerCrossAccountMoveTool(server, connections, config);
+    // Copie non destructive : source IMAP ou Graph, destination IMAP.
+    registerCrossAccountCopyTool(server, connections, config, imapService);
     // Server-side rules and the automatic reply change mailbox state, so they
     // belong with the write tools; each refuses a non-Graph account itself.
     registerExchangeTools(server, graphService, config);

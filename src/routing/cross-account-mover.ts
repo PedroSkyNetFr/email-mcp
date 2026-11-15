@@ -76,7 +76,7 @@ interface FetchedSource {
   uidValidity: bigint;
 }
 
-function toDate(v: unknown): Date | undefined {
+export function toDate(v: unknown): Date | undefined {
   if (v instanceof Date) {
     return v;
   }
@@ -87,7 +87,7 @@ function toDate(v: unknown): Date | undefined {
   return undefined;
 }
 
-function formatFrom(addr?: { name?: string; address?: string }): string | null {
+export function formatFrom(addr?: { name?: string; address?: string }): string | null {
   if (!addr) {
     return null;
   }
@@ -96,7 +96,7 @@ function formatFrom(addr?: { name?: string; address?: string }): string | null {
 }
 
 /** Map a raw IMAP/imapflow error to a typed MoveError. */
-function classifyImapError(err: unknown, fallback: ErrorKind): MoveError {
+export function classifyImapError(err: unknown, fallback: ErrorKind): MoveError {
   if (err instanceof MoveError) {
     return err;
   }

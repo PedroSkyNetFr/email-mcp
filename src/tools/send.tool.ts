@@ -130,7 +130,8 @@ export default function registerSendTools(
         'The original message is quoted below the reply by default (attribution line + quoted text: ' +
         '"Le DATE, NAME a écrit :" in French by default, "On DATE, NAME wrote:" with reply_language = "en"; ' +
         'on Graph accounts Exchange writes its own header in the mailbox language), ' +
-        'as desktop clients do — set quoteOriginal=false to send the bare body only.',
+        'as desktop clients do — set quoteOriginal=false to send the bare body only. ' +
+        'Sends immediately: to review the reply before it goes out, use reply_draft instead.',
       inputSchema: z.object({
         account: z.string().describe('Account name from list_accounts'),
         emailId: z.string().describe('Email ID to reply to (from list_emails or get_email)'),

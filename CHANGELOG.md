@@ -21,6 +21,10 @@ v0.4.0, summarised by theme. The package version is still 0.4.0.
 - (**health**) `check_health` reports which build is actually running - ([853571b](https://github.com/PedroSkyNetFr/email-mcp/commit/853571b))
 - (**config**) `MCP_EMAIL_ACCOUNTS` restricts an instance to some accounts; `*_command` fields fetch credentials from a password manager - ([b95ecd4](https://github.com/PedroSkyNetFr/email-mcp/commit/b95ecd4), [15ce5f1](https://github.com/PedroSkyNetFr/email-mcp/commit/15ce5f1))
 - (**scheduler**) periodic check installed on Windows with Task Scheduler - ([08f402e](https://github.com/PedroSkyNetFr/email-mcp/commit/08f402e))
+- (**drafts**) `reply_draft` saves a threaded reply (`Re:` subject, reply / reply-all recipients, `In-Reply-To` / `References`, quoted original, signature, original attachments, `bcc`) to Drafts without sending it, and returns the draft id for `send_draft` / `update_draft`; on Graph accounts it starts from `createReply` / `createReplyAll` (idea from codefuturist PR #98, without the Mailbird-specific quoting)
+- (**manage**) `copy_email` copies a message into another folder of the same account, original left in place: server-side IMAP `COPY`, or Graph `POST /messages/{id}/copy` (from wgs4 3a1444d)
+- (**routing**) `cross_account_copy` copies messages into another account with their raw MIME, flags and original date, never touching the source; IMAP or Graph source, IMAP destination (a Graph destination is refused: Graph imports raw MIME only as a draft); no database required — copies are logged best-effort, `email_move_log.operation` added by migration `002` (from wgs4 3a1444d)
+- (**search**) `deep: false` on `search_emails` and `search_all_accounts` restricts the free-text `query` to subject, sender and recipients — `OR SUBJECT/FROM/TO` on IMAP, a property-restricted KQL `$search` on Graph — so no body is scanned; the default is unchanged (from wgs4 0c2c2b4, without its 90-day fallback)
 
 #### 🐛 Bug Fixes
 

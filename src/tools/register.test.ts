@@ -8,6 +8,7 @@ vi.mock('./attachments.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./bulk.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./calendar.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./contacts.tool.js', () => ({ default: vi.fn() }));
+vi.mock('./cross-account-copy.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./cross-account-move.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./drafts.tool.js', () => ({ default: vi.fn() }));
 vi.mock('./emails.tool.js', () => ({ default: vi.fn() }));
@@ -33,6 +34,7 @@ vi.mock('./watcher.tool.js', () => ({ default: vi.fn(), registerWatcherWriteTool
 
 import registerAccountsTools from './accounts.tool.js';
 import registerBulkTools from './bulk.tool.js';
+import registerCrossAccountCopyTool from './cross-account-copy.tool.js';
 import registerCrossAccountMoveTool from './cross-account-move.tool.js';
 import registerDraftTools from './drafts.tool.js';
 import registerEmailsTools from './emails.tool.js';
@@ -106,6 +108,8 @@ describe('registerAllTools', () => {
     expect(registerBulkTools).toHaveBeenCalled();
     expect(registerDraftTools).toHaveBeenCalled();
     expect(registerCrossAccountMoveTool).toHaveBeenCalled();
+    // cross_account_copy écrit dans le compte de destination : outil d'écriture.
+    expect(registerCrossAccountCopyTool).toHaveBeenCalled();
     // Exchange-only tools (server rules, automatic reply) change mailbox state,
     // so they belong with the write tools.
     expect(registerExchangeTools).toHaveBeenCalled();
@@ -147,6 +151,7 @@ describe('registerAllTools', () => {
     expect(registerBulkTools).not.toHaveBeenCalled();
     expect(registerDraftTools).not.toHaveBeenCalled();
     expect(registerCrossAccountMoveTool).not.toHaveBeenCalled();
+    expect(registerCrossAccountCopyTool).not.toHaveBeenCalled();
     expect(registerFolderTools).not.toHaveBeenCalled();
     expect(registerTemplateWriteTools).not.toHaveBeenCalled();
     expect(registerSchedulerTools).not.toHaveBeenCalled();

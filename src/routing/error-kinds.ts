@@ -15,6 +15,14 @@ export const ERROR_KIND = {
   DEST_ACCOUNT_INVALID: 'dest_account_invalid',
   /** Source and destination are the same account — use move_email instead (D2). */
   SAME_ACCOUNT_MOVE: 'same_account_move',
+  /** Copy: source and destination are the same account — use copy_email instead. */
+  SAME_ACCOUNT_COPY: 'same_account_copy',
+  /**
+   * Copie : le compte de destination est servi par Microsoft Graph, qui ne sait
+   * importer un MIME brut que comme BROUILLON (isDraft, date de réception = date
+   * d'import) — la copie ne ressemblerait pas à un message reçu. Refus explicite.
+   */
+  DEST_BACKEND_UNSUPPORTED: 'dest_backend_unsupported',
   /** IMAP APPEND to the destination was rejected (permissions, missing mailbox). */
   APPEND_FAILED: 'append_failed',
   /** Destination mailbox is over quota. */
@@ -46,6 +54,13 @@ export const WARNING_KIND = {
   EXPUNGE_FALLBACK: 'expunge_fallback',
   /** dest_mailbox was remapped via SPECIAL-USE (e.g. "INBOX" → "[Gmail]/All Mail"). */
   DEST_MAILBOX_REMAPPED: 'dest_mailbox_remapped',
+  /**
+   * COPY only: the best-effort audit-log INSERT did not happen (no
+   * [database].url, Postgres down, un-migrated schema, failed INSERT). The copy
+   * itself succeeded — a non-destructive operation is never blocked by the
+   * audit log, unlike a move (see cross-account-copier.ts).
+   */
+  AUDIT_LOG_SKIPPED: 'audit_log_skipped',
 } as const;
 
 export type WarningKind = (typeof WARNING_KIND)[keyof typeof WARNING_KIND];

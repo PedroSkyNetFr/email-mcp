@@ -463,6 +463,77 @@ export default class GraphSendService {
     return { messageId: '', status: 'sent' };
   }
 
+  /**
+   * Enregistre une réponse dans Brouillons SANS l'envoyer (outil `reply_draft`).
+   *
+   * Même construction que `replyToEmail`, arrêtée avant `/send` : le brouillon
+   * part de `createReply` / `createReplyAll`, seul moyen sur Graph d'obtenir
+   * une réponse rattachée au fil (Graph pose lui-même In-Reply-To et
+   * References, qu'il refuse de laisser écrire). Avec citation, la réponse est
+   * passée en `comment` et Exchange compose la citation à la manière
+   * d'Outlook, dans la langue de la boîte — `reply_language` ne s'applique
+   * pas. Sans citation, le corps du brouillon est remplacé par un PATCH.
+   * Destinataires : ceux que Graph pré-remplit (expéditeur, ou tous moins
+   * soi-même pour replyAll). Si une étape échoue après la création, le
+   * brouillon est supprimé : pas d'orphelin dans Brouillons.
+   *
+   * L'id renvoyé est l'id Graph du brouillon, accepté par `send_draft` et
+   * `update_draft`.
+   */
+  async saveReplyDraft(
+    accountName: string,
+    options: {
+      emailId: string;
+      mailbox?: string;
+      body: string;
+      replyAll?: boolean;
+      html?: boolean;
+      includeAttachments?: boolean;
+      appendSignature?: boolean;
+      quoteOriginal?: boolean;
+      attachments?: ResolvedAttachment[];
+      bcc?: string[];
+    },
+  ): Promise<{ id: number | string; mailbox: string; warnings: string[] }> {
+    const account = this.getAccount(accountName);
+    const client = this.client(accountName);
+    const signed = await applyAccountSignature(
+      account,
+      { body: options.body, html: options.html, attachments: options.attachments },
+      options.appendSignature,
+    );
+
+    const quote = options.quoteOriginal !== false;
+    const original = options.includeAttachments
+      ? await GraphSendService.fetchFileAttachments(client, options.emailId)
+      : [];
+    const attachments = [...original, ...signed.attachments];
+    const bcc = toRecipients(options.bcc);
+
+    const createVerb = options.replyAll ? 'createReplyAll' : 'createReply';
+    const draft = await client.request<{ id: string }>(
+      'POST',
+      `/me/messages/${options.emailId}/${createVerb}`,
+      quote ? { comment: signed.body } : {},
+    );
+    try {
+      const patch: Record<string, unknown> = {
+        ...(quote
+          ? {}
+          : { body: { contentType: signed.html ? 'HTML' : 'Text', content: signed.body } }),
+        ...(bcc.length > 0 ? { bccRecipients: bcc } : {}),
+      };
+      if (Object.keys(patch).length > 0) {
+        await client.request('PATCH', `/me/messages/${draft.id}`, patch);
+      }
+      await GraphSendService.addAttachments(client, draft.id, attachments);
+    } catch (err) {
+      await GraphSendService.discardDraft(client, draft.id);
+      throw err;
+    }
+    return { id: draft.id, mailbox: 'Drafts', warnings: [] };
+  }
+
   // -------------------------------------------------------------------------
   // Forward
   // -------------------------------------------------------------------------

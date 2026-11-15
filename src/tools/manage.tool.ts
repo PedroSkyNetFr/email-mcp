@@ -1,5 +1,5 @@
 /**
- * MCP tools: move_email, delete_email, mark_email
+ * MCP tools: move_email, copy_email, delete_email, mark_email
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
@@ -8,6 +8,25 @@ import audit from '../safety/audit.js';
 import { sanitizeMailboxName } from '../safety/validation.js';
 
 import type { IMailService } from '../services/mail-service.types.js';
+
+/**
+ * `copy_email` ne copie qu'à l'intérieur d'UN compte. Il accepte un
+ * `destinationAccount` facultatif uniquement pour refuser une demande
+ * inter-comptes en désignant le bon outil (miroir du refus symétrique de
+ * `cross_account_copy`). Renvoie le texte du refus, ou null.
+ */
+export function crossAccountCopyRefusal(
+  account: string,
+  destinationAccount?: string,
+): string | null {
+  if (destinationAccount && destinationAccount !== account) {
+    return (
+      `source and destination are different accounts ("${account}" → ` +
+      `"${destinationAccount}") — use cross_account_copy instead`
+    );
+  }
+  return null;
+}
 
 export default function registerManageTools(server: McpServer, imapService: IMailService): void {
   // ---------------------------------------------------------------------------
@@ -66,6 +85,72 @@ export default function registerManageTools(server: McpServer, imapService: IMai
               text: `Failed to move email: ${errMsg}`,
             },
           ],
+        };
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // copy_email
+  // ---------------------------------------------------------------------------
+  server.registerTool(
+    'copy_email',
+    {
+      description:
+        'Copy an email into another mailbox folder WITHIN the same account, leaving the original ' +
+        'exactly where it is. Server-side copy (IMAP COPY, or Microsoft Graph /copy on Exchange ' +
+        'accounts): the copy keeps the original sender, date, MIME structure and attachments. ' +
+        'The sourceMailbox must be a real folder, not a virtual one like "All Mail". ' +
+        'To copy into a DIFFERENT account use cross_account_copy instead.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        emailId: z.string().describe('Email ID to copy (from list_emails)'),
+        sourceMailbox: z.string().describe('Current mailbox (e.g., INBOX)'),
+        destinationMailbox: z
+          .string()
+          .describe('Target mailbox (e.g., Archive). Use list_mailboxes to see options.'),
+        destinationAccount: z
+          .string()
+          .optional()
+          .describe(
+            'Optional. Only accepted when it equals `account`; a different value is refused with a ' +
+              'pointer to cross_account_copy.',
+          ),
+      }),
+      // Non idempotent : un second appel crée une seconde copie.
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async ({ account, emailId, sourceMailbox, destinationMailbox, destinationAccount }) => {
+      const params = { emailId, sourceMailbox, destinationMailbox, destinationAccount };
+      const refusal = crossAccountCopyRefusal(account, destinationAccount);
+      if (refusal) {
+        await audit.log('copy_email', account, params, 'error', refusal);
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: `Failed to copy email: ${refusal}` }],
+        };
+      }
+      try {
+        const cleanSource = sanitizeMailboxName(sourceMailbox);
+        const cleanDest = sanitizeMailboxName(destinationMailbox);
+        const { newId } = await imapService.copyEmail(account, emailId, cleanSource, cleanDest);
+        await audit.log('copy_email', account, params, 'ok');
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `✅ Email copied from "${sourceMailbox}" to "${destinationMailbox}" (original left in place).${
+                newId ? ` New ID: ${newId}.` : ''
+              }`,
+            },
+          ],
+        };
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        await audit.log('copy_email', account, params, 'error', errMsg);
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: `Failed to copy email: ${errMsg}` }],
         };
       }
     },

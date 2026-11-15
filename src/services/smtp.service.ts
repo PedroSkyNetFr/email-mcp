@@ -242,6 +242,118 @@ export default class SmtpService {
   ): Promise<SendResult> {
     this.checkRateLimit(accountName);
 
+    const reply = await this.composeReply(accountName, options, 'reply');
+    const transport = await this.connections.getSmtpTransport(accountName);
+
+    // Build the raw message once — same bytes sent via SMTP and stored in Sent folder
+    const mailOptions: ComposeOptions = {
+      from: fromAddress(reply.account),
+      to: reply.to.join(', '),
+      cc: reply.cc.length > 0 ? reply.cc.join(', ') : undefined,
+      subject: reply.subject,
+      inReplyTo: reply.inReplyTo,
+      references: reply.references.join(' '),
+      ...bodyParts(reply.body, reply.html),
+      ...(reply.attachments.length > 0 ? { attachments: reply.attachments } : {}),
+    };
+
+    // When sending a pre-composed raw message, nodemailer cannot derive the SMTP
+    // envelope from the (opaque) raw bytes — it would compute an empty recipient
+    // list and throw "No recipients defined". The envelope is passed explicitly
+    // (composeAndTransmit) so the RCPT TO list covers every To + Cc recipient.
+    const result = await this.composeAndTransmit(accountName, reply.account, transport, {
+      mailOptions,
+      recipients: [...reply.to, ...reply.cc],
+      attachments: reply.attachments,
+      what: 'reply',
+    });
+    return SmtpService.withWarnings(result, reply.warnings);
+  }
+
+  /**
+   * Enregistre une réponse dans Brouillons SANS l'envoyer (outil `reply_draft`).
+   *
+   * Composée exactement comme `replyToEmail` (même {@link composeReply} :
+   * destinataires, sujet « Re: », In-Reply-To / References, citation, signature,
+   * pièces de l'original), puis déposée par `ImapService.saveDraft`, qui garde
+   * l'en-tête Bcc — un brouillon n'a pas d'enveloppe SMTP. Rien ne part : ni
+   * SMTP, ni quota d'envoi consommé. Le brouillon s'envoie ensuite avec
+   * `send_draft` ou se réécrit avec `update_draft`.
+   */
+  async saveReplyDraft(
+    accountName: string,
+    options: {
+      emailId: string;
+      mailbox?: string;
+      body: string;
+      replyAll?: boolean;
+      html?: boolean;
+      includeAttachments?: boolean;
+      appendSignature?: boolean;
+      quoteOriginal?: boolean;
+      /** Pièces supplémentaires, déjà résolues. */
+      attachments?: ResolvedAttachment[];
+      /** Destinataires cachés, conservés dans l'en-tête Bcc du brouillon. */
+      bcc?: string[];
+    },
+  ): Promise<{ id: number | string; mailbox: string; warnings: string[] }> {
+    const reply = await this.composeReply(accountName, options, 'draft a reply');
+    const saved = await this.imapService.saveDraft(accountName, {
+      to: reply.to,
+      cc: reply.cc,
+      bcc: options.bcc,
+      subject: reply.subject,
+      body: reply.body,
+      html: reply.html,
+      inReplyTo: reply.inReplyTo,
+      references: reply.references,
+      attachments: reply.attachments,
+      // La signature est déjà dans `reply.body` : saveDraft ne doit pas
+      // l'ajouter une seconde fois (son défaut suit signature_default).
+      appendSignature: false,
+    });
+    const warnings = [...reply.warnings];
+    if (!saved.id) {
+      warnings.push(
+        'The server did not report the UID of the saved draft (no UIDPLUS): find it with ' +
+          `list_emails on "${saved.mailbox}" before calling send_draft or update_draft.`,
+      );
+    }
+    return { id: saved.id, mailbox: saved.mailbox, warnings };
+  }
+
+  /**
+   * Compose une réponse à `options.emailId`, sans rien transmettre. Partagé
+   * par l'envoi (`replyToEmail`) et le brouillon (`saveReplyDraft`) pour que
+   * les deux ne puissent pas diverger : une réponse enregistrée puis envoyée
+   * doit être identique à une réponse envoyée directement.
+   */
+  private async composeReply(
+    accountName: string,
+    options: {
+      emailId: string;
+      mailbox?: string;
+      body: string;
+      replyAll?: boolean;
+      html?: boolean;
+      includeAttachments?: boolean;
+      appendSignature?: boolean;
+      quoteOriginal?: boolean;
+      attachments?: ResolvedAttachment[];
+    },
+    context: 'reply' | 'draft a reply',
+  ): Promise<{
+    account: AccountConfig;
+    to: string[];
+    cc: string[];
+    subject: string;
+    inReplyTo: string | undefined;
+    references: string[];
+    body: string;
+    html: boolean;
+    attachments: ResolvedAttachment[];
+    warnings: string[];
+  }> {
     const account = this.connections.getAccount(accountName);
     const mailbox = options.mailbox ?? 'INBOX';
     const original = await this.imapService.getEmail(accountName, options.emailId, mailbox);
@@ -274,8 +386,6 @@ export default class SmtpService {
 
     const subject = replySubject(original.subject);
 
-    const transport = await this.connections.getSmtpTransport(accountName);
-
     // Pièces de l'original : stricte, comme pour un transfert — l'appelant les
     // a demandées, un envoi qui en perdrait une en silence serait trompeur.
     const fetched = options.includeAttachments
@@ -284,7 +394,7 @@ export default class SmtpService {
           original,
           options.emailId,
           mailbox,
-          'reply',
+          context,
         )
       : { attachments: [], warnings: [] };
 
@@ -292,7 +402,11 @@ export default class SmtpService {
     // La signature se place sous la réponse et AU-DESSUS de la citation.
     const signed = await applyAccountSignature(
       account,
-      { body: options.body, html: options.html, attachments: fetched.attachments },
+      {
+        body: options.body,
+        html: options.html,
+        attachments: [...fetched.attachments, ...(options.attachments ?? [])],
+      },
       options.appendSignature,
     );
 
@@ -306,29 +420,18 @@ export default class SmtpService {
         : quoteOriginalAsText(original, lang);
     }
 
-    // Build the raw message once — same bytes sent via SMTP and stored in Sent folder
-    const mailOptions: ComposeOptions = {
-      from: fromAddress(account),
-      to: toList.join(', '),
-      cc: ccList.length > 0 ? ccList.join(', ') : undefined,
+    return {
+      account,
+      to: toList,
+      cc: ccList,
       subject,
-      inReplyTo: original.messageId,
-      references: references.join(' '),
-      ...bodyParts(body, signed.html),
-      ...(signed.attachments.length > 0 ? { attachments: signed.attachments } : {}),
-    };
-
-    // When sending a pre-composed raw message, nodemailer cannot derive the SMTP
-    // envelope from the (opaque) raw bytes — it would compute an empty recipient
-    // list and throw "No recipients defined". The envelope is passed explicitly
-    // (composeAndTransmit) so the RCPT TO list covers every To + Cc recipient.
-    const result = await this.composeAndTransmit(accountName, account, transport, {
-      mailOptions,
-      recipients: [...toList, ...ccList],
+      inReplyTo: original.messageId || undefined,
+      references,
+      body,
+      html: signed.html,
       attachments: signed.attachments,
-      what: 'reply',
-    });
-    return SmtpService.withWarnings(result, fetched.warnings);
+      warnings: fetched.warnings,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -454,7 +557,7 @@ export default class SmtpService {
     original: Pick<Email, 'attachments'>,
     emailId: string,
     mailbox: string,
-    context: 'reply' | 'forward',
+    context: 'reply' | 'draft a reply' | 'forward',
   ): Promise<{ attachments: ResolvedAttachment[]; warnings: string[] }> {
     const allNames = original.attachments.map((meta) => meta.filename);
     const filenames = [...new Set(allNames)];

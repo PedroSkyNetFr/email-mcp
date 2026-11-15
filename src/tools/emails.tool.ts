@@ -201,6 +201,8 @@ export function formatSearchResult(
  */
 const NON_CRITERIA_PARAMS = new Set([
   'account',
+  // `deep` règle la portée de `query`, il ne cherche rien à lui seul.
+  'deep',
   'mailbox',
   'page',
   'pageSize',
@@ -671,7 +673,9 @@ export default function registerEmailsTools(
     {
       description:
         `Search emails with server-side filters. Omit query (or pass an empty string) to use pure filters. ` +
-        `Free-text \`query\` searches subject + from + body (deep by default). On a very large folder whose ` +
+        `Free-text \`query\` searches subject + from + body (deep by default). Pass deep=false to make it ` +
+        `header-only (subject + from + to): no body is scanned, which is much cheaper on a huge folder ` +
+        `when you know the word is in the subject or an address. On a very large folder whose ` +
         `server has no full-text index, a body scan is expensive: it is run on a bounded connection and, ` +
         `if it cannot complete, returns an explicitly flagged failure (never a silent zero) with a cost ` +
         `warning suggesting you narrow by date (since/before/on) or subject:/from:. ` +
@@ -695,6 +699,14 @@ export default function registerEmailsTools(
             'Search keyword across subject + from + body (deep by default; omit to use filters only). ' +
               'On a very large non-indexed folder a body scan is bounded and, if it cannot complete, ' +
               'returns a flagged failure (never a silent zero) — narrow by date or subject:/from: and retry.',
+          ),
+        deep: z
+          .boolean()
+          .optional()
+          .describe(
+            'How far `query` reaches. true/omitted = subject + from + body (default). ' +
+              'false = header-only (subject + from + to): no body term is sent, so the search stays ' +
+              'cheap on huge non-indexed folders. Does not affect the explicit body/text filters.',
           ),
         mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
         page: numeric(z.number().int().min(1).default(1)).describe('Page number'),
@@ -809,6 +821,7 @@ export default function registerEmailsTools(
           mailbox: params.mailbox,
           page: params.page,
           pageSize: params.pageSize,
+          deep: params.deep,
           to: params.to,
           from: params.from,
           subject: params.subject,
@@ -884,6 +897,7 @@ export default function registerEmailsTools(
         `but fans out across N accounts and merges results sorted by date. Each result is tagged ` +
         `with the account it came from. Partial failures are surfaced as warnings without failing ` +
         `the whole call. Useful for "find X anywhere in my inboxes" queries across your email ecosystem. ` +
+        `Pass deep=false for a cheap header-only free-text query (subject + from + to, no body). ` +
         `IMAP and Microsoft Graph accounts can be mixed. ${COVERAGE_NOTE}`,
       inputSchema: z.object({
         query: z
@@ -894,6 +908,14 @@ export default function registerEmailsTools(
             'Search keyword across subject + from + body (deep by default; omit to use filters only). ' +
               'On a very large non-indexed folder a body scan is bounded and, if it cannot complete, ' +
               'returns a flagged failure (never a silent zero) — narrow by date or subject:/from: and retry.',
+          ),
+        deep: z
+          .boolean()
+          .optional()
+          .describe(
+            'How far `query` reaches. true/omitted = subject + from + body (default). ' +
+              'false = header-only (subject + from + to): no body term is sent, so the search stays ' +
+              'cheap on huge non-indexed folders. Does not affect the explicit body/text filters.',
           ),
         accounts: z
           .array(z.string())
@@ -974,6 +996,7 @@ export default function registerEmailsTools(
           mailbox: params.mailbox,
           page: params.page,
           pageSize: params.pageSize,
+          deep: params.deep,
           to: params.to,
           from: params.from,
           subject: params.subject,

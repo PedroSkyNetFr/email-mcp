@@ -1,10 +1,11 @@
 /**
- * MCP tools: save_draft, send_draft, update_draft
+ * MCP tools: save_draft, reply_draft, send_draft, update_draft
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import audit from '../safety/audit.js';
+import { validateInputLength } from '../safety/validation.js';
 
 import type { IMailService } from '../services/mail-service.types.js';
 import type { ISendService } from '../services/send-service.types.js';
@@ -120,6 +121,123 @@ export default function registerDraftTools(
               text: `Failed to save draft: ${errMsg}`,
             },
           ],
+        };
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // reply_draft
+  // ---------------------------------------------------------------------------
+  server.registerTool(
+    'reply_draft',
+    {
+      description:
+        'Save a threaded REPLY to an email in the Drafts folder WITHOUT sending it — the review-first ' +
+        'counterpart of reply_email. The draft is built like reply_email builds a reply: "Re:" subject, ' +
+        'recipients (the sender; with replyAll also the original To/Cc minus yourself), In-Reply-To and ' +
+        'References so it joins the conversation, the original quoted below by default and the account ' +
+        'signature when configured. Nothing is sent. Returns the draft id to pass to send_draft (to send ' +
+        'it) or update_draft (to rewrite it). On Graph-backed (Exchange) accounts the draft comes from ' +
+        "Exchange's own createReply / createReplyAll, which writes the quote header in the mailbox " +
+        'language (reply_language does not apply there).',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        emailId: z.string().describe('Email ID to reply to (from list_emails or get_email)'),
+        mailbox: z.string().default('INBOX').describe('Mailbox where the original email is'),
+        body: z.string().describe('Reply body content'),
+        html: z.boolean().default(false).describe('Body is HTML (default: plain text)'),
+        replyAll: z
+          .boolean()
+          .default(false)
+          .describe('Address the draft to all recipients of the original (minus yourself)'),
+        quoteOriginal: z
+          .boolean()
+          .default(true)
+          .describe(
+            'Quote the original message below the reply (default true). Set false for the bare body only.',
+          ),
+        includeAttachments: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Copy the attachments of the original into the draft. Strict: if one cannot be fetched ' +
+              '(or exceeds 25 MB), no draft is saved and the error names it.',
+          ),
+        attachments: z
+          .array(attachmentInputSchema)
+          .optional()
+          .describe(
+            'Extra attachments, same shape as save_draft.attachments ({ path } / { content_base64, ' +
+              'filename } / { source_email_id, source_mailbox, filename }). Strict: if any cannot be ' +
+              'resolved, no draft is saved.',
+          ),
+        bcc: z
+          .array(z.string().email())
+          .optional()
+          .describe('Blind recipients, kept on the draft until it is sent'),
+        appendSignature: z
+          .boolean()
+          .optional()
+          .describe(
+            "Append the account's configured signature (signature_path) below the reply. Forces HTML. " +
+              'Defaults to the account signature_default; pass false to disable.',
+          ),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async (params) => {
+      const auditParams = {
+        emailId: params.emailId,
+        mailbox: params.mailbox,
+        replyAll: params.replyAll,
+        attachmentCount: params.attachments?.length ?? 0,
+      };
+      try {
+        validateInputLength(params.body, 5_000_000, 'Body');
+        // Pièces résolues AVANT la création du brouillon : un échec ne laisse
+        // rien dans Brouillons.
+        const extra =
+          params.attachments && params.attachments.length > 0
+            ? await imapService.resolveAttachmentsForSend(
+                params.account,
+                params.attachments.map(adaptAttachmentInput),
+              )
+            : undefined;
+
+        const result = await smtpService.saveReplyDraft(params.account, {
+          emailId: params.emailId,
+          mailbox: params.mailbox,
+          body: params.body,
+          html: params.html,
+          replyAll: params.replyAll,
+          quoteOriginal: params.quoteOriginal,
+          includeAttachments: params.includeAttachments,
+          attachments: extra,
+          bcc: params.bcc,
+          appendSignature: params.appendSignature,
+        });
+
+        await audit.log('reply_draft', params.account, auditParams, 'ok');
+
+        const warningBlock =
+          result.warnings.length > 0 ? `\n⚠️ ${result.warnings.join('\n⚠️ ')}` : '';
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text:
+                `📝 Reply saved as a draft — NOT sent (ID: ${result.id}, folder: ${result.mailbox}). ` +
+                `Send it with send_draft, or rewrite it with update_draft.${warningBlock}`,
+            },
+          ],
+        };
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        await audit.log('reply_draft', params.account, auditParams, 'error', errMsg);
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: `Failed to save reply draft: ${errMsg}` }],
         };
       }
     },

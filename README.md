@@ -11,7 +11,7 @@ compose, send, schedule and organise mail across several accounts. Mailboxes are
 reached over **IMAP + SMTP**, or over **Microsoft Graph** for Exchange Online and
 Outlook.com accounts, whose IMAP endpoint hides part of the mailbox.
 
-The server exposes **64 tools** (35 when it runs read-only), **7 prompts** and
+The server exposes **67 tools** (35 when it runs read-only), **7 prompts** and
 **6 resources**.
 
 > **About this fork.** This repository is a fork maintained by
@@ -393,7 +393,7 @@ server builds one account from the environment and **does not read
 |----------|--------|
 | `MCP_EMAIL_ACCOUNTS` | Comma-separated account names this instance exposes ([below](#several-connectors-on-one-configuration)). |
 | `MCP_EMAIL_READ_ONLY` | `true` makes the instance read-only. It can only tighten: it never lifts a `read_only = true` set in the file. |
-| `EMAIL_MCP_DATABASE_URL` | Postgres URL for `cross_account_move`; wins over `[database].url`. |
+| `EMAIL_MCP_DATABASE_URL` | Postgres URL for `cross_account_move` (and the optional `cross_account_copy` log); wins over `[database].url`. |
 | `MAIL_ALLOWED_SAVE_DIRS` | Extra directories (`;`-separated) where files may be written ([details](#where-files-may-be-written)). |
 | `MAIL_ALLOW_ANY_SAVE_DIR` | `true` disables the save-directory allow-list. |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | Move the directories listed [above](#where-the-configuration-lives). |
@@ -511,7 +511,7 @@ built server the way a client does), `db:migrate`.
 
 ## Tools reference
 
-**64 tools.** *Backend* says which accounts a tool serves: **both** (IMAP and
+**67 tools.** *Backend* says which accounts a tool serves: **both** (IMAP and
 Graph), **IMAP** only (a Graph account gets an explicit "not supported yet"
 error), **Graph** only (the tool refuses an IMAP account), or **local** (no
 mailbox involved). *Read-only* says whether the tool is still registered when the
@@ -589,6 +589,7 @@ Microsoft Graph does not serve message headers in a listing.
 |------|--------------|---------|-----------|
 | `send_email` | New message: text or HTML, cc/bcc, attachments, inline images, signature. | both | — |
 | `reply_email` | Threaded reply quoting the original (`replyAll`, `quoteOriginal`, `includeAttachments`, `appendSignature`). | both | — |
+| `reply_draft` | Same threaded reply, saved to Drafts **without sending** — returns the draft id for `send_draft` / `update_draft` ([details](#drafts)). | both | — |
 | `forward_email` | Forward with the original and its attachments (`cc`, `includeAttachments`, `html`, `appendSignature`). | both | — |
 | `save_draft` | Save a draft (attachments, `in_reply_to`, signature). | both | — |
 | `update_draft` | Rewrite a draft, keeping or changing its attachments. | both | — |
@@ -604,6 +605,7 @@ Microsoft Graph does not serve message headers in a listing.
 | Tool | What it does | Backend | Read-only |
 |------|--------------|---------|-----------|
 | `move_email` | Move to another folder of the same account. | both | — |
+| `copy_email` | Copy to another folder of the same account; the original stays in place. | both | — |
 | `delete_email` | To Trash, or permanently with `permanent: true`. | both | — |
 | `mark_email` | Read / unread / flag / unflag. | both | — |
 | `bulk_action` | Same action on up to 100 messages. | both | — |
@@ -612,6 +614,7 @@ Microsoft Graph does not serve message headers in a listing.
 | `create_label` / `delete_label` | Create / delete a label. | both | — |
 | `create_mailbox` / `rename_mailbox` / `delete_mailbox` | Folder management (`delete_mailbox` deletes the content too). | both | — |
 | `cross_account_move` | Move messages to another account, keeping headers, flags and date. Needs Postgres. | IMAP | — |
+| `cross_account_copy` | Copy messages to another account, keeping headers, flags and date; the source is never touched. No database needed. | source: both · destination: IMAP | — |
 | `list_mail_rules` | Server-side inbox rules. | Graph | — |
 | `create_mail_rule` / `delete_mail_rule` | Create / delete a server-side rule. | Graph | — |
 | `get_auto_reply` / `set_auto_reply` | Read / set the automatic reply (out of office). | Graph | — |
@@ -651,6 +654,7 @@ Microsoft Graph does not serve message headers in a listing.
 | `save_all_attachments_from_search`, `extract_contacts`, `get_email_stats`, `find_email_folder` | ✅ | — |
 | Calendar extraction (`extract_calendar`, `analyze_email_for_scheduling`, `add_to_calendar`) | ✅ | — |
 | `cross_account_move` | ✅ | — |
+| `cross_account_copy` | ✅ | as source only — a Graph destination is refused |
 | Watcher (IMAP IDLE) and per-account resources (`mailboxes`, `unread`, `stats`) | ✅ | — (they go through IMAP) |
 | Server-side rules, automatic reply | — | ✅ |
 
@@ -694,6 +698,7 @@ to 100, default 20).
 | Parameter | Matches |
 |-----------|---------|
 | `query` | Free text across subject, sender and body (`search_emails` and the multi-account / export tools). |
+| `deep` | `false` makes `query` header-only — subject, sender and recipients, never the body (`search_emails`, `search_all_accounts`; default `true`). |
 | `from`, `to`, `cc`, `bcc`, `subject` | Header, **matched by the mail server** (see below). |
 | `from_contains`, `to_contains`, `subject_contains` | Literal, case-insensitive substring of the decoded header, checked by email-mcp. |
 | `body`, `text` | Body / headers + body. |
@@ -1018,6 +1023,15 @@ ignored with a warning.
   in-place edit, the new copy is appended first and the old one deleted only
   afterwards; the tool returns the **new** id. Inline images referenced by the
   body are kept; a `cid:` with no matching image produces a warning.
+- `reply_draft` builds a reply exactly as `reply_email` does — `Re:` subject,
+  recipients (`replyAll` adds the original To/Cc minus yourself),
+  `In-Reply-To` / `References`, the quoted original (`quoteOriginal`, in the
+  `reply_language` of the account), the signature, the original attachments with
+  `includeAttachments`, extra `attachments` and `bcc` — and saves it to Drafts
+  instead of sending it. It returns the draft id: review it in your mail client,
+  then `send_draft` or `update_draft`. On a Graph account the draft comes from
+  Exchange's own `createReply` / `createReplyAll`, which threads the reply and
+  writes the quote header in the mailbox language.
 
 ### Templates
 
@@ -1232,6 +1246,25 @@ role that can only reach the `email_mcp` database; on PostgreSQL 15+ also run
 `ALTER SCHEMA public OWNER TO email_mcp;` in that database, or the first migration
 fails with "permission denied for schema public".
 
+### Copies
+
+`copy_email` copies a message into another folder of the **same** account and
+leaves the original where it is: a server-side IMAP `COPY` (the new UID is
+reported when the server supports UIDPLUS), or `POST /messages/{id}/copy` on a
+Graph account. Not idempotent — a second call makes a second copy.
+
+`cross_account_copy` puts a copy into **another** account, the first three steps
+of `cross_account_move` and nothing more: it reads the raw message, skips it if
+its `Message-ID` is already at the destination, and appends it with its flags and
+original date. The source is never written to — opened read-only, no Trash, no
+`\Deleted`, no `$Routed` keyword. The source may be an IMAP or a Graph account
+(read through `GET /messages/{id}/$value`); the destination must be IMAP. A Graph
+destination is refused: Graph only imports a raw message as a **draft** (received
+date = import time), which would not look delivered. No database is required:
+when `[database]` is set, each copy is logged in `email_move_log` with
+`operation = 'copy'` (migration `002`); otherwise the copy succeeds with an
+`audit_log_skipped` warning.
+
 ### Exchange rules and automatic reply
 
 On Graph accounts, `create_mail_rule` creates a server-side inbox rule —
@@ -1316,7 +1349,7 @@ src/
 │   ├── watcher, hooks, notifier, presets     IDLE watcher, triage, alerts
 │   └── scheduler, calendar, reminders, templates, signature-loader, …
 ├── routing/           cross-account move and its Postgres log
-├── tools/ prompts/ resources/   MCP surface (64 tools, 7 prompts, 6 resources)
+├── tools/ prompts/ resources/   MCP surface (67 tools, 7 prompts, 6 resources)
 ├── safety/            validation, rate limiter, audit log
 └── utils/             dates, headers, body formatting, build info
 ```

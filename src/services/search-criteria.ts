@@ -11,6 +11,18 @@ import { normalizeDate } from '../utils/date.js';
 
 export interface SearchParams {
   query?: string;
+  /**
+   * Portée de la requête libre `query` (wgs4 0c2c2b4).
+   *
+   * `undefined` / `true` (défaut) : sujet + expéditeur + CORPS.
+   * `false` : en-têtes seulement — sujet + expéditeur + destinataires, aucun
+   * terme BODY envoyé au serveur. Sur un gros dossier sans index plein texte,
+   * la recherche reste un balayage d'en-têtes, bien moins coûteux.
+   *
+   * N'affecte que `query` : les filtres explicites `body:` / `text:` lisent
+   * toujours le corps.
+   */
+  deep?: boolean;
   to?: string;
   from?: string;
   subject?: string;
@@ -130,10 +142,17 @@ export function buildSearchCriteria(params: SearchParams, opts: { isGmail: boole
   // (R5), warned about, and run on a bounded ephemeral connection (R3) so it
   // fails loudly/cleanly instead of silently. `bodyScan` (below) flags this
   // path for that gate.
+  //
+  // `deep: false` : variante en-têtes seulement — SUBJECT / FROM / TO, sans
+  // terme BODY. TO n'y figure que là : c'est le troisième champ d'enveloppe peu
+  // coûteux, alors que dans la variante profonde le corps domine le coût.
+  const deepQuery = params.deep !== false;
   if (params.query && params.query.length > 0) {
     const q = sanitizeSearchQuery(params.query);
     andConditions.push({
-      or: [{ subject: q }, { from: q }, { body: q }],
+      or: deepQuery
+        ? [{ subject: q }, { from: q }, { body: q }]
+        : [{ subject: q }, { from: q }, { to: q }],
     });
   }
 
@@ -211,7 +230,10 @@ export function buildSearchCriteria(params: SearchParams, opts: { isGmail: boole
   // (Boolean sub-expressions: an empty string is "no value", and `||` here is
   // a true logical-OR of booleans — not a nullish-default, hence not `??`.)
   const nonEmpty = (v: string | undefined): boolean => v !== undefined && v.length > 0;
-  const bodyScan = nonEmpty(params.query) || nonEmpty(params.body) || nonEmpty(params.text);
+  // Une requête `deep: false` n'émet aucun terme BODY : elle ne lève pas ce
+  // drapeau et ne passe jamais par la connexion éphémère bornée.
+  const bodyScan =
+    (deepQuery && nonEmpty(params.query)) || nonEmpty(params.body) || nonEmpty(params.text);
 
   // A `*Contains` filter narrows nothing server-side. On its own it therefore
   // asks the server for the whole mailbox and sifts the result here — correct,

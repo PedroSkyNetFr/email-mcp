@@ -130,6 +130,8 @@ export interface SearchOptions {
   mailbox?: string;
   page?: number;
   pageSize?: number;
+  /** false : requête libre sur sujet / expéditeur / destinataires seulement (voir SearchParams.deep). */
+  deep?: boolean;
   to?: string;
   from?: string;
   subject?: string;
@@ -1685,6 +1687,8 @@ export default class ImapService {
       mailbox?: string;
       page?: number;
       pageSize?: number;
+      /** false : requête libre sur sujet / expéditeur / destinataires seulement. */
+      deep?: boolean;
       // Legacy (unchanged) filters — camelCase:
       to?: string;
       hasAttachment?: boolean;
@@ -2403,6 +2407,42 @@ export default class ImapService {
       if (!ok) {
         throw new Error(`IMAP server rejected the move from "${safeSource}" to "${safeDest}".`);
       }
+    } finally {
+      lock.release();
+    }
+  }
+
+  /**
+   * Copie un message dans un autre dossier du MÊME compte, sans toucher
+   * l'original (outil `copy_email`, wgs4 3a1444d).
+   *
+   * COPY côté serveur (imapflow `messageCopy`) : le message ne quitte pas le
+   * serveur, aucun FETCH / APPEND, et la copie garde à l'identique expéditeur,
+   * date, structure MIME, pièces jointes et drapeaux. Le nouvel UID n'est
+   * connu que si le serveur annonce UIDPLUS (réponse COPYUID) ; sinon
+   * `newId` est absent. Une copie vers un AUTRE compte passe par
+   * `cross_account_copy`.
+   */
+  async copyEmail(
+    accountName: string,
+    emailId: string,
+    sourceMailbox: string,
+    destinationMailbox: string,
+  ): Promise<{ newId?: string }> {
+    const client = await this.connections.getImapClient(accountName);
+    const safeSource = sanitizeMailboxName(sourceMailbox);
+    const safeDest = sanitizeMailboxName(destinationMailbox);
+    await ImapService.assertRealMailbox(client, safeSource);
+    const lock = await client.getMailboxLock(safeSource);
+    try {
+      const result = await imapCommand(`Copying message to "${safeDest}"`, async () =>
+        client.messageCopy(emailId, safeDest, { uid: true }),
+      );
+      if (!result) {
+        throw new Error(`IMAP server rejected the copy from "${safeSource}" to "${safeDest}".`);
+      }
+      const newUid = result.uidMap?.get(Number(emailId));
+      return newUid === undefined ? {} : { newId: String(newUid) };
     } finally {
       lock.release();
     }

@@ -240,6 +240,8 @@ export function toEmailMeta(message: GraphMessage): EmailMeta {
 /** Options de recherche comprises par le backend Graph. */
 interface GraphSearchOptions extends DateFilters {
   mailbox?: string;
+  /** false : requête libre sur sujet / expéditeur / destinataires seulement. */
+  deep?: boolean;
   page?: number;
   pageSize?: number;
   from?: string;
@@ -297,9 +299,32 @@ function hasLiteralFilters(options: GraphSearchOptions): boolean {
   );
 }
 
-/** Texte envoyé à `$search` : requête libre + sujet / expéditeur / destinataire. */
+/**
+ * Requête libre restreinte aux en-têtes (`deep: false`) : sujet, expéditeur ou
+ * destinataires, jamais le corps — même portée que SUBJECT / FROM / TO côté
+ * IMAP. KQL : `(subject:a OR from:a OR to:a)` ; une requête de plusieurs mots
+ * exige que chaque mot figure dans le MÊME champ (`(subject:a AND subject:b)
+ * OR …`). Les guillemets et barres obliques inverses sont retirés : le texte
+ * KQL entier est déjà placé entre guillemets dans `$search`.
+ */
+export function headerOnlyKql(query: string): string {
+  const words = query.replace(/["\\]/g, ' ').split(/\s+/).filter(Boolean);
+  if (words.length === 0) return '';
+  const clause = (property: string): string =>
+    words.length === 1
+      ? `${property}:${words[0]}`
+      : `(${words.map((word) => `${property}:${word}`).join(' AND ')})`;
+  return `(${['subject', 'from', 'to'].map(clause).join(' OR ')})`;
+}
+
+/**
+ * Texte envoyé à `$search` : requête libre + sujet / expéditeur / destinataire.
+ * Sans propriété, `$search` couvre expéditeur, sujet ET corps ; `deep: false`
+ * restreint la requête libre aux en-têtes (voir headerOnlyKql).
+ */
 function searchText(query: string, options: GraphSearchOptions): string {
-  return [query, options.subject, options.from, options.to].filter(Boolean).join(' ').trim();
+  const free = options.deep === false ? headerOnlyKql(query) : query;
+  return [free, options.subject, options.from, options.to].filter(Boolean).join(' ').trim();
 }
 
 /** Messages lus par requête lors d'un parcours `$filter` (Graph accepte 1 à 1000). */
@@ -1000,6 +1025,27 @@ export default class GraphService {
     await this.client(accountName).request('POST', `/me/messages/${emailId}/move`, {
       destinationId,
     });
+  }
+
+  /**
+   * Copie un message dans un autre dossier de la même boîte, sans toucher
+   * l'original (`POST /me/messages/{id}/copy`). Le dossier de destination est
+   * résolu comme pour `moveEmail` (chemin → id Graph). Graph répond avec la
+   * copie créée : son id, opaque et propre à la copie, est renvoyé.
+   */
+  async copyEmail(
+    accountName: string,
+    emailId: string,
+    _sourceMailbox: string,
+    destinationMailbox: string,
+  ): Promise<{ newId?: string }> {
+    const destinationId = await this.resolveFolderId(accountName, destinationMailbox);
+    const copy = await this.client(accountName).request<{ id?: string } | undefined>(
+      'POST',
+      `/me/messages/${emailId}/copy`,
+      { destinationId },
+    );
+    return copy?.id ? { newId: copy.id } : {};
   }
 
   /**
