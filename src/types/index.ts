@@ -3,6 +3,7 @@
  */
 
 import type { HeaderAnalysis, HeaderEntry } from '../utils/headers.js';
+import type { MailClassification } from '../utils/mail-classification.js';
 
 // ---------------------------------------------------------------------------
 // Address
@@ -258,7 +259,19 @@ export interface EmailMeta {
   answered: boolean;
   hasAttachments: boolean;
   labels: string[];
+  /**
+   * Début du corps en texte (≈ 200 caractères). Sur IMAP, rempli seulement
+   * quand l'appelant le demande (`preview: true`, une lecture partielle de la
+   * partie texte par message) ; sur Graph, `bodyPreview` est servi d'office.
+   */
   preview?: string;
+  /**
+   * Indice « liste de diffusion / message automatique » tiré d'en-têtes posés
+   * par l'expéditeur (List-Id, Precedence, Auto-Submitted…) — jamais une
+   * garantie. Rempli par les listes IMAP et par la lecture d'un message sur
+   * les deux backends ; absent des listes Graph (en-têtes non servis en liste).
+   */
+  classification?: MailClassification;
   /**
    * Attachment metadata, populated when bodyStructure is fetched. Undefined
    * means "unknown" (e.g. envelope-only fetches); an empty array means the

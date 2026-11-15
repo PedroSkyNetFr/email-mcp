@@ -520,16 +520,45 @@ server is [read-only](#read-only-mode).
 |------|--------------|---------|-----------|
 | `list_accounts` | Configured accounts — call it first to learn the names. | local | ✅ |
 | `list_mailboxes` | Folders with unread counts and special-use flags. | both | ✅ |
-| `list_emails` | Paginated listing with filters. | both | ✅ |
-| `get_email` | One message (`format`: `full`, `text`, `stripped`; `maxLength`); does not mark it read unless `markRead`. | both | ✅ |
-| `get_emails` | Up to 20 messages in one call (text by default). | both | ✅ |
+| `list_emails` | Paginated listing with filters, newest-received first; optional body `preview`. | both | ✅ |
+| `get_email` | One message (`format`: `text` by default, `stripped`, `full`, `html`; `maxLength`, `offset`) ([details](#reading-message-bodies)); does not mark it read unless `markRead`. | both | ✅ |
+| `get_emails` | Up to 20 messages in one call (text by default, 5 000 characters per body). | both | ✅ |
 | `get_email_status` | Read / flag / label state without the body. | both | ✅ |
-| `get_thread` | Conversation rebuilt from `References` / `In-Reply-To`. | both | ✅ |
+| `get_thread` | Conversation rebuilt from `References` / `In-Reply-To` (text by default, 5 000 characters per body). | both | ✅ |
 | `get_email_headers` | Complete Internet headers and their analysis ([details](#internet-headers)). | both | ✅ |
 | `find_email_folder` | Real folder(s) of a message seen in a virtual folder (Gmail "All Mail"). | IMAP | ✅ |
 | `extract_contacts` | Frequent correspondents from recent headers. | IMAP | ✅ |
 | `get_email_stats` | Volume, top senders, daily trend over a day / week / month. | IMAP | ✅ |
 | `check_health` | Running build, connection, latency, quota and capabilities per account. | both | ✅ |
+
+### Reading message bodies
+
+`get_email`, `get_emails` and `get_thread` share one `format` parameter:
+
+| `format` | Returns |
+|----------|---------|
+| `text` (default) | Readable plain text: the text part, or the HTML part converted — links kept as `label [url]`, tables as aligned columns, every HTML entity decoded. |
+| `stripped` | `text` without quoted replies and signatures. |
+| `full` | The decoded body part as-is (text part, else raw HTML); on extraction failure a visible marker plus the capped raw source. |
+| `html` | The raw HTML part, unmodified (else the text part) — to store the original HTML. |
+
+When a `multipart/alternative` message carries a stub text part ("View this
+email in your browser") or one markedly poorer than its HTML part, the HTML part
+is used instead: the HTML wins when it holds at least 3 times as many words as
+the text part **and** at least 25 more (words counted without URLs).
+
+Bodies are capped by default — 10 000 characters for `get_email`, 5 000 per
+message for `get_emails` and `get_thread`; `format: "html"` is not capped unless
+`maxLength` is given. `maxLength: 0` removes the cap. A cut body ends with a
+`✂️ … truncated` line that says how many characters remain and how to read on:
+`get_email` takes an `offset` to fetch the next part.
+
+List and message views flag likely **mailing-list** (📰 — `List-Id`,
+`List-Unsubscribe`, `Precedence: list`) and **automated** mail (🤖 —
+`Auto-Submitted`, `Precedence: bulk`, `X-Auto-Response-Suppress`). These headers
+are set by the sender, so the flag is a hint, never a guarantee. `get_email`
+shows it on both backends; in listings it is shown for IMAP accounts only, since
+Microsoft Graph does not serve message headers in a listing.
 
 ### Searching
 
@@ -682,6 +711,27 @@ to 100, default 20).
 (days, weeks, months ago) and `today` / `yesterday`, evaluated in UTC — on every
 search tool and both backends.
 
+**Order.** Results come newest-received first, across the whole match set —
+not only within the page. On IMAP this reads the arrival date (INTERNALDATE) of
+every match before serving page 1 (≈ 1.3 MB and 0.2 s of parsing for 20 000
+matches); above 20 000 matches without a client-side filter, the order falls
+back to folder order (UID) and a warning says so. Graph sorts by
+`receivedDateTime` on the server.
+
+**Preview.** `list_emails` and `search_emails` take `preview: true` to add a
+~200-character body preview per message. On IMAP it reads the first 1.5 KB of
+each message's text part (one extra FETCH per page), so it is off by default;
+Graph serves it at no cost but shows it only on request too, so both backends
+answer the same.
+
+**Numbers as strings.** Numeric parameters (`page`, `pageSize`, `maxLength`,
+`limit`…) also accept a numeric string (`"20"`); an empty string, `null` or a
+boolean is refused rather than read as 0.
+
+`search_emails` refuses a call with no criterion at all (no `query`, no filter):
+it would list the whole folder, which usually means a filter name was mistyped.
+Use `list_emails` to browse a folder.
+
 ```jsonc
 // search_emails
 { "account": "work", "subject": "invoice", "since": "60d", "has_attachment": true }
@@ -803,7 +853,8 @@ while the data stays on disk, so large exports do not fill the conversation.
   default, 50 000 at most. Default CSV columns: `id`, `account`, `date`, `from`,
   `subject`, `labels`, `attachments`, `has_attachments`, `seen`, `flagged`;
   `columns` picks among `id`, `account`, `date`, `from`, `to`, `subject`, `flags`,
-  `labels`, `attachments`, `preview`, `size`. NDJSON writes the full record. Default
+  `labels`, `attachments`, `preview`, `size` (on IMAP, `preview` reads the first
+  1.5 KB of each message's text part). NDJSON writes the full record. Default
   file: `~/Downloads/email-export-<timestamp>.csv`.
 - **`save_email`** — the exact RFC 822 source, so attachments, formatting, DKIM
   signatures and the Received chain survive, and the file reopens in any mail

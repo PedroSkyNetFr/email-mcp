@@ -14,6 +14,7 @@ import type { IMailService } from '../services/mail-service.types.js';
 import type { SearchPresetRegistry } from '../services/search-presets.js';
 import type { SearchPreset } from '../types/index.js';
 import { formatSearchResult } from './emails.tool.js';
+import { numeric } from './numeric-param.js';
 
 /** Translate a preset (camelCase) into the SearchOptions shape. */
 function presetToSearchOptions(
@@ -69,8 +70,8 @@ export default function registerSavedSearchesTools(
       'Pass pagination to page through large result sets.',
     {
       name: z.string().describe('Preset name from config.toml [[searches]] or list_presets'),
-      page: z.number().int().min(1).default(1).optional(),
-      pageSize: z.number().int().min(1).max(100).default(20).optional(),
+      page: numeric(z.number().int().min(1).default(1).optional()),
+      pageSize: numeric(z.number().int().min(1).max(100).default(20).optional()),
     },
     { readOnlyHint: true, destructiveHint: false },
     async ({ name, page, pageSize }) => {

@@ -24,6 +24,7 @@ import type RemindersService from '../services/reminders.service.js';
 import { buildCalendarNotes } from '../utils/calendar-notes.js';
 import { extractConferenceDetails } from '../utils/conference-details.js';
 import { extractMeetingUrl } from '../utils/meeting-url.js';
+import { numeric } from './numeric-param.js';
 
 // Keywords that suggest an action item / reminder rather than a calendar event
 const REMINDER_KEYWORDS =
@@ -112,13 +113,9 @@ export default function registerCalendarTools(
         .string()
         .optional()
         .describe('Target calendar name (empty = default calendar)'),
-      alarm_minutes: z
-        .number()
-        .int()
-        .min(0)
-        .max(1440)
-        .default(15)
-        .describe('Minutes before event to show an alert (default: 15)'),
+      alarm_minutes: numeric(z.number().int().min(0).max(1440).default(15)).describe(
+        'Minutes before event to show an alert (default: 15)',
+      ),
       save_attachments: z
         .boolean()
         .default(true)
@@ -385,13 +382,9 @@ export default function registerCalendarTools(
           'Show events on or before this date (ISO 8601, e.g. 2026-02-28). Defaults to 30 days from now.',
         ),
       calendar_name: z.string().optional().describe('Restrict to a specific calendar by name'),
-      limit: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe('Maximum number of results (default: 20)'),
+      limit: numeric(z.number().int().min(1).max(100).default(20)).describe(
+        'Maximum number of results (default: 20)',
+      ),
     },
     { readOnlyHint: true, destructiveHint: false },
     async ({ title, from, to, calendar_name: calendarName, limit }) => {
@@ -453,13 +446,9 @@ export default function registerCalendarTools(
         .boolean()
         .default(false)
         .describe('Include completed reminders (default: false)'),
-      limit: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe('Maximum number of results (default: 20)'),
+      limit: numeric(z.number().int().min(1).max(100).default(20)).describe(
+        'Maximum number of results (default: 20)',
+      ),
     },
     { readOnlyHint: true, destructiveHint: false },
     async ({ title, list_name: listName, include_completed: includeCompleted, limit }) => {

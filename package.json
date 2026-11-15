@@ -94,6 +94,7 @@
   "dependencies": {
     "@clack/prompts": "^1.8.1",
     "@modelcontextprotocol/sdk": "^1.32.1",
+    "html-to-text": "^10.0.1",
     "imapflow": "^2.5.2",
     "mailparser": "^3.9.40",
     "node-ical": "^0.27.3",
@@ -106,6 +107,7 @@
     "@biomejs/biome": "^2.6.2",
     "@eslint/compat": "^2.1.1",
     "@eslint/js": "^9.39.5",
+    "@types/html-to-text": "^9.0.4",
     "@types/mailparser": "^3.9.0",
     "@types/node": "^26.6.5",
     "@vitest/coverage-v8": "^4.1.11",

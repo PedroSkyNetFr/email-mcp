@@ -19,6 +19,7 @@ import { toCsvRow } from '../services/csv.js';
 import { assertSafeDestination } from '../services/file-paths.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import type { EmailMeta } from '../types/index.js';
+import { numeric } from './numeric-param.js';
 import {
   COVERAGE_NOTE,
   FROM_DESCRIPTION,
@@ -195,8 +196,8 @@ export default function registerExportTools(
       seen: z.boolean().optional(),
       flagged: z.boolean().optional(),
       has_attachment: z.boolean().optional(),
-      larger_than: z.number().optional(),
-      smaller_than: z.number().optional(),
+      larger_than: numeric(z.number().optional()),
+      smaller_than: numeric(z.number().optional()),
       answered: z.boolean().optional(),
       draft: z.boolean().optional(),
       deleted: z.boolean().optional(),
@@ -207,7 +208,7 @@ export default function registerExportTools(
       attachment_mimetype: z.string().optional(),
       gmail_raw: z.string().optional(),
       format: z.enum(['csv', 'ndjson']).default('csv'),
-      max_rows: z.number().int().min(1).max(50000).default(5000),
+      max_rows: numeric(z.number().int().min(1).max(50000).default(5000)),
       columns: z
         .array(
           z.enum([
@@ -286,6 +287,9 @@ export default function registerExportTools(
             attachmentMimetype: params.attachment_mimetype,
             gmailRaw: params.gmail_raw,
             ...literalFilterOptions(params),
+            // Aperçu lu seulement si la colonne `preview` est demandée : sur IMAP
+            // c'est une lecture partielle de la partie texte PAR message.
+            preview: params.format === 'csv' && (params.columns ?? []).includes('preview'),
             maxRows: params.max_rows,
           },
         );

@@ -26,8 +26,8 @@ export class SearchFailedError extends Error {
 const NARROW_SUGGESTION =
   'The messages may still exist. Narrow the search and retry: add a date filter ' +
   '(since:/before:/on:), or use subject:/from: instead of a full-text query. ' +
-  'osTicket-ingested mailboxes (e.g. INBOX.osTicket) are very large — always ' +
-  'date-scope searches there.';
+  'High-volume folders (archives, shared or ticketing inboxes) are very large — ' +
+  'always date-scope searches there.';
 
 /** Build the SearchStatus for a non-array (`false`) `client.search()` result. */
 export function searchFailedStatus(): SearchStatus {

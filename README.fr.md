@@ -532,16 +532,48 @@ enregistré quand le serveur est en [lecture seule](#mode-lecture-seule).
 |-------|---------------|---------|---------------|
 | `list_accounts` | Comptes configurés — à appeler d'abord pour connaître les noms. | local | ✅ |
 | `list_mailboxes` | Dossiers avec le nombre de non-lus et les attributs spéciaux. | both | ✅ |
-| `list_emails` | Liste paginée avec filtres. | both | ✅ |
-| `get_email` | Un message (`format` : `full`, `text`, `stripped` ; `maxLength`) ; ne le marque pas lu sauf `markRead`. | both | ✅ |
-| `get_emails` | Jusqu'à 20 messages en un appel (texte par défaut). | both | ✅ |
+| `list_emails` | Liste paginée avec filtres, du plus récemment reçu au plus ancien ; `preview` optionnel. | both | ✅ |
+| `get_email` | Un message (`format` : `text` par défaut, `stripped`, `full`, `html` ; `maxLength`, `offset`) ([détails](#lire-le-corps-des-messages)) ; ne le marque pas lu sauf `markRead`. | both | ✅ |
+| `get_emails` | Jusqu'à 20 messages en un appel (texte par défaut, 5 000 caractères par corps). | both | ✅ |
 | `get_email_status` | État lu / suivi / libellés sans le corps. | both | ✅ |
-| `get_thread` | Conversation reconstruite à partir de `References` / `In-Reply-To`. | both | ✅ |
+| `get_thread` | Conversation reconstruite à partir de `References` / `In-Reply-To` (texte par défaut, 5 000 caractères par corps). | both | ✅ |
 | `get_email_headers` | En-têtes Internet complets et leur analyse ([détails](#en-têtes-internet)). | both | ✅ |
 | `find_email_folder` | Dossier(s) réel(s) d'un message vu dans un dossier virtuel (« All Mail » de Gmail). | IMAP | ✅ |
 | `extract_contacts` | Correspondants fréquents d'après les en-têtes récents. | IMAP | ✅ |
 | `get_email_stats` | Volume, principaux expéditeurs, tendance quotidienne sur un jour / une semaine / un mois. | IMAP | ✅ |
 | `check_health` | Version en service, connexion, latence, quota et capacités par compte. | both | ✅ |
+
+### Lire le corps des messages
+
+`get_email`, `get_emails` et `get_thread` partagent un même paramètre `format` :
+
+| `format` | Renvoie |
+|----------|---------|
+| `text` (défaut) | Du texte lisible : la partie texte, ou la partie HTML convertie — liens conservés sous la forme `libellé [url]`, tableaux en colonnes alignées, toutes les entités HTML décodées. |
+| `stripped` | `text` sans les citations ni les signatures. |
+| `full` | La partie du corps décodée telle quelle (partie texte, sinon HTML brut) ; en cas d'échec d'extraction, un marqueur visible suivi de la source brute plafonnée. |
+| `html` | La partie HTML brute, intacte (sinon la partie texte) — pour conserver le HTML d'origine. |
+
+Quand un message `multipart/alternative` porte une partie texte « bouchon »
+(« View this email in your browser ») ou nettement plus pauvre que sa partie
+HTML, c'est la partie HTML qui sert : elle l'emporte quand elle compte au moins
+3 fois plus de mots que la partie texte **et** au moins 25 mots de plus (mots
+comptés sans les URL).
+
+Les corps sont plafonnés par défaut — 10 000 caractères pour `get_email`,
+5 000 par message pour `get_emails` et `get_thread` ; `format: "html"` n'est pas
+plafonné sauf `maxLength` explicite. `maxLength: 0` lève le plafond. Un corps
+coupé se termine par une ligne `✂️ … truncated` qui dit combien de caractères
+restent et comment lire la suite : `get_email` accepte un `offset` pour obtenir
+la partie suivante.
+
+Les listes et la lecture d'un message signalent le courrier probablement **de
+liste** (📰 — `List-Id`, `List-Unsubscribe`, `Precedence: list`) et
+**automatique** (🤖 — `Auto-Submitted`, `Precedence: bulk`,
+`X-Auto-Response-Suppress`). Ces en-têtes sont posés par l'expéditeur : c'est un
+indice, jamais une garantie. `get_email` l'affiche sur les deux backends ; dans
+les listes, seulement pour les comptes IMAP, Microsoft Graph ne servant pas les
+en-têtes d'un message en liste.
 
 ### Recherche
 
@@ -695,6 +727,28 @@ jeu de filtres. Les filtres se combinent en ET. Les résultats sont paginés
 `Nm` (il y a N jours, semaines, mois) et `today` / `yesterday`, évalués en UTC —
 sur tous les outils de recherche et les deux backends.
 
+**Ordre.** Les résultats arrivent du plus récemment reçu au plus ancien, sur
+l'ensemble des correspondances — pas seulement dans la page. Sur IMAP, cela lit
+la date de réception (INTERNALDATE) de chaque correspondance avant de servir la
+page 1 (≈ 1,3 Mo et 0,2 s d'analyse pour 20 000 correspondances) ; au-delà de
+20 000 correspondances sans filtre côté client, l'ordre retombe sur l'ordre du
+dossier (UID) et un avertissement le dit. Graph trie par `receivedDateTime` côté
+serveur.
+
+**Aperçu.** `list_emails` et `search_emails` acceptent `preview: true` pour
+ajouter un aperçu du corps d'environ 200 caractères par message. Sur IMAP, il lit
+les 1,5 premiers Ko de la partie texte de chaque message (un FETCH de plus par
+page) : il est donc désactivé par défaut ; Graph le fournit sans coût mais ne
+l'affiche lui aussi que sur demande, pour que les deux backends répondent pareil.
+
+**Nombres en chaîne.** Les paramètres numériques (`page`, `pageSize`,
+`maxLength`, `limit`…) acceptent aussi une chaîne numérique (`"20"`) ; une chaîne
+vide, `null` ou un booléen sont refusés au lieu d'être lus comme 0.
+
+`search_emails` refuse un appel sans aucun critère (ni `query` ni filtre) : il
+listerait tout le dossier, signe le plus souvent d'un nom de filtre mal
+orthographié. Pour parcourir un dossier, utiliser `list_emails`.
+
 ```jsonc
 // search_emails
 { "account": "work", "subject": "facture", "since": "60d", "has_attachment": true }
@@ -824,7 +878,8 @@ conversation.
   5000 par défaut, 50 000 au plus. Colonnes CSV par défaut : `id`, `account`,
   `date`, `from`, `subject`, `labels`, `attachments`, `has_attachments`, `seen`,
   `flagged` ; `columns` choisit parmi `id`, `account`, `date`, `from`, `to`,
-  `subject`, `flags`, `labels`, `attachments`, `preview`, `size`. Le NDJSON écrit
+  `subject`, `flags`, `labels`, `attachments`, `preview`, `size` (sur IMAP, `preview`
+  lit les 1,5 premiers Ko de la partie texte de chaque message). Le NDJSON écrit
   l'enregistrement complet. Fichier par défaut :
   `~/Downloads/email-export-<horodatage>.csv`.
 - **`save_email`** — la source RFC 822 exacte : pièces jointes, mise en forme,

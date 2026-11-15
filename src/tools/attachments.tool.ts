@@ -15,6 +15,7 @@ import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
 import type { IMailService } from '../services/mail-service.types.js';
+import { numeric } from './numeric-param.js';
 import {
   FROM_DESCRIPTION,
   literalFilterOptions,
@@ -205,8 +206,8 @@ export default function registerAttachmentTools(
       seen: z.boolean().optional(),
       flagged: z.boolean().optional(),
       has_attachment: z.boolean().optional(),
-      larger_than: z.number().optional(),
-      smaller_than: z.number().optional(),
+      larger_than: numeric(z.number().optional()),
+      smaller_than: numeric(z.number().optional()),
       answered: z.boolean().optional(),
       draft: z.boolean().optional(),
       deleted: z.boolean().optional(),
@@ -222,7 +223,7 @@ export default function registerAttachmentTools(
         .string()
         .optional()
         .describe('Only save attachments whose MIME type matches this regex'),
-      max_emails: z.number().int().min(1).max(10000).default(1000),
+      max_emails: numeric(z.number().int().min(1).max(10000).default(1000)),
       destination: z
         .string()
         .optional()

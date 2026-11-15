@@ -6,6 +6,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import type { IMailService } from '../services/mail-service.types.js';
+import { numeric } from './numeric-param.js';
 
 export default function registerContactsTools(server: McpServer, imapService: IMailService): void {
   server.tool(
@@ -14,13 +15,9 @@ export default function registerContactsTools(server: McpServer, imapService: IM
     {
       account: z.string().describe('Account name from list_accounts'),
       mailbox: z.string().optional().describe('Mailbox to scan (default: INBOX)'),
-      limit: z
-        .number()
-        .int()
-        .min(1)
-        .max(500)
-        .default(100)
-        .describe('Number of recent emails to scan (default: 100, max: 500)'),
+      limit: numeric(z.number().int().min(1).max(500).default(100)).describe(
+        'Number of recent emails to scan (default: 100, max: 500)',
+      ),
     },
     { readOnlyHint: true, destructiveHint: false },
     async ({ account, mailbox, limit }) => {

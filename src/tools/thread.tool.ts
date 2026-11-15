@@ -9,34 +9,26 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import type { IMailService } from '../services/mail-service.types.js';
-import { applyBodyFormat } from '../utils/body-format.js';
+import { applyBodyFormat, DEFAULT_MULTI_BODY_MAX } from '../utils/body-format.js';
+import { bodyFormatParam, maxLengthParam, resolveMaxLength } from './body-params.js';
 
 export default function registerThreadTools(server: McpServer, imapService: IMailService): void {
   server.tool(
     'get_thread',
     'Reconstruct a full email conversation thread by following References and In-Reply-To headers. ' +
       'Returns all related messages. Does NOT mark emails as seen. ' +
-      'Use format="text" to strip HTML, or format="stripped" to also remove quoted replies. ' +
+      'Bodies default to format="text" (readable plain text, HTML converted); format="stripped" also ' +
+      'removes quoted replies, "full" returns the decoded part as-is, "html" the raw HTML part. ' +
+      `Each body is capped at ${DEFAULT_MULTI_BODY_MAX} characters by default (html: uncapped); a cut ` +
+      'body ends with a ✂️ marker naming the get_email call that reads the rest. ' +
       'Use newestFirst=true to show the most recent message in full and older messages as header-only summaries. ' +
       'Use get_email first to obtain the message_id.',
     {
       account: z.string().describe('Account name from list_accounts'),
       message_id: z.string().describe('Message-ID header value (from get_email)'),
       mailbox: z.string().default('INBOX').describe('Mailbox to search (default: INBOX)'),
-      format: z
-        .enum(['full', 'text', 'stripped'])
-        .default('full')
-        .describe(
-          'Body format: full=full decoded body — text preferred, else HTML; falls back to a visible marker + capped raw RFC822 source if nothing is decodable (default). text=plain text (strips HTML). stripped=plain text without quoted replies or signatures.',
-        ),
-      maxLength: z
-        .number()
-        .int()
-        .min(100)
-        .optional()
-        .describe(
-          'Truncate each message body at this many characters. A hint shows how many characters remain.',
-        ),
+      format: bodyFormatParam(),
+      maxLength: maxLengthParam(DEFAULT_MULTI_BODY_MAX, 'each body'),
       newestFirst: z
         .boolean()
         .default(false)
@@ -98,7 +90,14 @@ export default function registerThreadTools(server: McpServer, imapService: IMai
             parts.push('(body omitted — use get_email to read this message)');
           } else {
             parts.push('');
-            parts.push(applyBodyFormat(email, format, maxLength));
+            parts.push(
+              applyBodyFormat(email, format, {
+                maxLength: resolveMaxLength(format, maxLength, DEFAULT_MULTI_BODY_MAX),
+                continuation: (next) =>
+                  `use get_email with emailId=${email.id}, mailbox="${mailbox}" and offset=${next} ` +
+                  'for the rest, or maxLength=0',
+              }),
+            );
           }
 
           parts.push('');

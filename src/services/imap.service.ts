@@ -34,6 +34,12 @@ import type {
 } from '../types/index.js';
 import { nonEmpty, RAW_CAP } from '../utils/body-format.js';
 import {
+  buildPreview,
+  decodeCharset,
+  findPreviewPart,
+  PREVIEW_PART_BYTES,
+} from '../utils/body-preview.js';
+import {
   analyzeHeaders,
   flattenHeaders,
   groupHeaders,
@@ -42,6 +48,7 @@ import {
 } from '../utils/headers.js';
 import { htmlToPlainText } from '../utils/html-text.js';
 import { imapCommand } from '../utils/imap-error.js';
+import { CLASSIFICATION_HEADERS, classifyFromHeaders } from '../utils/mail-classification.js';
 import { buildReferences, composeMessage } from '../utils/mime-headers.js';
 import type { AttachmentInput, ResolvedAttachment } from './attachment-resolver.js';
 import { resolveAttachments } from './attachment-resolver.js';
@@ -91,8 +98,9 @@ const MAX_FACET_UIDS = 10000;
 /**
  * R5: folders larger than this are "big enough that a non-FTS BODY scan is a
  * resource risk". Chosen at the MAX_SCANNED_MESSAGES cap — below it the result set
- * is fully servable anyway; above it (osTicket ~18k, Archive ~79k) a body
- * scan on a server without a full-text index is the abortable/expensive case.
+ * is fully servable anyway; above it (high-volume folders: tens of thousands of
+ * messages in an archive or a ticketing inbox) a body scan on a server without
+ * a full-text index is the abortable/expensive case.
  */
 const LARGE_FOLDER_THRESHOLD = 5000;
 
@@ -148,6 +156,8 @@ export interface SearchOptions {
   attachmentMimetype?: string;
   facets?: ('sender' | 'year' | 'mailbox')[];
   gmailRaw?: string;
+  /** Aperçu du corps dans les résultats (lecture partielle de la partie texte). */
+  preview?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -422,19 +432,14 @@ function messageToEmailMeta(msg: Record<string, unknown>): EmailMeta {
   // Extract non-system flags as labels (IMAP keywords)
   const labels = [...flags].filter((f) => !f.startsWith('\\'));
 
-  // Extract preview from source buffer
-  let preview: string | undefined;
-  if (msg.source && Buffer.isBuffer(msg.source)) {
-    const rawText = msg.source.toString('utf-8');
-    // Try to extract body text after the header blank line
-    const bodyStart = rawText.indexOf('\r\n\r\n');
-    if (bodyStart >= 0) {
-      preview = rawText
-        .slice(bodyStart + 4, bodyStart + 204)
-        .replace(/\s+/g, ' ')
-        .trim();
-    }
-  }
+  // Pas d'aperçu ici : `fillPreviews` le renseigne après coup, à la demande
+  // seulement (`preview: true`). L'ancien aperçu, tiré des 256 premiers octets
+  // de la source, ne voyait que les en-têtes : rien, ou du MIME brut.
+
+  // Indice liste / automatique, quand les champs d'en-tête ont été demandés.
+  const classification = Buffer.isBuffer(msg.headers)
+    ? classifyFromHeaders(flattenHeaders(parseHeaderBlock(msg.headers)))
+    : undefined;
 
   // Only populate attachments when bodyStructure was actually fetched. An
   // undefined value signals "unknown" to downstream callers (e.g. post-filters
@@ -453,7 +458,7 @@ function messageToEmailMeta(msg: Record<string, unknown>): EmailMeta {
     answered: flags.has('\\Answered'),
     hasAttachments: (attachments?.length ?? 0) > 0,
     labels,
-    preview,
+    ...(classification ? { classification } : {}),
     ...(attachments !== undefined ? { attachments } : {}),
   };
 }
@@ -587,6 +592,220 @@ async function orderByArrival(client: ImapFlow, uids: number[]): Promise<Candida
     .sort((a, b) => b.arrival - a.arrival || b.uid - a.uid);
 }
 
+/**
+ * Au-delà de ce nombre de candidats, une liste SANS filtre côté client n'est
+ * plus triée par date de réception sur l'ensemble : elle retombe sur l'ordre
+ * des UID (ordre d'arrivée DANS LE DOSSIER), et un avertissement le dit.
+ *
+ * Pourquoi une borne : trier par INTERNALDATE oblige à lire la date de CHAQUE
+ * candidat avant de servir la page 1, là où l'ordre des UID ne coûte rien.
+ * Coût côté client mesuré (analyseur d'imapflow 2.11 sur des réponses
+ * `* n FETCH (UID n INTERNALDATE "…")` synthétiques, Node 24) : ~65 octets et
+ * ~11 µs par message, soit pour 20 000 candidats ≈ 1,3 Mo reçus et ≈ 0,2 s
+ * d'analyse (5 000 : 0,3 Mo / 0,08 s ; 80 000 : 5,2 Mo / 0,8 s). Côté serveur,
+ * INTERNALDATE est une donnée d'index (pas de lecture du message), non
+ * mesurée ici faute de serveur de test. 20 000 couvre une boîte de réception
+ * et la plupart des dossiers ; au-delà (grosses archives), on garde l'ordre
+ * des UID et on le dit. Avec des filtres côté client, le tri par date est de
+ * toute façon fait sur tous les candidats (voir scanClientSide).
+ *
+ * Alternative écartée : la commande SORT (RFC 5256), qui ferait le tri sur le
+ * serveur, n'est pas exposée par imapflow et n'est pas annoncée par Gmail ni
+ * par Exchange — il faudrait l'émettre à la main et garder ce repli de toute
+ * façon.
+ */
+export const ARRIVAL_SORT_MAX = 20_000;
+
+/**
+ * Comment l'ordre des candidats a été obtenu :
+ * - `global` : INTERNALDATE lue pour tous les candidats, ordre exact ;
+ * - `page` : tous les candidats tiennent dans la page 1 — la page les lit tous
+ *   et les trie elle-même sur INTERNALDATE (aucune lecture supplémentaire) ;
+ * - `uid` : repli au-delà de ARRIVAL_SORT_MAX, ordre des UID + avertissement.
+ */
+type OrderMode = 'global' | 'page' | 'uid';
+
+/** Ordre des candidats retenu pour paginer, et comment il a été obtenu. */
+interface PagingOrder {
+  /** Candidats du plus récemment reçu au plus ancien (ou par UID décroissant). */
+  ordered: Candidate[];
+  mode: OrderMode;
+  /** Avertissement à remonter quand le repli par UID a été pris. */
+  warning?: string;
+}
+
+/** Candidats par UID décroissant, sans date connue. */
+function byUidDesc(uids: number[]): Candidate[] {
+  return [...uids].sort((a, b) => b - a).map((uid) => ({ uid, arrival: 0 }));
+}
+
+/**
+ * Ordonne les candidats d'une liste ou d'une recherche AVANT la pagination
+ * (codefuturist #59) : la page 1 doit être les messages reçus le plus
+ * récemment, pas les derniers entrés dans le dossier. Un dossier Archive
+ * rempli par déplacements donne sinon, en page 1, les derniers ARCHIVÉS —
+ * parfois vieux de plusieurs années — et repousse le courrier récent plus
+ * loin. Trier seulement la page lue, comme avant, ne corrige rien : la page
+ * est déjà mal choisie.
+ *
+ * `force` : tri par date obligatoire quelle que soit la taille (filtres côté
+ * client, qui lisent de toute façon chaque candidat). `pageSize` : si tous
+ * les candidats tiennent dans une page, la page elle-même les ordonne — la
+ * lecture préalable des dates serait un aller-retour pour rien.
+ */
+async function orderForPaging(
+  client: ImapFlow,
+  uids: number[],
+  opts: { force: boolean; pageSize: number },
+): Promise<PagingOrder> {
+  if (opts.force) {
+    return { ordered: await orderByArrival(client, uids), mode: 'global' };
+  }
+  if (uids.length <= opts.pageSize) {
+    return { ordered: byUidDesc(uids), mode: 'page' };
+  }
+  if (uids.length <= ARRIVAL_SORT_MAX) {
+    return { ordered: await orderByArrival(client, uids), mode: 'global' };
+  }
+  return {
+    ordered: byUidDesc(uids),
+    mode: 'uid',
+    warning:
+      `${uids.length} matches: ordered by folder arrival (UID), not by received date — ` +
+      `exact date order is limited to ${ARRIVAL_SORT_MAX} matches. ` +
+      'Add a date filter (since/before/on) for strict newest-first order.',
+  };
+}
+
+/**
+ * Ordonne les messages d'une page lue selon le mode d'ordre :
+ * - `global` : ordre des UID demandés (déjà triés par date de réception) —
+ *   le FETCH IMAP rend les messages dans l'ordre du dossier, pas dans celui
+ *   de la requête ;
+ * - `page` : INTERNALDATE décroissante lue avec la page, UID en départage ;
+ * - `uid` : date d'en-tête décroissante (comportement historique du repli).
+ */
+function sortPage(
+  items: EmailMeta[],
+  pageUids: number[],
+  arrivals: Map<number, number>,
+  mode: OrderMode,
+): void {
+  if (mode === 'global') {
+    const rank = new Map(pageUids.map((uid, i) => [uid, i]));
+    items.sort((a, b) => (rank.get(Number(a.id)) ?? 0) - (rank.get(Number(b.id)) ?? 0));
+  } else if (mode === 'page') {
+    const at = (m: EmailMeta) => arrivals.get(Number(m.id)) ?? 0;
+    items.sort((a, b) => at(b) - at(a) || Number(b.id) - Number(a.id));
+  } else {
+    items.sort(
+      (a, b) => safeDate(b.date, new Date(0)).getTime() - safeDate(a.date, new Date(0)).getTime(),
+    );
+  }
+}
+
+/** INTERNALDATE d'un message lu, en ms (0 si absente ou illisible). */
+function arrivalOf(raw: Record<string, unknown>): number {
+  const value = raw.internalDate;
+  const time = value instanceof Date ? value.getTime() : Date.parse(String(value));
+  return Number.isNaN(time) ? 0 : time;
+}
+
+/**
+ * Renseigne l'aperçu (`preview`) des messages d'une page, à partir d'une
+ * lecture PARTIELLE (PREVIEW_PART_BYTES octets) de leur partie texte.
+ *
+ * La section à lire varie d'un message à l'autre (« 1 », « 1.1 »…) : on
+ * regroupe les messages par section et on émet un FETCH par groupe —
+ * d'ordinaire un ou deux. Demander une section qu'un message n'a pas fait
+ * échouer tout le lot chez Gmail, d'où ce regroupement plutôt qu'une liste de
+ * sections commune.
+ *
+ * Coût : un FETCH par groupe, ≤ 1,5 Ko par message. Toute erreur est avalée :
+ * un aperçu est un confort, il ne doit jamais faire échouer la liste.
+ */
+async function fillPreviews(
+  client: ImapFlow,
+  items: EmailMeta[],
+  structures: Map<number, unknown>,
+): Promise<void> {
+  const groups = new Map<string, Map<number, ReturnType<typeof findPreviewPart>>>();
+  items.forEach((item) => {
+    const uid = Number(item.id);
+    const part = findPreviewPart(structures.get(uid));
+    if (!part) return;
+    const group = groups.get(part.key) ?? new Map();
+    group.set(uid, part);
+    groups.set(part.key, group);
+  });
+  const previews = new Map<number, string>();
+  /* eslint-disable no-restricted-syntax, no-await-in-loop -- lots séquentiels sur la connexion partagée */
+  for (const [key, group] of groups) {
+    try {
+      for await (const msg of client.fetch(
+        compactUidSet([...group.keys()]),
+        { uid: true, bodyParts: [{ key, start: 0, maxLength: PREVIEW_PART_BYTES }] },
+        { uid: true },
+      )) {
+        const uid = Number(msg.uid);
+        const part = group.get(uid);
+        const raw = msg.bodyParts?.get(key);
+        if (part && raw) {
+          const preview = buildPreview(raw, part, msg.binaryParts?.has(key) ?? false);
+          if (preview) previews.set(uid, preview);
+        }
+      }
+    } catch {
+      // Aperçu best-effort : le groupe reste sans aperçu.
+    }
+  }
+  /* eslint-enable no-restricted-syntax, no-await-in-loop */
+  items.forEach((item) => {
+    const preview = previews.get(Number(item.id));
+    if (preview) Object.assign(item, { preview });
+  });
+}
+
+/**
+ * Requête FETCH d'une page de liste : enveloppe, drapeaux, structure (pièces
+ * jointes, choix de la partie d'aperçu) et les seuls champs d'en-tête qui
+ * servent à l'indice liste / automatique — quelques centaines d'octets par
+ * message, dans la même commande.
+ */
+const PAGE_FETCH_QUERY = {
+  uid: true,
+  envelope: true,
+  flags: true,
+  bodyStructure: true,
+  internalDate: true,
+  headers: [...CLASSIFICATION_HEADERS],
+};
+
+/**
+ * Lit une page de messages dans l'ordre de `pageUids`, avec aperçu si demandé.
+ * Point unique partagé par `listEmails` et `searchEmails`.
+ */
+async function fetchPage(
+  client: ImapFlow,
+  pageUids: number[],
+  opts: { preview?: boolean; mode: OrderMode },
+): Promise<EmailMeta[]> {
+  const items: EmailMeta[] = [];
+  const structures = new Map<number, unknown>();
+  const arrivals = new Map<number, number>();
+  // eslint-disable-next-line no-restricted-syntax
+  for await (const msg of client.fetch(pageUids.join(','), PAGE_FETCH_QUERY, { uid: true })) {
+    const raw = msg as unknown as Record<string, unknown>;
+    const uid = Number(raw.uid);
+    structures.set(uid, raw.bodyStructure);
+    arrivals.set(uid, arrivalOf(raw));
+    items.push(messageToEmailMeta(raw));
+  }
+  sortPage(items, pageUids, arrivals, opts.mode);
+  if (opts.preview) await fillPreviews(client, items, structures);
+  return items;
+}
+
 interface ClientScanOutcome {
   /** UID retenus, du plus récemment reçu au plus ancien. */
   uids: number[];
@@ -610,16 +829,18 @@ interface ClientScanOutcome {
  * OVH : plus d'une minute pour ~2 200 messages au premier appel, 1 à 3 s une
  * fois le cache chaud). Quand une borne l'interrompt, le bilan `coverage` dit
  * combien de messages ont été examinés et avec quel `before` reprendre.
+ *
+ * `ordered` : candidats déjà triés par date de réception (`orderForPaging`
+ * avec `force`), pour que la date du plus ancien examiné soit une reprise
+ * sans trou. La regex `attachment_mimetype` est validée par l'appelant avant
+ * tout FETCH.
  */
 async function scanClientSide(
   client: ImapFlow,
-  uids: number[],
+  ordered: Candidate[],
   postFilters: PostFilters,
   opts: { deadline: number; before?: string },
 ): Promise<ClientScanOutcome> {
-  // Valide la regex avant le premier FETCH.
-  compileMimetypeFilter(postFilters.attachmentMimetype);
-  const ordered = await orderByArrival(client, uids);
   const examinable = ordered.slice(0, MAX_SCANNED_MESSAGES);
   const kept = new Set<number>();
   let scanned = 0;
@@ -679,6 +900,12 @@ function isRfc822Attachment(a: { contentType?: string; content?: unknown }): boo
     a.contentType.toLowerCase() === 'message/rfc822' &&
     Buffer.isBuffer(a.content)
   );
+}
+
+/** `{ classification }` quand les en-têtes portent un indice, sinon `{}`. */
+function withClassification(headers: Record<string, string>): Pick<Email, 'classification'> {
+  const classification = classifyFromHeaders(headers);
+  return classification ? { classification } : {};
 }
 
 /**
@@ -795,6 +1022,8 @@ async function messageToEmail(msg: Record<string, unknown>): Promise<Email> {
     references: parsedReferences ?? headers.references?.split(/\s+/).filter(Boolean),
     attachments: extractAttachmentMeta(msg.bodyStructure),
     headers,
+    // Indice liste / automatique tiré de l'en-tête complet déjà lu.
+    ...withClassification(headers),
   };
 }
 
@@ -922,8 +1151,8 @@ export default class ImapService {
       return false;
     }
     // [P2] Detection is deliberately narrow: `SEARCH=FUZZY` (RFC 6203) is the
-    // standard advertisement for a real server-side text index, and the WGS
-    // target (Dovecot, no FTS plugin) is precisely why this feature exists.
+    // standard advertisement for a real server-side text index, and a Dovecot
+    // without FTS plugin is precisely the case this feature exists for.
     // A server that does efficient body search via a non-standard capability
     // just gets the bounded ephemeral path — slower, but SAFE: the only cost
     // is an unnecessary bounded search, never a false-negative. Broaden or
@@ -1185,6 +1414,8 @@ export default class ImapService {
       // PR 2 phase E additions:
       attachmentFilename?: string;
       attachmentMimetype?: string;
+      /** Aperçu du corps (lecture partielle de la partie texte) ; défaut : non. */
+      preview?: boolean;
     } = {},
   ): Promise<PaginatedResult<EmailMeta>> {
     const client = await this.connections.getImapClient(accountName);
@@ -1246,12 +1477,18 @@ export default class ImapService {
         };
       }
 
-      // Du plus récent au plus ancien, puis filtres côté client AVANT la
-      // pagination (voir scanClientSide) : la page et le total portent sur les
-      // messages qui satisfont réellement les filtres.
-      uids.sort((a, b) => b - a);
-      if (hasClientSideFilters(postFilters)) {
-        const scan = await scanClientSide(client, uids, postFilters, {
+      // Du plus récemment REÇU au plus ancien sur l'ensemble (orderForPaging),
+      // puis filtres côté client AVANT la pagination (voir scanClientSide) : la
+      // page et le total portent sur les messages qui satisfont réellement les
+      // filtres.
+      const clientSide = hasClientSideFilters(postFilters);
+      // Valide la regex attachment_mimetype avant le premier FETCH.
+      if (clientSide) compileMimetypeFilter(postFilters.attachmentMimetype);
+      const order = await orderForPaging(client, uids, { force: clientSide, pageSize });
+      if (order.warning) warnings.push(order.warning);
+      uids = order.ordered.map((c) => c.uid);
+      if (clientSide) {
+        const scan = await scanClientSide(client, order.ordered, postFilters, {
           deadline,
           before: options.before,
         });
@@ -1280,29 +1517,10 @@ export default class ImapService {
         };
       }
 
-      const items: EmailMeta[] = [];
-      const range = pageUids.join(',');
-
-      // eslint-disable-next-line no-restricted-syntax
-      for await (const msg of client.fetch(
-        range,
-        {
-          uid: true,
-          envelope: true,
-          flags: true,
-          bodyStructure: true,
-          internalDate: true,
-          source: { start: 0, maxLength: 256 },
-        },
-        { uid: true },
-      )) {
-        items.push(messageToEmailMeta(msg as unknown as Record<string, unknown>));
-      }
-
-      // Sort by date descending
-      items.sort(
-        (a, b) => safeDate(b.date, new Date(0)).getTime() - safeDate(a.date, new Date(0)).getTime(),
-      );
+      const items = await fetchPage(client, pageUids, {
+        preview: options.preview,
+        mode: order.mode,
+      });
 
       const warning = warnings.length > 0 ? warnings.join('; ') : undefined;
       return {
@@ -1454,6 +1672,8 @@ export default class ImapService {
       attachmentMimetype?: string;
       // PR 2 phase G additions:
       facets?: ('sender' | 'year' | 'mailbox')[];
+      /** Aperçu du corps (lecture partielle de la partie texte) ; défaut : non. */
+      preview?: boolean;
     } = {},
   ): Promise<PaginatedResult<EmailMeta>> {
     const client = await this.connections.getImapClient(accountName);
@@ -1563,12 +1783,17 @@ export default class ImapService {
         };
       }
 
-      uids.sort((a, b) => b - a);
-      // Filtres côté client AVANT la pagination et les facettes : page, total
-      // et facettes portent sur les messages qui satisfont réellement les
+      // Du plus récemment REÇU au plus ancien sur l'ensemble (orderForPaging),
+      // puis filtres côté client AVANT la pagination et les facettes : page,
+      // total et facettes portent sur les messages qui satisfont réellement les
       // filtres (voir scanClientSide).
-      if (hasClientSideFilters(postFilters)) {
-        const scan = await scanClientSide(client, uids, postFilters, {
+      const clientSide = hasClientSideFilters(postFilters);
+      if (clientSide) compileMimetypeFilter(postFilters.attachmentMimetype);
+      const order = await orderForPaging(client, uids, { force: clientSide, pageSize });
+      if (order.warning) warnings.push(order.warning);
+      uids = order.ordered.map((c) => c.uid);
+      if (clientSide) {
+        const scan = await scanClientSide(client, order.ordered, postFilters, {
           deadline,
           before: options.before,
         });
@@ -1614,28 +1839,10 @@ export default class ImapService {
         };
       }
 
-      const items: EmailMeta[] = [];
-      const range = pageUids.join(',');
-
-      // eslint-disable-next-line no-restricted-syntax
-      for await (const msg of client.fetch(
-        range,
-        {
-          uid: true,
-          envelope: true,
-          flags: true,
-          bodyStructure: true,
-          internalDate: true,
-          source: { start: 0, maxLength: 256 },
-        },
-        { uid: true },
-      )) {
-        items.push(messageToEmailMeta(msg as unknown as Record<string, unknown>));
-      }
-
-      items.sort(
-        (a, b) => safeDate(b.date, new Date(0)).getTime() - safeDate(a.date, new Date(0)).getTime(),
-      );
+      const items = await fetchPage(client, pageUids, {
+        preview: options.preview,
+        mode: order.mode,
+      });
 
       const warning = warnings.length > 0 ? warnings.join('; ') : undefined;
       return {
@@ -3682,7 +3889,16 @@ export default class ImapService {
           for await (const chunk of downloadResult.content) {
             chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
           }
-          if (chunks.length > 0) icsContents.push(Buffer.concat(chunks).toString('utf-8'));
+          // imapflow défait l'encodage de transfert de cette partie mais ne
+          // convertit pas son jeu de caractères (il ne le fait que pour
+          // text/plain et text/html) : une invitation en ISO-8859-1 ou
+          // Windows-1252 sortait en mojibake (« RÃ©union ») sous une lecture
+          // UTF-8 aveugle. Le charset déclaré arrive dans `meta`.
+          if (chunks.length > 0) {
+            icsContents.push(
+              decodeCharset(Buffer.concat(chunks), downloadResult.meta?.charset ?? undefined),
+            );
+          }
         }
       }
 
@@ -3842,14 +4058,20 @@ export default class ImapService {
         return { items: [], truncated: false };
       }
 
-      uids.sort((a, b) => b - a);
-
-      // Filtres côté client AVANT la coupe à maxRows : couper d'abord ne
-      // gardait que les maxRows plus récents, puis les filtrait — un export
+      // Même ordre que les listes (orderForPaging) : la coupe à maxRows garde
+      // les messages reçus le plus récemment, pas les derniers entrés dans le
+      // dossier. Filtres côté client AVANT la coupe à maxRows : couper d'abord
+      // ne gardait que les maxRows plus récents, puis les filtrait — un export
       // `from_contains` avec max_rows=100 ne voyait que 100 messages.
+      const clientSide = hasClientSideFilters(postFilters);
+      if (clientSide) compileMimetypeFilter(postFilters.attachmentMimetype);
+      // pageSize = maxRows : sous ce nombre, rien n'est coupé et l'ordre final
+      // est de toute façon refait plus bas sur la date.
+      const order = await orderForPaging(client, uids, { force: clientSide, pageSize: maxRows });
+      uids = order.ordered.map((c) => c.uid);
       let coverage: SearchCoverage | undefined;
-      if (hasClientSideFilters(postFilters)) {
-        const scan = await scanClientSide(client, uids, postFilters, {
+      if (clientSide) {
+        const scan = await scanClientSide(client, order.ordered, postFilters, {
           deadline,
           before: searchOpts.before,
         });
@@ -3867,6 +4089,8 @@ export default class ImapService {
       /* eslint-disable no-restricted-syntax, no-await-in-loop */
       for (const chunk of chunks) {
         const range = chunk.join(',');
+        const chunkItems: EmailMeta[] = [];
+        const structures = new Map<number, unknown>();
         for await (const msg of client.fetch(
           range,
           {
@@ -3874,12 +4098,18 @@ export default class ImapService {
             envelope: true,
             flags: true,
             bodyStructure: true,
-            source: { start: 0, maxLength: 256 },
           },
           { uid: true },
         )) {
-          items.push(messageToEmailMeta(msg as unknown as Record<string, unknown>));
+          const raw = msg as unknown as Record<string, unknown>;
+          structures.set(Number(raw.uid), raw.bodyStructure);
+          chunkItems.push(messageToEmailMeta(raw));
         }
+        // Colonne `preview` demandée : lecture partielle de la partie texte,
+        // comme `list_emails preview=true` (l'ancienne lecture de 256 octets de
+        // source ne donnait que des en-têtes).
+        if (searchOpts.preview) await fillPreviews(client, chunkItems, structures);
+        items.push(...chunkItems);
       }
       /* eslint-enable no-restricted-syntax, no-await-in-loop */
 

@@ -1,7 +1,7 @@
 /* eslint-disable n/no-sync -- tests use sync fs helpers for setup/teardown */
 import type { IConnectionManager } from '../connections/types.js';
 import { applyBodyFormat } from '../utils/body-format.js';
-import ImapService from './imap.service.js';
+import ImapService, { ARRIVAL_SORT_MAX } from './imap.service.js';
 import { SearchFailedError } from './search-status.js';
 
 // ---------------------------------------------------------------------------
@@ -437,11 +437,53 @@ describe('ImapService', () => {
         expect(result.total).toBe(2);
       });
 
-      it('without client-side filter, only the page is fetched (no full scan)', async () => {
+      it('without client-side filter: one INTERNALDATE pass, then only the page (no BODYSTRUCTURE scan)', async () => {
+        // Le tri par date de réception sur l'ensemble (#59) lit INTERNALDATE
+        // de tous les candidats — information d'index, sans le message —, puis
+        // seule la page est lue en détail.
         await service.searchEmails('test', '', { pageSize: 5 });
 
+        expect(client.fetch).toHaveBeenCalledTimes(2);
+        expect(client.fetch.mock.calls[0][1]).toEqual({ uid: true, internalDate: true });
+        expect(client.fetch.mock.calls[1][0]).toBe('30,29,28,27,26');
+      });
+
+      it('without client-side filter, page 1 is the most recently RECEIVED, not the highest UIDs', async () => {
+        // UID 30..21 : archivés récemment (UID neufs) mais reçus en 2019. Trier
+        // la seule page lue (ancien code) servait ces dix vieux messages en
+        // page 1 ; le tri global sert d'abord les vrais plus récents (20..16).
+        serve((uid) => (uid > 20 ? new Date(Date.UTC(2019, 0, uid)) : dayOf(uid)));
+
+        const listed = await service.listEmails('test', { pageSize: 5 });
+        const searched = await service.searchEmails('test', '', { pageSize: 5, seen: false });
+
+        expect(listed.items.map((m) => m.id)).toEqual(['20', '19', '18', '17', '16']);
+        expect(searched.items.map((m) => m.id)).toEqual(['20', '19', '18', '17', '16']);
+        expect(listed.warning).toBeUndefined();
+      });
+
+      it('when every match fits in one page, the page orders itself (no extra INTERNALDATE pass)', async () => {
+        client.search.mockResolvedValue([3, 2, 1]);
+        // UID 3 reçu le plus tôt : il doit finir dernier.
+        serve((uid) => (uid === 3 ? new Date(Date.UTC(2020, 0, 1)) : dayOf(uid)));
+
+        const result = await service.listEmails('test', { pageSize: 5 });
+
         expect(client.fetch).toHaveBeenCalledTimes(1);
-        expect(client.fetch.mock.calls[0][0]).toBe('30,29,28,27,26');
+        expect(result.items.map((m) => m.id)).toEqual(['2', '1', '3']);
+      });
+
+      it(`past ${ARRIVAL_SORT_MAX} matches, falls back to UID order and says so`, async () => {
+        client.search.mockResolvedValue(
+          Array.from({ length: ARRIVAL_SORT_MAX + 1 }, (_, i) => i + 1),
+        );
+
+        const result = await service.searchEmails('test', '', { pageSize: 5, seen: false });
+
+        // Aucune lecture d'INTERNALDATE : seule la page est lue.
+        expect(client.fetch).toHaveBeenCalledTimes(1);
+        expect(result.items.map((m) => m.id)[0]).toBe(String(ARRIVAL_SORT_MAX + 1));
+        expect(result.warning).toMatch(/ordered by folder arrival \(UID\), not by received date/);
       });
 
       // ---------------------------------------------------------------------
@@ -575,7 +617,9 @@ describe('ImapService', () => {
       expect(last.total).toBe(6000);
       expect(last.totalApprox).toBeUndefined();
       expect(last.warning).toBeUndefined();
-      expect(client.fetch.mock.calls[0][0].split(',')[99]).toBe('1');
+      // Dernier appel = la page (le premier lit INTERNALDATE pour ordonner).
+      const pageCall = client.fetch.mock.calls[client.fetch.mock.calls.length - 1];
+      expect(pageCall[0].split(',')[99]).toBe('1');
     });
 
     it('throws when gmail_raw is used on non-Gmail account', async () => {
@@ -721,8 +765,11 @@ describe('ImapService', () => {
       expect(result.totalApprox).toBeUndefined();
       // Page 1 must be the 5 NEWEST UIDs, descending. An ascending-sort or
       // no-sort regression would retain/serve 1..5000 (the oldest) instead.
-      expect(client.fetch).toHaveBeenCalledTimes(1);
-      expect(client.fetch.mock.calls[0][0]).toBe('6000,5999,5998,5997,5996');
+      // D'abord INTERNALDATE des 6 000 candidats, par lots de 1 000 (tri par
+      // réception, #59 ; dates identiques ici → départage par UID
+      // décroissant) ; le dernier appel est la page.
+      expect(client.fetch).toHaveBeenCalledTimes(7);
+      expect(client.fetch.mock.calls[6][0]).toBe('6000,5999,5998,5997,5996');
     });
   });
 
@@ -2110,6 +2157,198 @@ describe('ImapService', () => {
       expect(thread.messageCount).toBeGreaterThan(0);
       expect(thread.messages[0].bodyText).toBeUndefined();
       expect(thread.messages[0].bodyHtml).toContain('International Order');
+    });
+  });
+  // -----------------------------------------------------------------------
+  // Lot lecture : aperçu opt-in, indice liste / automatique, charset ICS.
+  // -----------------------------------------------------------------------
+
+  describe('list preview (opt-in) and mailing-list hint', () => {
+    const plainPart = (text: string) =>
+      Buffer.from(Buffer.from(text, 'utf-8').toString('base64'), 'latin1');
+
+    /** Messages : 2 en text/plain base64 (section 1), 1 en mixed>alternative (1.1). */
+    const messages = [
+      {
+        uid: 3,
+        envelope: { subject: 'Simple', from: [{ address: 'a@x' }], to: [] },
+        flags: new Set<string>(),
+        internalDate: new Date('2026-11-03T00:00:00Z'),
+        bodyStructure: { type: 'text/plain', encoding: 'base64', parameters: { charset: 'utf-8' } },
+        headers: Buffer.from(
+          'List-Id: <news.example>\r\nList-Unsubscribe: <https://news.example/u>\r\n\r\n',
+        ),
+      },
+      {
+        uid: 2,
+        envelope: { subject: 'Nested', from: [{ address: 'b@x' }], to: [] },
+        flags: new Set<string>(),
+        internalDate: new Date('2026-11-02T00:00:00Z'),
+        bodyStructure: {
+          type: 'multipart/mixed',
+          childNodes: [
+            {
+              part: '1',
+              type: 'multipart/alternative',
+              childNodes: [
+                { part: '1.1', type: 'text/plain', encoding: '7bit' },
+                { part: '1.2', type: 'text/html' },
+              ],
+            },
+          ],
+        },
+        headers: Buffer.from('Auto-Submitted: auto-generated\r\n\r\n'),
+      },
+      {
+        uid: 1,
+        envelope: { subject: 'Plain', from: [{ address: 'c@x' }], to: [] },
+        flags: new Set<string>(),
+        internalDate: new Date('2026-11-01T00:00:00Z'),
+        bodyStructure: { type: 'text/plain', encoding: 'base64' },
+        headers: Buffer.from('\r\n'),
+      },
+    ];
+    const bodies: Record<string, Record<number, Buffer>> = {
+      1: { 3: plainPart('Bonjour, voici la lettre de novembre'), 1: plainPart('Réunion jeudi') },
+      1.1: { 2: Buffer.from('Votre rapport mensuel est prêt') },
+    };
+
+    beforeEach(() => {
+      client.search.mockResolvedValue([1, 2, 3]);
+      client.fetch.mockImplementation((range: string, query: { bodyParts?: { key: string }[] }) =>
+        // eslint-disable-next-line @stylistic/wrap-iife -- même motif que createMockImapClient
+        (async function* gen() {
+          const wanted = range.split(',').flatMap((p) => {
+            const [lo, hi] = p.split(':').map(Number);
+            return hi === undefined ? [lo] : Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+          });
+          if (query.bodyParts) {
+            const { key } = query.bodyParts[0];
+            for (const uid of wanted) {
+              const body = bodies[key]?.[uid];
+              if (body) yield { uid, bodyParts: new Map([[key, body]]) };
+            }
+            return;
+          }
+          for (const m of messages) if (wanted.includes(m.uid)) yield m;
+        })(),
+      );
+    });
+
+    it('without preview: no body bytes are read, and no 256-byte source fetch any more', async () => {
+      const result = await service.listEmails('test', {});
+
+      expect(client.fetch).toHaveBeenCalledTimes(1);
+      const query = client.fetch.mock.calls[0][1] as Record<string, unknown>;
+      expect(query.source).toBeUndefined();
+      expect(query.bodyParts).toBeUndefined();
+      expect(query.headers).toEqual(expect.arrayContaining(['list-id', 'auto-submitted']));
+      expect(result.items.every((m) => m.preview === undefined)).toBe(true);
+    });
+
+    it('preview: one partial FETCH per section group, decoded text', async () => {
+      const result = await service.searchEmails('test', '', { seen: false, preview: true });
+
+      const partCalls = client.fetch.mock.calls.filter(
+        (c) => (c[1] as { bodyParts?: unknown }).bodyParts,
+      );
+      expect(partCalls.map((c) => [c[0], (c[1] as { bodyParts: unknown }).bodyParts])).toEqual([
+        ['1,3', [{ key: '1', start: 0, maxLength: 1500 }]],
+        ['2', [{ key: '1.1', start: 0, maxLength: 1500 }]],
+      ]);
+      const byId = Object.fromEntries(result.items.map((m) => [m.id, m.preview]));
+      expect(byId).toEqual({
+        3: 'Bonjour, voici la lettre de novembre',
+        2: 'Votre rapport mensuel est prêt',
+        1: 'Réunion jeudi',
+      });
+    });
+
+    it('a failing preview FETCH never fails the listing', async () => {
+      const real = client.fetch.getMockImplementation();
+      client.fetch.mockImplementation((range: string, query: { bodyParts?: unknown }) => {
+        if (query.bodyParts) throw new Error('NO [SERVERBUG] section');
+        return real?.(range, query);
+      });
+
+      const result = await service.listEmails('test', { preview: true });
+
+      expect(result.items).toHaveLength(3);
+      expect(result.items.every((m) => m.preview === undefined)).toBe(true);
+    });
+
+    it('list items carry the mailing-list / automated hint from the fetched header fields', async () => {
+      const result = await service.listEmails('test', {});
+      const byId = Object.fromEntries(result.items.map((m) => [m.id, m.classification?.kind]));
+      expect(byId).toEqual({ 3: 'list', 2: 'automated', 1: undefined });
+    });
+
+    it('get_email path: the hint comes from the full header block', async () => {
+      (client as unknown as { fetchOne: ReturnType<typeof vi.fn> }).fetchOne = vi
+        .fn()
+        .mockResolvedValue({
+          uid: 5,
+          envelope: { subject: 'x' },
+          source: Buffer.from(
+            'Subject: x\r\nPrecedence: bulk\r\nContent-Type: text/plain\r\n\r\nhello\r\n',
+          ),
+        });
+      const full = await service.getEmail('test', '5');
+      expect(full.classification).toMatchObject({
+        kind: 'automated',
+        signals: ['Precedence: bulk'],
+      });
+    });
+  });
+
+  describe('getCalendarParts charset', () => {
+    it('decodes a non-UTF-8 calendar part with its declared charset (cf ce5736d)', async () => {
+      const withMethods = client as unknown as {
+        fetchOne: ReturnType<typeof vi.fn>;
+        download: ReturnType<typeof vi.fn>;
+      };
+      withMethods.fetchOne = vi.fn().mockResolvedValue({
+        uid: 7,
+        bodyStructure: {
+          type: 'multipart/mixed',
+          childNodes: [
+            { part: '1', type: 'text/plain' },
+            { part: '2', type: 'text/calendar' },
+          ],
+        },
+      });
+      // imapflow défait le transfert mais pas le charset : octets Latin-1 bruts.
+      withMethods.download = vi.fn().mockResolvedValue({
+        meta: { charset: 'iso-8859-1' },
+        // eslint-disable-next-line @stylistic/wrap-iife -- même motif que createMockImapClient
+        content: (async function* gen() {
+          yield Buffer.from("SUMMARY:Réunion d'équipe\r\n", 'latin1');
+        })(),
+      });
+
+      const parts = await service.getCalendarParts('test', 'INBOX', '7');
+
+      expect(parts[0]).toContain("SUMMARY:Réunion d'équipe");
+    });
+
+    it('unknown or missing charset falls back to utf-8', async () => {
+      const withMethods = client as unknown as {
+        fetchOne: ReturnType<typeof vi.fn>;
+        download: ReturnType<typeof vi.fn>;
+      };
+      withMethods.fetchOne = vi.fn().mockResolvedValue({
+        uid: 7,
+        bodyStructure: { part: '1', type: 'text/calendar' },
+      });
+      withMethods.download = vi.fn().mockResolvedValue({
+        meta: { charset: 'x-bogus' },
+        // eslint-disable-next-line @stylistic/wrap-iife -- même motif que createMockImapClient
+        content: (async function* gen() {
+          yield Buffer.from('SUMMARY:Café\r\n', 'utf-8');
+        })(),
+      });
+
+      expect((await service.getCalendarParts('test', 'INBOX', '7'))[0]).toContain('SUMMARY:Café');
     });
   });
 });

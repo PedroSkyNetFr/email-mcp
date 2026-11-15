@@ -13,6 +13,7 @@ import { z } from 'zod';
 import audit from '../safety/audit.js';
 import type GraphService from '../services/graph/graph.service.js';
 import type { AppConfig } from '../types/index.js';
+import { numeric } from './numeric-param.js';
 
 function errorResult(message: string) {
   return { isError: true as const, content: [{ type: 'text' as const, text: message }] };
@@ -89,7 +90,9 @@ export default function registerExchangeTools(
         .boolean()
         .optional()
         .describe('Stop evaluating later rules when this one matches'),
-      sequence: z.number().int().optional().describe('Evaluation order (lower runs first)'),
+      sequence: numeric(z.number().int().optional()).describe(
+        'Evaluation order (lower runs first)',
+      ),
       enabled: z.boolean().optional().describe('Create the rule disabled by passing false'),
     },
     { readOnlyHint: false, destructiveHint: false },
