@@ -169,6 +169,10 @@ export const SettingsSchema = z.object({
   // transfert ; chaque compte peut la surcharger. Absent : « fr ».
   reply_language: z.enum(['fr', 'en']).optional(),
   scheduler: SchedulerSettingsSchema.optional(),
+  // Fenêtre anti-doublon des envois, en minutes : un message identique (même
+  // compte, destinataires, objet, corps, pièces) dans la fenêtre est refusé
+  // comme un probable appel relancé. Absent : 10 ; 0 = protection désactivée.
+  duplicate_send_window_minutes: z.number().int().min(0).max(1440).optional(),
   watcher: WatcherConfigSchema.default({
     enabled: false,
     folders: ['INBOX'],

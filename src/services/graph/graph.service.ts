@@ -19,6 +19,7 @@
 
 import type {
   AccountConfig,
+  AttachmentMeta,
   BatchEmailSaveResult,
   BulkResult,
   Email,
@@ -43,6 +44,8 @@ import {
 } from '../../utils/headers.js';
 import type { AttachmentInput, ResolvedAttachment } from '../attachment-resolver.js';
 import { resolveAttachments } from '../attachment-resolver.js';
+import type { AttachmentRef } from '../attachment-select.js';
+import { realAttachments, selectAttachment, uniqueAttachmentNames } from '../attachment-select.js';
 import {
   assertSafeDestination,
   defaultEmlFilename,
@@ -106,6 +109,32 @@ interface GraphAttachment {
   contentBytes?: string;
   contentId?: string;
   isInline?: boolean;
+}
+
+/**
+ * Champs d'une pièce jointe listée. `contentId` n'existe que sur le type
+ * dérivé fileAttachment : le préfixe de type est obligatoire dans $select.
+ */
+const ATTACHMENT_LIST_SELECT =
+  'id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId';
+
+/**
+ * Pièce jointe Graph → AttachmentMeta. Le `partId` est l'id de la pièce :
+ * stable, et seul désignateur sans ambiguïté quand deux pièces portent le
+ * même nom. Une pièce inline à cid est marquée comme sur IMAP.
+ */
+function toAttachmentMeta(a: GraphAttachment): AttachmentMeta {
+  const bare = a.contentId?.trim().replace(/^</, '').replace(/>$/, '');
+  const contentId = bare !== undefined && bare !== '' ? bare : undefined;
+  const inline = a.isInline === true && !!contentId;
+  return {
+    filename: a.name ?? 'unnamed',
+    mimeType: a.contentType ?? 'application/octet-stream',
+    size: a.size ?? 0,
+    partId: a.id,
+    ...(contentId ? { contentId } : {}),
+    ...(inline ? { inline: true } : {}),
+  };
 }
 
 /** Fields needed to build an EmailMeta — kept narrow to limit payload size. */
@@ -698,14 +727,19 @@ export default class GraphService {
       `/me/messages/${emailId}?$select=${FULL_SELECT}`,
     );
 
-    const attachments = message.hasAttachments
-      ? await client.collect<GraphAttachment>(
-          `/me/messages/${emailId}/attachments?$select=id,name,contentType,size`,
-        )
-      : [];
-
     const isHtml = (message.body?.contentType ?? '').toLowerCase() === 'html';
     const content = message.body?.content ?? '';
+
+    // `hasAttachments` de Graph ignore les pièces inline : un message dont
+    // seules des images cid (logo de signature) sont jointes y vaut false. La
+    // liste est donc aussi lue quand le corps HTML référence un `cid:`, pour
+    // que ces images soient listées — et téléchargeables — comme sur IMAP.
+    const attachments =
+      message.hasAttachments || (isHtml && /cid:/i.test(content))
+        ? await client.collect<GraphAttachment>(
+            `/me/messages/${emailId}/attachments?$select=${ATTACHMENT_LIST_SELECT}`,
+          )
+        : [];
 
     return {
       ...toEmailMeta(message),
@@ -716,11 +750,7 @@ export default class GraphService {
       ...(message.replyTo?.length ? { replyTo: toAddresses(message.replyTo) } : {}),
       ...(isHtml ? { bodyHtml: content } : { bodyText: content }),
       messageId: message.internetMessageId ?? '',
-      attachments: attachments.map((a) => ({
-        filename: a.name ?? 'unnamed',
-        mimeType: a.contentType ?? 'application/octet-stream',
-        size: a.size ?? 0,
-      })),
+      attachments: attachments.map(toAttachmentMeta),
       // Même aplatissement que le backend IMAP (la dernière occurrence gagne) ;
       // la chaîne Received complète s'obtient via `getEmailHeaders`.
       headers: flattenHeaders(toHeaderEntries(message.internetMessageHeaders)),
@@ -1729,18 +1759,22 @@ export default class GraphService {
     accountName: string,
     emailId: string,
     mailbox: string,
-    filename: string,
+    ref: AttachmentRef,
     destination: string,
     overwrite = false,
   ): Promise<{
+    path: string;
     filename: string;
     localPath: string;
     fileUrl: string;
     mimeType: string;
     size: number;
   }> {
-    const payload = await this.downloadAttachment(accountName, emailId, mailbox, filename);
-    return GraphService.writeToDisk(payload, destination, overwrite);
+    const payload = await this.downloadAttachment(accountName, emailId, mailbox, ref);
+    const written = await GraphService.writeToDisk(payload, destination, overwrite);
+    // `path` : le champ que lit save_attachment (contrat IMAP) ; il manquait,
+    // l'outil affichait un chemin vide sur un compte Graph.
+    return { path: written.localPath, ...written };
   }
 
   async saveEmailAttachments(
@@ -1753,7 +1787,7 @@ export default class GraphService {
     { filename: string; localPath: string; fileUrl: string; mimeType: string; size: number }[]
   > {
     const attachments = await this.client(accountName).collect<GraphAttachment>(
-      `/me/messages/${emailId}/attachments?$select=id,name,contentType,size`,
+      `/me/messages/${emailId}/attachments?$select=${ATTACHMENT_LIST_SELECT}`,
     );
 
     const saved: {
@@ -1764,19 +1798,25 @@ export default class GraphService {
       size: number;
     }[] = [];
 
-    // Oversized attachments are skipped, matching the IMAP path.
-    const withinBudget = attachments.filter((meta) => (meta.size ?? 0) <= maxSizeBytes);
+    // Oversized attachments are skipped, matching the IMAP path ; les images
+    // inline (logos de signature) aussi, comme sur IMAP. Les doublons de noms
+    // sont enregistrés « nom (2).ext », comme sur IMAP.
+    const withinBudget = uniqueAttachmentNames(
+      realAttachments(attachments.map(toAttachmentMeta)).filter(
+        (meta) => meta.size <= maxSizeBytes,
+      ),
+    );
 
     /* eslint-disable no-restricted-syntax, no-await-in-loop -- sequential: Graph throttles bursts */
     for (const meta of withinBudget) {
       const full = await this.client(accountName).request<GraphAttachment>(
         'GET',
-        `/me/messages/${emailId}/attachments/${meta.id}`,
+        `/me/messages/${emailId}/attachments/${meta.partId ?? ''}`,
       );
       saved.push(
         await GraphService.writeToDisk(
           {
-            filename: full.name ?? 'unnamed',
+            filename: meta.filename,
             mimeType: full.contentType ?? 'application/octet-stream',
             contentBase64: full.contentBytes ?? '',
           },
@@ -1836,28 +1876,27 @@ export default class GraphService {
     this.folderCache.clear();
   }
 
+  /**
+   * Télécharge UNE pièce jointe, désignée par son id (`partId`, prioritaire)
+   * ou par son nom — refusé, liste des candidates à l'appui, quand plusieurs
+   * pièces le portent. Même contrat que le backend IMAP.
+   */
   async downloadAttachment(
     accountName: string,
     emailId: string,
     _mailbox: string,
-    filename: string,
+    ref: AttachmentRef,
     maxSizeBytes = 25 * 1024 * 1024,
   ): Promise<{ filename: string; mimeType: string; contentBase64: string; size: number }> {
     const client = this.client(accountName);
     const attachments = await client.collect<GraphAttachment>(
-      `/me/messages/${emailId}/attachments?$select=id,name,contentType,size`,
+      `/me/messages/${emailId}/attachments?$select=${ATTACHMENT_LIST_SELECT}`,
     );
-    const match = attachments.find((a) => a.name === filename);
-    if (!match) {
+    const match = selectAttachment(attachments.map(toAttachmentMeta), ref);
+    const { filename } = match;
+    if (match.size > maxSizeBytes) {
       throw new Error(
-        `Attachment "${filename}" not found. Available: ${
-          attachments.map((a) => a.name).join(', ') || 'none'
-        }`,
-      );
-    }
-    if ((match.size ?? 0) > maxSizeBytes) {
-      throw new Error(
-        `Attachment "${filename}" is ${Math.round((match.size ?? 0) / 1024 / 1024)}MB, exceeds ` +
+        `Attachment "${filename}" is ${Math.round(match.size / 1024 / 1024)}MB, exceeds ` +
           `${Math.round(maxSizeBytes / 1024 / 1024)}MB limit`,
       );
     }
@@ -1865,7 +1904,7 @@ export default class GraphService {
     // Re-fetch the single attachment so contentBytes is included.
     const full = await client.request<GraphAttachment>(
       'GET',
-      `/me/messages/${emailId}/attachments/${match.id}`,
+      `/me/messages/${emailId}/attachments/${match.partId ?? ''}`,
     );
     return {
       filename: full.name ?? filename,

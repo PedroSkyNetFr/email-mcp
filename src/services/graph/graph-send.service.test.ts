@@ -200,6 +200,42 @@ describe('GraphSendService', () => {
       expect(fake.calls.at(-1)?.path).toBe('/me/messages/D3/send');
     });
 
+    it('includeAttachments=true carries both same-named attachments, the second renamed', async () => {
+      const file = (bytes: string) => ({
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: 'image001.png',
+        contentType: 'image/png',
+        contentBytes: Buffer.from(bytes).toString('base64'),
+      });
+      const fake = fakeClient(
+        {
+          'GET /me/messages/AAA/attachments/a1': file('one'),
+          'GET /me/messages/AAA/attachments/a2': file('two'),
+          'POST /me/messages/AAA/createReply': { id: 'D4' },
+        },
+        {
+          '/me/messages/AAA/attachments': [
+            { id: 'a1', name: 'image001.png', size: 3 },
+            { id: 'a2', name: 'image001.png', size: 3 },
+          ],
+        },
+      );
+      await service(fake.client).replyToEmail('work', {
+        emailId: 'AAA',
+        body: 'x',
+        includeAttachments: true,
+      });
+
+      const added = fake.calls
+        .filter((c) => c.path === '/me/messages/D4/attachments')
+        .map((c) => c.body as { name: string; contentBytes: string });
+      expect(added.map((a) => a.name)).toEqual(['image001.png', 'image001 (2).png']);
+      expect(added.map((a) => Buffer.from(a.contentBytes, 'base64').toString())).toEqual([
+        'one',
+        'two',
+      ]);
+    });
+
     it('includeAttachments=true refuses an attached Outlook item explicitly', async () => {
       const fake = fakeClient(
         {

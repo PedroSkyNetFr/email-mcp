@@ -15,6 +15,7 @@ import type { IMailService } from '../services/mail-service.types.js';
 import type RemindersService from '../services/reminders.service.js';
 import type SchedulerService from '../services/scheduler.service.js';
 import type { SearchPresetRegistry } from '../services/search-presets.js';
+import SendGuard, { DEFAULT_DUPLICATE_WINDOW_MINUTES } from '../services/send-guard.js';
 import type { ISendService } from '../services/send-service.types.js';
 import type TemplateService from '../services/template.service.js';
 import type WatcherService from '../services/watcher.service.js';
@@ -90,11 +91,18 @@ export default function registerAllTools(
 
   // Write tools — skipped in read-only mode
   if (!readOnly) {
-    registerSendTools(server, smtpService, imapService);
+    // Une seule garde anti-doublon pour tous les outils d'envoi : un même
+    // message envoyé par send_email puis apply_template est le même doublon.
+    // L'état est persistant (répertoire d'état XDG), il survit aux
+    // redémarrages du serveur par Claude Desktop.
+    const sendGuard = new SendGuard({
+      windowMinutes: config.settings.duplicateSendWindowMinutes ?? DEFAULT_DUPLICATE_WINDOW_MINUTES,
+    });
+    registerSendTools(server, smtpService, imapService, sendGuard);
     registerManageTools(server, imapService);
     registerLabelTools(server, imapService);
     registerBulkTools(server, imapService);
-    registerDraftTools(server, imapService, smtpService);
+    registerDraftTools(server, imapService, smtpService, sendGuard);
     // Source IMAP ou Graph, destination IMAP (mêmes briques que la copie).
     registerCrossAccountMoveTool(server, connections, config, imapService);
     // Copie non destructive : source IMAP ou Graph, destination IMAP.
@@ -103,8 +111,8 @@ export default function registerAllTools(
     // belong with the write tools; each refuses a non-Graph account itself.
     registerExchangeTools(server, graphService, config);
     registerFolderTools(server, imapService);
-    registerTemplateWriteTools(server, templateService, imapService, smtpService);
-    registerSchedulerTools(server, schedulerService);
+    registerTemplateWriteTools(server, templateService, imapService, smtpService, sendGuard);
+    registerSchedulerTools(server, schedulerService, sendGuard);
     // Can send new-email metadata to a webhook and rewrite config.toml
     registerWatcherWriteTools(server, hooksService);
   }

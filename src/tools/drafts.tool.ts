@@ -8,8 +8,10 @@ import audit from '../safety/audit.js';
 import { validateInputLength } from '../safety/validation.js';
 
 import type { IMailService } from '../services/mail-service.types.js';
+import SendGuard, { sendFingerprint } from '../services/send-guard.js';
 import type { ISendService } from '../services/send-service.types.js';
 import { adaptAttachmentInput, attachmentInputSchema } from './attachment-input.js';
+import { runGuardedSend, sendGuardParams } from './send-guard-params.js';
 import describeSendOutcome from './send-outcome.js';
 
 // ---------------------------------------------------------------------------
@@ -20,6 +22,8 @@ export default function registerDraftTools(
   server: McpServer,
   imapService: IMailService,
   smtpService: ISendService,
+  // Garde anti-doublon de send_draft ; désactivée quand rien n'est fourni (tests).
+  sendGuard: SendGuard = new SendGuard({ windowMinutes: 0 }),
 ): void {
   // ---------------------------------------------------------------------------
   // save_draft
@@ -254,7 +258,9 @@ export default function registerDraftTools(
         'Send an existing draft email and remove it from Drafts. The draft is fetched, sent via SMTP, then deleted. ' +
         'Once the message is sent, the result never reports a failure: if filing the Sent copy failed the draft ' +
         'is kept, and if deleting the draft failed a warning says so — in both cases the message WAS sent, do not ' +
-        'resend it. Use list_emails with the Drafts mailbox to find draft IDs.',
+        'resend it. Use list_emails with the Drafts mailbox to find draft IDs. Sending the same draft id ' +
+        'again within duplicate_send_window_minutes (default 10) is refused as a probable retry (pass ' +
+        'allow_duplicate: true to override); idempotency_key makes a retry return the first result.',
       inputSchema: z.object({
         account: z.string().describe('Account name from list_accounts'),
         id: z
@@ -264,12 +270,41 @@ export default function registerDraftTools(
               'opaque string id on Graph-backed (Exchange) accounts.',
           ),
         mailbox: z.string().optional().describe('Drafts folder path (auto-detected if omitted)'),
+        ...sendGuardParams,
       }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ account, id, mailbox }) => {
+    async ({
+      account,
+      id,
+      mailbox,
+      idempotency_key: idempotencyKey,
+      allow_duplicate: allowDuplicate,
+    }) => {
       try {
-        const result = await smtpService.sendDraft(account, id, mailbox);
+        // Un brouillon se définit par son id : le renvoyer deux fois, c'est
+        // deux fois le même message (sur IMAP, le premier envoi le supprime
+        // d'ordinaire — sauf quand la copie dans Envoyés a échoué).
+        const guarded = await runGuardedSend(
+          sendGuard,
+          {
+            account,
+            tool: 'send_draft',
+            wording: { what: 'draft' },
+            idempotencyKey,
+            allowDuplicate,
+            fingerprint: sendFingerprint({
+              kind: 'draft',
+              account,
+              draftId: String(id),
+              mailbox: mailbox ?? '',
+            }),
+          },
+          async () => smtpService.sendDraft(account, id, mailbox),
+          (r) => r.messageId,
+        );
+        if ('stop' in guarded) return guarded.stop;
+        const { result } = guarded;
 
         await audit.log('send_draft', account, { id, mailbox }, 'ok');
 

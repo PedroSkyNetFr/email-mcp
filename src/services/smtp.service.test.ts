@@ -1124,19 +1124,48 @@ describe('SmtpService — envoi et brouillons', () => {
       expect(transport.sendMail).not.toHaveBeenCalled();
     });
 
-    it('fetches a duplicated filename once and warns about the second part', async () => {
+    it('carries BOTH same-named attachments by partId and renames the second one', async () => {
+      // Cas Outlook : deux image001.png, distinctes par leur seul numéro de partie.
       const imap = imapWith({
         attachments: [
-          { filename: 'scan.pdf', mimeType: 'application/pdf', size: 1 },
-          { filename: 'scan.pdf', mimeType: 'application/pdf', size: 1 },
+          { filename: 'image001.png', mimeType: 'image/png', size: 1, partId: '2' },
+          { filename: 'image001.png', mimeType: 'image/png', size: 1, partId: '3' },
+          // Image inline à cid : listée par get_email, jamais reprise.
+          {
+            filename: 'logo.png',
+            mimeType: 'image/png',
+            size: 1,
+            partId: '1.2',
+            contentId: 'logo@x',
+            inline: true,
+          },
         ],
       });
+      imap.downloadAttachment.mockImplementation(
+        async (_a: string, _id: string, _mb: string, ref: { partId: string }) => ({
+          filename: 'image001.png',
+          mimeType: 'image/png',
+          size: 4,
+          contentBase64: Buffer.from(`bytes of part ${ref.partId}`).toString('base64'),
+        }),
+      );
       const service = new SmtpService(connections, rateLimiter, imap);
 
       const result = await service.forwardEmail('test', { emailId: '42', to: ['f@example.com'] });
 
-      expect(imap.downloadAttachment).toHaveBeenCalledTimes(1);
-      expect(result.warnings?.[0]).toMatch(/several attachments named "scan\.pdf"/);
+      expect(imap.downloadAttachment).toHaveBeenCalledTimes(2);
+      expect(imap.downloadAttachment.mock.calls.map((c) => c[3])).toEqual([
+        { partId: '2' },
+        { partId: '3' },
+      ]);
+      expect(result.warnings ?? []).toEqual([]);
+      const parsed = await sentParsed();
+      const names = parsed.attachments.map((a) => a.filename);
+      expect(names).toEqual(['image001.png', 'image001 (2).png']);
+      expect(parsed.attachments.map((a) => a.content.toString())).toEqual([
+        'bytes of part 2',
+        'bytes of part 3',
+      ]);
     });
 
     it('forwards the body alone with includeAttachments=false', async () => {

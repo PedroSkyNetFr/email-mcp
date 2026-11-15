@@ -552,3 +552,116 @@ describe('GraphService.getEmail — Reply-To', () => {
     expect(email.replyTo).toBeUndefined();
   });
 });
+
+describe('GraphService — pièces jointes adressées par id (partId)', () => {
+  const listed = [
+    { id: 'att-1', name: 'image001.png', contentType: 'image/png', size: 100 },
+    { id: 'att-2', name: 'image001.png', contentType: 'image/png', size: 200 },
+    {
+      id: 'att-3',
+      name: 'logo.png',
+      contentType: 'image/png',
+      size: 50,
+      isInline: true,
+      contentId: '<logo@x>',
+    },
+  ];
+
+  it('getEmail exposes the attachment id as partId and marks inline cid images', async () => {
+    const { client, service } = build();
+    client.request.mockResolvedValueOnce({
+      id: 'M1',
+      from: { emailAddress: { address: 'a@example.com' } },
+      toRecipients: [],
+      hasAttachments: true,
+      body: { contentType: 'html', content: '<img src="cid:logo@x">' },
+    });
+    client.collect.mockResolvedValueOnce(listed);
+
+    const email = await service.getEmail('graph', 'M1');
+
+    expect(client.collect.mock.calls[0][0]).toContain('isInline');
+    expect(email.attachments).toEqual([
+      { filename: 'image001.png', mimeType: 'image/png', size: 100, partId: 'att-1' },
+      { filename: 'image001.png', mimeType: 'image/png', size: 200, partId: 'att-2' },
+      {
+        filename: 'logo.png',
+        mimeType: 'image/png',
+        size: 50,
+        partId: 'att-3',
+        contentId: 'logo@x',
+        inline: true,
+      },
+    ]);
+  });
+
+  it('getEmail lists inline images even when Graph says hasAttachments=false', async () => {
+    const { client, service } = build();
+    client.request.mockResolvedValueOnce({
+      id: 'M2',
+      from: { emailAddress: { address: 'a@example.com' } },
+      toRecipients: [],
+      hasAttachments: false,
+      body: { contentType: 'html', content: '<p>Hi</p><img src="cid:logo@x">' },
+    });
+    client.collect.mockResolvedValueOnce([listed[2]]);
+
+    const email = await service.getEmail('graph', 'M2');
+
+    expect(email.hasAttachments).toBe(false);
+    expect(email.attachments).toMatchObject([{ partId: 'att-3', inline: true }]);
+  });
+
+  it('downloadAttachment fetches the second same-named attachment by its id', async () => {
+    const { client, service } = build();
+    client.collect.mockResolvedValueOnce(listed);
+    client.request.mockResolvedValueOnce({
+      name: 'image001.png',
+      contentType: 'image/png',
+      contentBytes: 'QkJC',
+      size: 3,
+    });
+
+    const result = await service.downloadAttachment('graph', 'M1', 'INBOX', { partId: 'att-2' });
+
+    expect(client.request.mock.calls[0][1]).toBe('/me/messages/M1/attachments/att-2');
+    expect(result.contentBase64).toBe('QkJC');
+  });
+
+  it('downloadAttachment refuses an ambiguous name, listing both ids, and downloads nothing', async () => {
+    const { client, service } = build();
+    client.collect.mockResolvedValueOnce(listed);
+
+    await expect(
+      service.downloadAttachment('graph', 'M1', 'INBOX', 'image001.png'),
+    ).rejects.toThrow(/Ambiguous attachment name "image001\.png".*partId att-1.*partId att-2/s);
+    expect(client.request).not.toHaveBeenCalled();
+  });
+
+  it('saveEmailAttachments skips inline images and renames the duplicate', async () => {
+    const { mkdtemp, readdir, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const tmp = await mkdtemp(join(tmpdir(), 'graph-dup-'));
+    try {
+      const { client, service } = build();
+      client.collect.mockResolvedValueOnce(listed);
+      client.request.mockImplementation(async (_m: string, path: string) => ({
+        name: 'image001.png',
+        contentType: 'image/png',
+        contentBytes: Buffer.from(path).toString('base64'),
+      }));
+
+      const saved = await service.saveEmailAttachments('graph', 'M1', 'INBOX', tmp);
+
+      expect(saved.map((s) => s.filename)).toEqual(['image001.png', 'image001 (2).png']);
+      expect((await readdir(tmp)).sort()).toEqual(['image001 (2).png', 'image001.png']);
+      expect(client.request.mock.calls.map((c) => c[1])).toEqual([
+        '/me/messages/M1/attachments/att-1',
+        '/me/messages/M1/attachments/att-2',
+      ]);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});

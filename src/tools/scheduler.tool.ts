@@ -9,10 +9,17 @@ import { z } from 'zod';
 import audit from '../safety/audit.js';
 
 import type SchedulerService from '../services/scheduler.service.js';
+import SendGuard, { sendFingerprint } from '../services/send-guard.js';
+import { runGuardedSend, sendGuardParams } from './send-guard-params.js';
 
 export default function registerSchedulerTools(
   server: McpServer,
   schedulerService: SchedulerService,
+  // Garde anti-doublon des CRÉATIONS de planification (un appel relancé
+  // planifierait deux envois). L'envoi planifié lui-même n'y passe pas : le
+  // planificateur a son propre verrou (.claim), et n'est donc jamais bloqué
+  // par l'empreinte de sa propre création (espace « schedule » distinct).
+  sendGuard: SendGuard = new SendGuard({ windowMinutes: 0 }),
 ): void {
   // ---------------------------------------------------------------------------
   // schedule_email (write)
@@ -22,7 +29,10 @@ export default function registerSchedulerTools(
     'schedule_email',
     {
       description:
-        'Schedule an email to be sent at a specific time in the future. The email is queued locally and sent automatically when the time arrives.',
+        'Schedule an email to be sent at a specific time in the future. The email is queued locally and sent automatically when the time arrives. ' +
+        'Scheduling the same message (account, recipients, subject, body, send_at) again within ' +
+        'duplicate_send_window_minutes (default 10) is refused as a probable retry (allow_duplicate: true ' +
+        'to override); idempotency_key makes a retry return the first schedule_id.',
       inputSchema: z.object({
         account: z.string().describe('Account name to send from'),
         to: z.array(z.string()).min(1).describe('Recipient email addresses'),
@@ -35,20 +45,46 @@ export default function registerSchedulerTools(
         bcc: z.array(z.string()).optional().describe('BCC recipients'),
         html: z.boolean().default(false).describe('Send as HTML (default: false)'),
         in_reply_to: z.string().optional().describe('Message-ID to reply to'),
+        ...sendGuardParams,
       }),
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (params) => {
-      const scheduled = await schedulerService.schedule(params.account, {
-        to: params.to,
-        subject: params.subject,
-        body: params.body,
-        sendAt: params.send_at,
-        cc: params.cc,
-        bcc: params.bcc,
-        html: params.html,
-        inReplyTo: params.in_reply_to,
-      });
+      const guarded = await runGuardedSend(
+        sendGuard,
+        {
+          account: params.account,
+          tool: 'schedule_email',
+          wording: { what: 'scheduled email', done: 'scheduled', refLabel: 'schedule_id' },
+          idempotencyKey: params.idempotency_key,
+          allowDuplicate: params.allow_duplicate,
+          fingerprint: sendFingerprint({
+            kind: 'schedule',
+            account: params.account,
+            to: params.to,
+            cc: params.cc,
+            bcc: params.bcc,
+            subject: params.subject,
+            body: params.body,
+            html: params.html,
+            options: { sendAt: params.send_at, inReplyTo: params.in_reply_to },
+          }),
+        },
+        async () =>
+          schedulerService.schedule(params.account, {
+            to: params.to,
+            subject: params.subject,
+            body: params.body,
+            sendAt: params.send_at,
+            cc: params.cc,
+            bcc: params.bcc,
+            html: params.html,
+            inReplyTo: params.in_reply_to,
+          }),
+        (s) => s.id,
+      );
+      if ('stop' in guarded) return guarded.stop;
+      const scheduled = guarded.result;
 
       const result = {
         schedule_id: scheduled.id,

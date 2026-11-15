@@ -7,6 +7,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
+import { describeAttachments, realAttachments } from '../services/attachment-select.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import type {
   Email,
@@ -37,12 +38,6 @@ import {
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
 /**
  * Rendu d'une ligne de liste. `showPreview` : l'aperçu n'est affiché que si
  * l'appelant l'a demandé (`preview: true`) — Graph le fournit d'office, IMAP
@@ -63,8 +58,13 @@ function formatEmailMeta(email: EmailMeta, showPreview = true): string {
   const labelStr = email.labels.length > 0 ? `\n  🏷️ ${email.labels.join(', ')}` : '';
 
   let attachLine = '';
-  if (email.attachments && email.attachments.length > 0) {
-    const names = email.attachments.map((a) => a.filename);
+  // Liste : pièces « réelles » seulement (celles que marque 📎), chacune avec
+  // son partId — ce que demandent download_attachment / save_attachment.
+  const listed = realAttachments(email.attachments ?? []);
+  if (listed.length > 0) {
+    const names = listed.map((a) =>
+      a.partId !== undefined ? `${a.filename} [partId ${a.partId}]` : a.filename,
+    );
     const shown = names.slice(0, 3).join(', ');
     const extra = names.length > 3 ? ` (+${names.length - 3} more)` : '';
     attachLine = `\n  📎 Attachments: ${shown}${extra}`;
@@ -493,9 +493,9 @@ export default function registerEmailsTools(
         }
 
         if (email.attachments.length > 0) {
-          parts.push(
-            `📎 Attachments: ${email.attachments.map((a) => `${a.filename} (${a.mimeType}, ${formatSize(a.size)})`).join(', ')}`,
-          );
+          // Avec le partId de chaque pièce (seul désignateur sans ambiguïté) et
+          // les images inline marquées, pour qu'elles soient téléchargeables.
+          parts.push(`📎 Attachments: ${describeAttachments(email.attachments)}`);
         }
 
         // Indice liste / automatique : depuis l'en-tête complet, sur les deux
@@ -581,9 +581,7 @@ export default function registerEmailsTools(
               `use get_email with emailId=${emailId} and offset=${next} for the rest, or maxLength=0`,
           });
           const attachLine =
-            email.attachments.length > 0
-              ? `📎 ${email.attachments.map((a) => a.filename).join(', ')}`
-              : '';
+            email.attachments.length > 0 ? `📎 ${describeAttachments(email.attachments)}` : '';
 
           results.push(
             [

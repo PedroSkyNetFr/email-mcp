@@ -178,6 +178,11 @@ export interface AppConfig {
     replyLanguage?: ReplyLanguage;
     /** Jours d'historique d'envois programmés conservés (défaut 30 ; 0 = tout garder). */
     sentRetentionDays?: number;
+    /**
+     * Fenêtre anti-doublon des envois, en minutes (défaut 10 ; 0 = désactivée) :
+     * un envoi identique dans la fenêtre est refusé (voir services/send-guard.ts).
+     */
+    duplicateSendWindowMinutes?: number;
   };
   accounts: AccountConfig[];
   /** Saved-search presets from `[[searches]]` in config.toml. Empty when none. */
@@ -308,7 +313,22 @@ export interface EmailMeta {
 export interface AttachmentMeta {
   filename: string;
   mimeType: string;
+  /** IMAP : taille déclarée par BODYSTRUCTURE, donc ENCODÉE (~1,37× en base64). */
   size: number;
+  /**
+   * Identifiant stable de la pièce, seul désignateur sans ambiguïté (deux
+   * `image001.png` dans une signature Outlook) : numéro de partie MIME sur IMAP
+   * (« 2 », « 1.2 »), identifiant de pièce jointe sur Graph.
+   */
+  partId?: string;
+  /** Content-ID sans chevrons : ce que vise un `<img src="cid:…">` du corps. */
+  contentId?: string;
+  /**
+   * Image inline à Content-ID (logo de signature, image du corps HTML).
+   * Listée pour être téléchargeable, mais pas comptée comme pièce jointe
+   * « réelle » (hasAttachments, filtres de recherche, transfert).
+   */
+  inline?: boolean;
 }
 
 export interface Email extends EmailMeta {

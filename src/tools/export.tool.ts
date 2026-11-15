@@ -15,6 +15,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
+import { realAttachments } from '../services/attachment-select.js';
 import { toCsvRow } from '../services/csv.js';
 import { assertSafeDestination } from '../services/file-paths.js';
 import type { IMailService } from '../services/mail-service.types.js';
@@ -78,8 +79,16 @@ function flagsString(meta: EmailMeta): string {
   return flags.join('|');
 }
 
+/**
+ * Colonne `attachments` : pièces « réelles » (celles que compte
+ * has_attachments), chacune suivie de son partId — « devis.pdf#2 » — pour
+ * qu'une ligne d'export suffise à télécharger la bonne pièce, même quand deux
+ * portent le même nom.
+ */
 function attachmentsString(meta: EmailMeta): string {
-  return (meta.attachments ?? []).map((a) => a.filename).join('|');
+  return realAttachments(meta.attachments ?? [])
+    .map((a) => (a.partId !== undefined ? `${a.filename}#${a.partId}` : a.filename))
+    .join('|');
 }
 
 function columnValue(meta: EmailMeta, col: CsvColumn | DefaultColumn): string {
@@ -106,7 +115,7 @@ function columnValue(meta: EmailMeta, col: CsvColumn | DefaultColumn): string {
       return meta.preview ?? '';
     case 'size':
       // EmailMeta doesn't track size directly — fall back to summed attachment size
-      return String((meta.attachments ?? []).reduce((s, a) => s + a.size, 0));
+      return String(realAttachments(meta.attachments ?? []).reduce((s, a) => s + a.size, 0));
     case 'has_attachments':
       return meta.hasAttachments ? 'true' : 'false';
     case 'seen':

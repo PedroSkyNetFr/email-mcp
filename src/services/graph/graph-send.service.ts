@@ -24,6 +24,7 @@
 
 import type { AccountConfig, SendResult } from '../../types/index.js';
 import type { ResolvedAttachment } from '../attachment-resolver.js';
+import { uniqueAttachmentNames } from '../attachment-select.js';
 import { assertMessageSize, estimateEncodedMessageSize } from '../send-limit.js';
 import { applyAccountSignature } from '../signature-loader.js';
 import type GraphClient from './graph.client.js';
@@ -430,7 +431,9 @@ export default class GraphSendService {
     const original = options.includeAttachments
       ? await GraphSendService.fetchFileAttachments(client, options.emailId)
       : [];
-    const attachments = [...original, ...signed.attachments];
+    // Chaque pièce de l'original est reprise par son id (doublons de noms
+    // compris) ; les doublons sont renommés « nom (2).ext » pour le destinataire.
+    const attachments = uniqueAttachmentNames([...original, ...signed.attachments]);
     assertMessageSize(account, estimateEncodedMessageSize(signed.body, attachments), attachments);
 
     const verb = options.replyAll ? 'replyAll' : 'reply';
@@ -507,7 +510,9 @@ export default class GraphSendService {
     const original = options.includeAttachments
       ? await GraphSendService.fetchFileAttachments(client, options.emailId)
       : [];
-    const attachments = [...original, ...signed.attachments];
+    // Chaque pièce de l'original est reprise par son id (doublons de noms
+    // compris) ; les doublons sont renommés « nom (2).ext » pour le destinataire.
+    const attachments = uniqueAttachmentNames([...original, ...signed.attachments]);
     const bcc = toRecipients(options.bcc);
 
     const createVerb = options.replyAll ? 'createReplyAll' : 'createReply';

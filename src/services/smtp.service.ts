@@ -25,6 +25,7 @@ import {
 } from '../utils/quote.js';
 import { forwardSubject, replySubject } from '../utils/subject-prefix.js';
 import type { ResolvedAttachment } from './attachment-resolver.js';
+import { realAttachments, uniqueAttachmentNames } from './attachment-select.js';
 import type ImapService from './imap.service.js';
 import { assertMessageSize, explainSmtpSizeRejection } from './send-limit.js';
 import { applyAccountSignature, shouldAppendSignature } from './signature-loader.js';
@@ -452,7 +453,10 @@ export default class SmtpService {
       references,
       body,
       html: signed.html,
-      attachments: signed.attachments,
+      // Doublons de noms (pièces de l'original + pièces ajoutées) renommés
+      // « nom (2).ext » : le destinataire distingue ce que l'original ne
+      // distinguait que par numéro de partie.
+      attachments: uniqueAttachmentNames(signed.attachments),
       warnings: fetched.warnings,
     };
   }
@@ -542,7 +546,7 @@ export default class SmtpService {
       parts = { text: forwardAsText(options.body, original, lang) };
     }
 
-    const attachments = [...fetched.attachments, ...signatureAttachments];
+    const attachments = uniqueAttachmentNames([...fetched.attachments, ...signatureAttachments]);
     const ccAddrs = options.cc ?? [];
     const mailOptions: ComposeOptions = {
       from: fromAddress(account),
@@ -566,11 +570,15 @@ export default class SmtpService {
    * Télécharge les pièces jointes de l'original (réponse avec
    * includeAttachments, transfert).
    *
-   * Dédoublonnage par nom de fichier : `downloadAttachment` cible une partie
-   * MIME PAR SON NOM et renvoie la première trouvée ; deux pièces de même nom
-   * coûtaient deux téléchargements et joignaient deux fois les octets de la
-   * première. Une seule pièce par nom est donc reprise, et l'écart est signalé
-   * dans `warnings` (l'adressage par numéro de partie n'existe pas encore).
+   * Chaque pièce est désignée par son numéro de partie MIME : deux pièces de
+   * même nom (les `image001.png` des signatures Outlook) sont TOUTES reprises,
+   * avec leurs propres octets — autrefois seule la première l'était, avec un
+   * avertissement. À l'envoi, les doublons sont renommés « image001 (2).png »
+   * (`uniqueAttachmentNames`) pour que le destinataire les distingue.
+   *
+   * Les images inline à cid restent derrière, comme avant qu'elles soient
+   * listées : la réponse et le transfert ne reprennent pas le HTML qui les
+   * référence, elles deviendraient des pièces jointes parasites.
    *
    * Stricte : le moindre échec lève une erreur qui nomme chaque pièce, et rien
    * n'est envoyé.
@@ -582,28 +590,16 @@ export default class SmtpService {
     mailbox: string,
     context: 'reply' | 'draft a reply' | 'forward',
   ): Promise<{ attachments: ResolvedAttachment[]; warnings: string[] }> {
-    const allNames = original.attachments.map((meta) => meta.filename);
-    const filenames = [...new Set(allNames)];
-    if (filenames.length === 0) return { attachments: [], warnings: [] };
-
-    const warnings: string[] = [];
-    const duplicates = filenames.filter(
-      (name) => allNames.filter((candidate) => candidate === name).length > 1,
-    );
-    if (duplicates.length > 0) {
-      warnings.push(
-        `The original carries several attachments named ${duplicates.map((d) => `"${d}"`).join(', ')}; ` +
-          'only the first of each name was included (attachments are addressed by filename).',
-      );
-    }
+    const metas = realAttachments(original.attachments);
+    if (metas.length === 0) return { attachments: [], warnings: [] };
 
     const results = await Promise.allSettled(
-      filenames.map(async (filename) =>
+      metas.map(async (meta) =>
         this.imapService.downloadAttachment(
           accountName,
           emailId,
           mailbox,
-          filename,
+          meta.partId !== undefined ? { partId: meta.partId } : meta.filename,
           ORIGINAL_ATTACHMENT_MAX_BYTES,
         ),
       ),
@@ -612,13 +608,13 @@ export default class SmtpService {
     const failures = results.flatMap((result, i) =>
       result.status === 'rejected'
         ? [
-            `"${filenames[i]}" (${result.reason instanceof Error ? result.reason.message : String(result.reason)})`,
+            `"${metas[i].filename}"${metas[i].partId !== undefined ? ` (partId ${metas[i].partId})` : ''} (${result.reason instanceof Error ? result.reason.message : String(result.reason)})`,
           ]
         : [],
     );
     if (failures.length > 0) {
       throw new Error(
-        `Cannot ${context}: ${failures.length} of ${filenames.length} attachment(s) of the original ` +
+        `Cannot ${context}: ${failures.length} of ${metas.length} attachment(s) of the original ` +
           `could not be fetched — ${failures.join('; ')}. Nothing was sent. Retry, or pass ` +
           `includeAttachments=false to ${context} without them.`,
       );
@@ -635,7 +631,7 @@ export default class SmtpService {
           ]
         : [],
     );
-    return { attachments, warnings };
+    return { attachments, warnings: [] };
   }
 
   /**

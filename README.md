@@ -351,6 +351,7 @@ against code running as the same user, which can run the same command.
 | `rate_limit` | `10` | Max messages sent per minute and per account (SMTP sends). |
 | `read_only` | `false` | Read-only mode: write tools are not registered and the scheduled queue is not processed ([details](#read-only-mode)). |
 | `reply_language` | `"fr"` | Language of the line introducing a quoted original and of the forward header: `"fr"` or `"en"`; overridable per account. |
+| `duplicate_send_window_minutes` | `10` | An identical message sent again within this many minutes is refused as a probable retried call; `0` turns the protection off ([duplicate sends](#duplicate-sends-and-retried-calls)). |
 | `scheduler.sent_retention_days` | `30` | Days of sent scheduled-email history kept in `scheduled/sent/`; `0` keeps everything ([scheduled sending](#scheduled-sending)). |
 | `watcher.enabled` | `false` | IMAP IDLE watcher. |
 | `watcher.folders` | `["INBOX"]` | Folders watched in each account. |
@@ -579,8 +580,8 @@ Microsoft Graph does not serve message headers in a listing.
 | `export_search` | Search results to a CSV or NDJSON file. | both (mixable) | ✅ |
 | `save_email` | One message as an `.eml` file (exact source). | both | ✅ |
 | `save_emails_from_search` | Every message of a search as `.eml` files. | both (one backend per call) | ✅ |
-| `download_attachment` | One attachment, returned base64 (≤ 5 MB). | both | ✅ |
-| `save_attachment` | One attachment written to disk, no size cap. | both | ✅ |
+| `download_attachment` | One attachment by `partId` (or unambiguous filename), returned base64 (≤ 5 MB). | both | ✅ |
+| `save_attachment` | One attachment by `partId` (or unambiguous filename) written to disk, no size cap. | both | ✅ |
 | `save_all_attachments_from_search` | Every attachment of a search to a folder. | IMAP | ✅ |
 
 ### Composing and sending
@@ -861,7 +862,8 @@ while the data stays on disk, so large exports do not fill the conversation.
   default, 50 000 at most. Default CSV columns: `id`, `account`, `date`, `from`,
   `subject`, `labels`, `attachments`, `has_attachments`, `seen`, `flagged`;
   `columns` picks among `id`, `account`, `date`, `from`, `to`, `subject`, `flags`,
-  `labels`, `attachments`, `preview`, `size` (on IMAP, `preview` reads the first
+  `labels`, `attachments`, `preview`, `size` (the `attachments` column lists
+  `name#partId`, e.g. `quote.pdf#2`; on IMAP, `preview` reads the first
   1.5 KB of each message's text part). NDJSON writes the full record, body
   preview included on both backends (on IMAP, that same partial read for every
   exported message). Default
@@ -875,12 +877,15 @@ while the data stays on disk, so large exports do not fill the conversation.
   answer gives `matched` (what the search returned) next to `files_saved`: a low
   `matched` points at the query, a gap between the two points at the writes.
 - **`save_attachment`** — streams the file to disk with no size cap (unlike
-  `download_attachment`, base64 and 5 MB). `open: true` opens it afterwards
+  `download_attachment`, base64 and 5 MB). Both take the attachment's `partId`
+  ([details](#addressing-an-attachment-partid)). `open: true` opens it afterwards
   (macOS). An existing file gets a `-1`, `-2` suffix unless `overwrite: true`.
 - **`save_all_attachments_from_search`** — every attachment of the matches,
   optionally narrowed by `attachment_filename` / `attachment_mimetype`, into
   `~/Downloads/email-attachments-<timestamp>/`, with the same `organize_by`
-  values; `max_emails` 1000 by default.
+  values; `max_emails` 1000 by default. Each attachment is fetched by its
+  `partId`, so two attachments with the same name are both saved; inline images
+  (signature logos) are skipped.
 
 ### Where files may be written
 
@@ -908,7 +913,7 @@ not be able to steer a write into a startup folder.
 "attachments": [
   { "path": "C:\\Docs\\quote.pdf" },                                     // local file
   { "content_base64": "JVBERi0…", "filename": "note.pdf" },             // bytes
-  { "source_email_id": "4711", "source_mailbox": "INBOX", "filename": "plan.pdf" } // from a message, server side
+  { "source_email_id": "4711", "source_mailbox": "INBOX", "part_id": "2" } // from a message, server side
 ]
 ```
 
@@ -917,9 +922,32 @@ travelling through the conversation. `reply_email` can re-attach the original's
 files with `includeAttachments: true`; `forward_email` carries them by default
 (`includeAttachments: false` forwards the body alone). Both are strict: if one
 attachment cannot be fetched or exceeds 25 MB, nothing is sent and the error
-names it. Attachments are addressed by filename, so when the original carries two
-attachments with the same name only the first is included, with a warning. On
+names it. Every attachment of the original is fetched by its `partId`, so two
+attachments with the same name (the `image001.png` pair of an Outlook signature)
+are both carried, and the second is renamed `image001 (2).png` so the recipient
+can tell them apart (on Graph, `forward_email` lets Exchange copy the originals,
+names unchanged). Inline images of the original stay behind, as before. On
 Graph accounts, attachments over 3 MB go through an upload session.
+
+### Addressing an attachment (`partId`)
+
+`get_email` lists each attachment with a stable `partId` — the MIME part number
+on IMAP (`2`, `1.2`), the attachment id on Graph:
+
+```text
+📎 Attachments: image001.png (image/png, 4.1KB, partId 2), image001.png (image/png, 6.0KB, partId 3),
+   logo.png (image/png, 2.3KB, partId 1.2, inline cid:logo.png@01D9)
+```
+
+- `download_attachment` and `save_attachment` take `partId` (preferred) or
+  `filename`; the `source_email_id` attachment form takes `part_id` or
+  `filename`. A filename carried by several attachments is **refused**, with
+  the name, type, size and `partId` of each candidate — never "the first one".
+- Inline images referenced by the HTML body (`cid:`, typically signature logos)
+  are listed, marked `inline` with their cid, so they can be downloaded. They
+  still do not count as attachments: `has_attachment`, `attachment_filename`,
+  `attachment_mimetype`, the 📎 marker, list views, exports and bulk saves see
+  exactly the attachments they saw before.
 
 ### Size limit
 
@@ -982,6 +1010,34 @@ base64-encoded, which adds about 37 % — must fit the size limit:
   Sent Items before sending again (a scheduled send is then marked failed, not
   retried). A clear refusal (4xx) deletes the draft — Graph moves it to Deleted
   Items.
+
+### Duplicate sends and retried calls
+
+An MCP client that retries a call — a timeout, a reconnection, Claude Desktop
+restarting the server — looks exactly like a new request, and the recipient
+would get the message twice. `send_email`, `reply_email`, `forward_email`,
+`send_draft`, `apply_template` (`send`) and `schedule_email` are therefore
+guarded, the same way on IMAP/SMTP and Graph accounts:
+
+- **Automatic** (Claude Desktop sends no key): a fingerprint (SHA-256) of the
+  account, the recipients (sorted, lower-cased), subject, body and attachment
+  bytes — plus the original message for a reply or forward, the draft id for
+  `send_draft` — is kept after each send. The same fingerprint within
+  `duplicate_send_window_minutes` (10 by default) is refused: *identical to an
+  email already sent at 14:32, Message-ID …; pass `allow_duplicate: true` if
+  this is intended*.
+- **`idempotency_key`** (optional): a retry with the same key within the window
+  returns the result of the first send without sending again; the same key for a
+  different message is refused.
+- A fingerprint is recorded only **after** a successful send — or after a Graph
+  send whose outcome is uncertain, so that a blind resend is blocked too. A clean
+  failure records nothing and never blocks the retry.
+- Scheduled sends are not affected: creating a schedule is guarded on its own,
+  and the scheduler sends through its own lock.
+- State lives in `~/.local/state/email-mcp/send-guard.json` (survives restarts,
+  shared by every instance), written atomically, entries purged after 24 h. It
+  holds fingerprints and message ids only — never recipients, subjects or bodies.
+  `duplicate_send_window_minutes = 0` turns the whole protection off.
 
 ### Inline images (`cid`)
 
@@ -1331,6 +1387,8 @@ setting.
   before acting; `delete_email` goes to Trash unless `permanent: true`; calendar
   and reminder writes on macOS show a native confirmation dialog.
 - **Rate limit** — `rate_limit` messages per minute and per account on SMTP sends.
+- **Duplicate sends** — an identical message sent again within
+  `duplicate_send_window_minutes` is refused ([details](#duplicate-sends-and-retried-calls)).
 - **Disk writes** — the [allow-list](#where-files-may-be-written) above.
 - **Audit log** — write operations are appended to
   `~/.local/share/email-mcp/audit.log`, sensitive fields redacted.

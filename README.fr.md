@@ -361,6 +361,7 @@ la même commande.
 | `rate_limit` | `10` | Nombre maximal de messages envoyés par minute et par compte (envois SMTP). |
 | `read_only` | `false` | Mode lecture seule : les outils d'écriture ne sont pas enregistrés et la file des envois programmés n'est pas traitée ([détails](#mode-lecture-seule)). |
 | `reply_language` | `"fr"` | Langue de la ligne qui introduit l'original cité et de l'en-tête de transfert : `"fr"` ou `"en"` ; surchargeable par compte. |
+| `duplicate_send_window_minutes` | `10` | Un message identique renvoyé dans ce délai (en minutes) est refusé comme un probable appel relancé ; `0` désactive la protection ([envois en double](#envois-en-double-et-appels-relancés)). |
 | `scheduler.sent_retention_days` | `30` | Jours d'historique d'envois programmés gardés dans `scheduled/sent/` ; `0` garde tout ([envoi programmé](#envoi-programmé)). |
 | `watcher.enabled` | `false` | Surveillance IMAP IDLE. |
 | `watcher.folders` | `["INBOX"]` | Dossiers surveillés dans chaque compte. |
@@ -594,8 +595,8 @@ en-têtes d'un message en liste.
 | `export_search` | Résultats d'une recherche dans un fichier CSV ou NDJSON. | both (mélangeables) | ✅ |
 | `save_email` | Un message en fichier `.eml` (source exacte). | both | ✅ |
 | `save_emails_from_search` | Chaque message d'une recherche en fichiers `.eml`. | both (un backend par appel) | ✅ |
-| `download_attachment` | Une pièce jointe, renvoyée en base64 (≤ 5 Mo). | both | ✅ |
-| `save_attachment` | Une pièce jointe écrite sur disque, sans limite de taille. | both | ✅ |
+| `download_attachment` | Une pièce jointe désignée par `partId` (ou par un nom sans ambiguïté), renvoyée en base64 (≤ 5 Mo). | both | ✅ |
+| `save_attachment` | Une pièce jointe désignée par `partId` (ou par un nom sans ambiguïté), écrite sur disque, sans limite de taille. | both | ✅ |
 | `save_all_attachments_from_search` | Toutes les pièces jointes d'une recherche dans un dossier. | IMAP | ✅ |
 
 ### Rédaction et envoi
@@ -886,7 +887,8 @@ conversation.
   5000 par défaut, 50 000 au plus. Colonnes CSV par défaut : `id`, `account`,
   `date`, `from`, `subject`, `labels`, `attachments`, `has_attachments`, `seen`,
   `flagged` ; `columns` choisit parmi `id`, `account`, `date`, `from`, `to`,
-  `subject`, `flags`, `labels`, `attachments`, `preview`, `size` (sur IMAP, `preview`
+  `subject`, `flags`, `labels`, `attachments`, `preview`, `size` (la colonne
+  `attachments` liste `nom#partId`, par exemple `devis.pdf#2` ; sur IMAP, `preview`
   lit les 1,5 premiers Ko de la partie texte de chaque message). Le NDJSON écrit
   l'enregistrement complet, aperçu du corps compris sur les deux backends (sur
   IMAP, au prix de cette même lecture partielle pour chaque message exporté).
@@ -904,11 +906,14 @@ conversation.
 - **`save_attachment`** — écrit le fichier sur disque en flux, sans limite de
   taille (contrairement à `download_attachment`, en base64 et limité à 5 Mo).
   `open: true` l'ouvre ensuite (macOS). Un fichier existant reçoit un suffixe
-  `-1`, `-2` sauf `overwrite: true`.
+  `-1`, `-2` sauf `overwrite: true`. Les deux outils acceptent le `partId` de la
+  pièce ([détails](#désigner-une-pièce-jointe-partid)).
 - **`save_all_attachments_from_search`** — toutes les pièces jointes des
   correspondances, éventuellement restreintes par `attachment_filename` /
   `attachment_mimetype`, dans `~/Downloads/email-attachments-<horodatage>/`, avec
-  les mêmes valeurs de `organize_by` ; `max_emails` 1000 par défaut.
+  les mêmes valeurs de `organize_by` ; `max_emails` 1000 par défaut. Chaque pièce
+  est récupérée par son `partId` : deux pièces de même nom sont toutes deux
+  enregistrées ; les images inline (logos de signature) sont ignorées.
 
 ### Où les fichiers peuvent être écrits
 
@@ -939,7 +944,7 @@ trois formes :
 "attachments": [
   { "path": "C:\\Docs\\devis.pdf" },                                     // fichier local
   { "content_base64": "JVBERi0…", "filename": "note.pdf" },             // octets
-  { "source_email_id": "4711", "source_mailbox": "INBOX", "filename": "plan.pdf" } // depuis un message, côté serveur
+  { "source_email_id": "4711", "source_mailbox": "INBOX", "part_id": "2" } // depuis un message, côté serveur
 ]
 ```
 
@@ -948,10 +953,34 @@ octets transitent par la conversation. `reply_email` peut rejoindre les fichiers
 de l'original avec `includeAttachments: true` ; `forward_email` les reprend par
 défaut (`includeAttachments: false` transfère le corps seul). Les deux sont
 stricts : si une pièce ne peut pas être récupérée ou dépasse 25 Mo, rien n'est
-envoyé et l'erreur la nomme. Les pièces sont désignées par leur nom de fichier :
-quand l'original en porte deux de même nom, seule la première est reprise, avec
-un avertissement. Sur les comptes Graph, les pièces jointes de plus de 3 Mo
+envoyé et l'erreur la nomme. Chaque pièce de l'original est récupérée par son
+`partId` : deux pièces de même nom (la paire `image001.png` d'une signature
+Outlook) sont toutes deux reprises, la seconde renommée `image001 (2).png` pour
+que le destinataire les distingue (sur Graph, `forward_email` laisse Exchange
+recopier les originaux, noms inchangés). Les images inline de l'original restent
+derrière, comme avant. Sur les comptes Graph, les pièces jointes de plus de 3 Mo
 passent par une session de téléversement.
+
+### Désigner une pièce jointe (`partId`)
+
+`get_email` liste chaque pièce avec un `partId` stable — le numéro de partie
+MIME sur IMAP (`2`, `1.2`), l'identifiant de pièce jointe sur Graph :
+
+```text
+📎 Attachments: image001.png (image/png, 4.1KB, partId 2), image001.png (image/png, 6.0KB, partId 3),
+   logo.png (image/png, 2.3KB, partId 1.2, inline cid:logo.png@01D9)
+```
+
+- `download_attachment` et `save_attachment` acceptent `partId` (à préférer) ou
+  `filename` ; la forme `source_email_id` accepte `part_id` ou `filename`. Un nom
+  porté par plusieurs pièces est **refusé**, avec le nom, le type, la taille et
+  le `partId` de chaque candidate — jamais « la première ».
+- Les images inline référencées par le corps HTML (`cid:`, typiquement les logos
+  de signature) sont listées, marquées `inline` avec leur cid, pour pouvoir être
+  téléchargées. Elles ne comptent toujours pas comme pièces jointes :
+  `has_attachment`, `attachment_filename`, `attachment_mimetype`, le marqueur 📎,
+  les listes, les exports et les sauvegardes en lot voient exactement les pièces
+  qu'ils voyaient avant.
 
 ### Limite de taille
 
@@ -967,6 +996,35 @@ taille :
 - **Graph** : 35 Mo (limite d'envoi par défaut d'Exchange Online, que Graph
   n'annonce pas), ou `max_message_mb` s'il est renseigné. Un message plus gros
   est refusé avant tout envoi, avec la taille de chaque pièce.
+
+### Envois en double et appels relancés
+
+Un client MCP qui relance un appel — délai dépassé, reconnexion, Claude Desktop
+qui redémarre le serveur — ressemble en tout point à une nouvelle demande, et le
+destinataire recevrait le message deux fois. `send_email`, `reply_email`,
+`forward_email`, `send_draft`, `apply_template` (`send`) et `schedule_email`
+sont donc protégés, de la même façon sur les comptes IMAP/SMTP et Graph :
+
+- **Automatiquement** (Claude Desktop n'envoie pas de clé) : une empreinte
+  (SHA-256) du compte, des destinataires (triés, en minuscules), de l'objet, du
+  corps et des octets des pièces jointes — plus le message d'origine pour une
+  réponse ou un transfert, l'id du brouillon pour `send_draft` — est gardée après
+  chaque envoi. La même empreinte dans les `duplicate_send_window_minutes`
+  (10 par défaut) est refusée : *identical to an email already sent at 14:32,
+  Message-ID … ; pass `allow_duplicate: true` if this is intended*.
+- **`idempotency_key`** (facultatif) : un nouvel essai avec la même clé dans la
+  fenêtre renvoie le résultat du premier envoi sans renvoyer ; la même clé pour
+  un autre message est refusée.
+- L'empreinte n'est enregistrée qu'**après** un envoi réussi — ou après un envoi
+  Graph à l'issue incertaine, pour bloquer aussi un renvoi à l'aveugle. Un échec
+  net n'enregistre rien et ne bloque jamais un nouvel essai.
+- Les envois programmés ne sont pas concernés : la création d'une planification
+  est protégée à part, et le planificateur envoie sous son propre verrou.
+- L'état est dans `~/.local/state/email-mcp/send-guard.json` (il survit aux
+  redémarrages et sert à toutes les instances), écrit de façon atomique, purgé
+  au-delà de 24 h. Il ne contient que des empreintes et des identifiants de
+  message — jamais destinataires, objets ni corps.
+  `duplicate_send_window_minutes = 0` désactive toute la protection.
 
 ### Réponses, transferts et suites de l'envoi
 
@@ -1386,6 +1444,8 @@ boîte. `email-mcp scheduler check` envoie aussi quel que soit ce réglage.
   affiche une boîte de confirmation native.
 - **Limite d'envoi** — `rate_limit` messages par minute et par compte pour les
   envois SMTP.
+- **Envois en double** — un message identique renvoyé dans les
+  `duplicate_send_window_minutes` est refusé ([détails](#envois-en-double-et-appels-relancés)).
 - **Écritures sur disque** — la [liste blanche](#où-les-fichiers-peuvent-être-écrits)
   ci-dessus.
 - **Journal d'audit** — les opérations d'écriture sont ajoutées à

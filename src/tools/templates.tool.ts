@@ -9,8 +9,10 @@ import { z } from 'zod';
 import audit from '../safety/audit.js';
 
 import type { IMailService } from '../services/mail-service.types.js';
+import SendGuard, { sendFingerprint } from '../services/send-guard.js';
 import type { ISendService } from '../services/send-service.types.js';
 import type TemplateService from '../services/template.service.js';
+import { runGuardedSend, sendGuardParams } from './send-guard-params.js';
 
 export function registerTemplateReadTools(
   server: McpServer,
@@ -73,12 +75,16 @@ export function registerTemplateWriteTools(
   templateService: TemplateService,
   imapService: IMailService,
   smtpService: ISendService,
+  // Même garde que send_email : un message identique envoyé par l'un ou
+  // l'autre outil est le même doublon.
+  sendGuard: SendGuard = new SendGuard({ windowMinutes: 0 }),
 ): void {
   server.registerTool(
     'apply_template',
     {
       description:
-        'Apply an email template with variable substitution. Use action "preview" to see the result, "draft" to save as draft, or "send" to send immediately.',
+        'Apply an email template with variable substitution. Use action "preview" to see the result, "draft" to save as draft, or "send" to send immediately. ' +
+        'With "send", the same duplicate protection as send_email applies (allow_duplicate, idempotency_key).',
       inputSchema: z.object({
         account: z.string().describe('Account name from list_accounts'),
         template: z.string().describe('Template name from list_templates'),
@@ -93,10 +99,19 @@ export function registerTemplateWriteTools(
           .array(z.string())
           .optional()
           .describe('Recipient addresses (required for send, optional for draft)'),
+        ...sendGuardParams,
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
-    async ({ account, template, variables, action, to }) => {
+    async ({
+      account,
+      template,
+      variables,
+      action,
+      to,
+      idempotency_key: idempotencyKey,
+      allow_duplicate: allowDuplicate,
+    }) => {
       try {
         const composed = await templateService.applyTemplate(template, variables);
 
@@ -151,11 +166,33 @@ export function registerTemplateWriteTools(
           };
         }
 
-        const sendResult = await smtpService.sendEmail(account, {
-          to,
-          subject: composed.subject,
-          body: composed.body,
-        });
+        const guarded = await runGuardedSend(
+          sendGuard,
+          {
+            account,
+            tool: 'apply_template',
+            wording: { what: 'email' },
+            idempotencyKey,
+            allowDuplicate,
+            // Même nature que send_email : le message composé est ce qui compte.
+            fingerprint: sendFingerprint({
+              kind: 'send',
+              account,
+              to,
+              subject: composed.subject,
+              body: composed.body,
+            }),
+          },
+          async () =>
+            smtpService.sendEmail(account, {
+              to,
+              subject: composed.subject,
+              body: composed.body,
+            }),
+          (r) => r.messageId,
+        );
+        if ('stop' in guarded) return guarded.stop;
+        const sendResult = guarded.result;
 
         audit.log(
           'apply_template',

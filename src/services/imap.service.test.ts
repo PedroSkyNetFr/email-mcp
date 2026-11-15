@@ -1900,6 +1900,144 @@ describe('ImapService', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Pièces de même nom (signature Outlook : deux image001.png) — adressage par
+  // numéro de partie, refus d'un nom ambigu, images inline téléchargeables.
+  // -------------------------------------------------------------------------
+
+  describe('attachments addressed by partId', () => {
+    const outlookStructure = {
+      type: 'multipart/mixed',
+      childNodes: [
+        {
+          type: 'multipart/related',
+          part: '1',
+          childNodes: [
+            { type: 'text/html', part: '1.1', size: 400 },
+            {
+              type: 'image/png',
+              part: '1.2',
+              size: 900,
+              id: '<logo.png@01D9>',
+              disposition: 'inline',
+            },
+          ],
+        },
+        {
+          type: 'image/png',
+          part: '2',
+          size: 1000,
+          disposition: 'attachment',
+          dispositionParameters: { filename: 'image001.png' },
+        },
+        {
+          type: 'image/png',
+          part: '3',
+          size: 2000,
+          disposition: 'attachment',
+          dispositionParameters: { filename: 'image001.png' },
+        },
+      ],
+    };
+
+    async function* asyncFrom(chunks: Buffer[]): AsyncGenerator<Buffer> {
+      for (const c of chunks) yield c;
+    }
+
+    function primeOutlook() {
+      const withMethods = client as unknown as {
+        fetchOne: ReturnType<typeof vi.fn>;
+        download: ReturnType<typeof vi.fn>;
+      };
+      withMethods.fetchOne = vi
+        .fn()
+        .mockResolvedValue({ uid: 42, bodyStructure: outlookStructure });
+      // Chaque partie rend ses propres octets : on vérifie que la bonne arrive.
+      withMethods.download = vi.fn(async (_uid: string, part: string) => ({
+        content: asyncFrom([Buffer.from(`part ${part}`)]),
+      }));
+      return withMethods;
+    }
+
+    it('downloads the second same-named attachment by its partId', async () => {
+      const mocked = primeOutlook();
+
+      const result = await service.downloadAttachment('test', '42', 'INBOX', { partId: '3' });
+
+      expect(mocked.download).toHaveBeenCalledWith('42', '3', { uid: true });
+      expect(result.filename).toBe('image001.png');
+      expect(Buffer.from(result.contentBase64, 'base64').toString()).toBe('part 3');
+    });
+
+    it('refuses an ambiguous filename and lists every candidate with its partId', async () => {
+      const mocked = primeOutlook();
+
+      await expect(
+        service.downloadAttachment('test', '42', 'INBOX', 'image001.png'),
+      ).rejects.toThrow(/Ambiguous attachment name "image001\.png".*partId 2.*partId 3/s);
+      expect(mocked.download).not.toHaveBeenCalled();
+    });
+
+    it('makes an inline cid image downloadable by partId', async () => {
+      primeOutlook();
+
+      const result = await service.downloadAttachment('test', '42', 'INBOX', { partId: '1.2' });
+
+      // Sans nom : la partie locale du cid sert de nom de fichier.
+      expect(result.filename).toBe('logo.png');
+      expect(Buffer.from(result.contentBase64, 'base64').toString()).toBe('part 1.2');
+    });
+
+    it('names the available partIds when the partId does not exist', async () => {
+      primeOutlook();
+
+      await expect(
+        service.downloadAttachment('test', '42', 'INBOX', { partId: '9' }),
+      ).rejects.toThrow(/No attachment with partId "9".*partId 2/s);
+    });
+
+    it('saveEmailAttachments saves both duplicates under distinct names, skips inline', async () => {
+      const { mkdtempSync, rmSync, readFileSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const tmp = mkdtempSync(join(tmpdir(), 'save-dup-'));
+      try {
+        primeOutlook();
+
+        const saved = await service.saveEmailAttachments('test', '42', 'INBOX', tmp);
+
+        expect(saved.map((s) => s.filename)).toEqual(['image001.png', 'image001 (2).png']);
+        expect(readFileSync(join(tmp, 'image001.png'), 'utf-8')).toBe('part 2');
+        expect(readFileSync(join(tmp, 'image001 (2).png'), 'utf-8')).toBe('part 3');
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('saveAttachmentToDisk by partId writes that part under its own name', async () => {
+      const { mkdtempSync, rmSync, readFileSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const tmp = mkdtempSync(join(tmpdir(), 'save-part-'));
+      try {
+        primeOutlook();
+
+        const result = await service.saveAttachmentToDisk(
+          'test',
+          '42',
+          'INBOX',
+          { partId: '3' },
+          tmp,
+        );
+
+        expect(result.path).toBe(join(tmp, 'image001.png'));
+        expect(readFileSync(result.path, 'utf-8')).toBe('part 3');
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // messageToEmail body extraction — the empty-body-multipart fix.
   //
   // Every case here returns EMPTY on pre-fix `main` (top-level Content-Type

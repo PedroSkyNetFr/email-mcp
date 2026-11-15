@@ -54,6 +54,13 @@ import type { ArrivalCacheRef } from './arrival-order-cache.js';
 import { ArrivalOrderCache } from './arrival-order-cache.js';
 import type { AttachmentInput, ResolvedAttachment } from './attachment-resolver.js';
 import { resolveAttachments } from './attachment-resolver.js';
+import type { AttachmentRef } from './attachment-select.js';
+import {
+  realAttachments,
+  selectAttachment,
+  selectorLabel,
+  uniqueAttachmentNames,
+} from './attachment-select.js';
 import {
   assertSafeDestination,
   defaultEmlFilename,
@@ -215,8 +222,11 @@ export function flattenParsedAddresses(
  *
  * Rules (all case-insensitive; imapflow emits lowercase type/subtype strings):
  * - A part with `disposition === 'attachment'` is always an attachment.
- * - A part with `disposition === 'inline'` AND a Content-ID (`id` field) is
- *   treated as an embedded inline resource (e.g. HTML image) and skipped.
+ * - A non-text part with `disposition === 'inline'` AND a Content-ID (`id`
+ *   field) is an embedded inline resource (HTML image, signature logo): it is
+ *   LISTED with `inline: true` and its `contentId`, so that it can be
+ *   downloaded by partId, but it does not count as a "real" attachment
+ *   (`hasAttachments`, search filters, forwards — see `realAttachments`).
  * - A non-multipart, non-text/plain part that carries a filename/name
  *   parameter but no disposition is also treated as an attachment (some mailers
  *   omit Content-Disposition for PDFs etc).
@@ -227,13 +237,15 @@ export function flattenParsedAddresses(
  */
 /**
  * Lenient classification of a SINGLE bodyStructure node. Returns the
- * attachment metadata for a leaf that should be treated as an attachment,
- * or `null` otherwise (multipart container, inline HTML resource, plain
- * body part, non-attachment). This is the single source of truth shared by
- * `extractAttachmentMeta`, `findMimePartByFilename`, and the watcher's
- * has-attachment heuristic. Keeping all detection on one predicate is what
- * prevents the metadata/download divergence that this routine was written
- * to fix — do not reintroduce a second, stricter check elsewhere.
+ * attachment metadata for a leaf that should be listed as an attachment
+ * (inline cid images included, marked `inline`), or `null` otherwise
+ * (multipart container, plain body part, non-attachment). This is the single
+ * source of truth shared by `extractAttachmentMeta`, `findMimePartByFilename`,
+ * and the watcher's has-attachment heuristic. Keeping all detection on one
+ * predicate is what prevents the metadata/download divergence that this
+ * routine was written to fix — do not reintroduce a second, stricter check
+ * elsewhere. Le numéro de partie (`partId`) est ajouté par le parcours de
+ * l'arbre, seul à connaître la position du nœud.
  */
 export function classifyAttachmentNode(node: unknown): AttachmentMeta | null {
   if (!node || typeof node !== 'object') return null;
@@ -247,13 +259,19 @@ export function classifyAttachmentNode(node: unknown): AttachmentMeta | null {
   const dispParams = (n.dispositionParameters ?? {}) as Record<string, string>;
   const typeParams = (n.parameters ?? {}) as Record<string, string>;
   const filename = dispParams.filename ?? dispParams.name ?? typeParams.name ?? undefined;
-  const contentId = typeof n.id === 'string' ? n.id : undefined;
+  const contentId =
+    typeof n.id === 'string' && n.id.trim() !== ''
+      ? n.id.trim().replace(/^</, '').replace(/>$/, '')
+      : undefined;
 
-  // Skip inline resources that have a Content-ID (embedded HTML images).
-  if (disposition === 'inline' && contentId) return null;
+  // Ressource inline à Content-ID (image du corps HTML, logo de signature).
+  // Autrefois ignorée, donc ni visible ni téléchargeable ; désormais listée,
+  // marquée `inline`. Une partie texte inline reste le corps du message.
+  const inlineResource = disposition === 'inline' && !!contentId;
+  if (inlineResource && lowerType.startsWith('text/')) return null;
 
   let isAttachment = false;
-  if (disposition === 'attachment') {
+  if (disposition === 'attachment' || inlineResource) {
     isAttachment = true;
   } else if (filename) {
     // No explicit disposition but a filename is present — treat as attachment
@@ -273,10 +291,17 @@ export function classifyAttachmentNode(node: unknown): AttachmentMeta | null {
     mimeType = sub ? `application/${sub}` : 'application/octet-stream';
   }
 
+  // Une image inline sans nom prend la partie locale de son cid
+  // (« image001.png@01D9… » → « image001.png ») : idée de la PR codefuturist
+  // #97, plus parlante que « unnamed » pour l'enregistrer sur disque.
+  const cidName = inlineResource && contentId ? contentId.split('@')[0] || undefined : undefined;
+
   return {
-    filename: filename ?? 'unnamed',
+    filename: filename ?? cidName ?? 'unnamed',
     mimeType,
     size: typeof n.size === 'number' ? n.size : 0,
+    ...(contentId ? { contentId } : {}),
+    ...(inlineResource ? { inline: true } : {}),
   };
 }
 
@@ -288,33 +313,55 @@ export function classifyAttachmentNode(node: unknown): AttachmentMeta | null {
  */
 const MAX_MIME_DEPTH = 100;
 
+/**
+ * Numéro de partie IMAP du i-ième enfant d'un nœud, selon la règle de
+ * `findMimePartByFilename` : une enveloppe `message/rfc822` n'ajoute pas de
+ * niveau, son message embarqué hérite du numéro de l'enveloppe.
+ */
+function childPartPath(parentPath: string, parentIsRfc822: boolean, index: number): string {
+  const indexed = parentPath ? `${parentPath}.${index + 1}` : String(index + 1);
+  return parentIsRfc822 ? parentPath || String(index + 1) : indexed;
+}
+
+/**
+ * Pièces jointes d'un BODYSTRUCTURE, chacune avec son `partId` (numéro de
+ * partie MIME, ex. « 2 », « 1.2 ») : le seul désignateur sans ambiguïté quand
+ * deux pièces portent le même nom. `node.part` d'imapflow est préféré ; à
+ * défaut, le numéro est synthétisé. Les images inline à cid y figurent,
+ * marquées `inline` (voir `realAttachments` pour les écarter).
+ */
 export function extractAttachmentMeta(bodyStructure: unknown): AttachmentMeta[] {
   const out: AttachmentMeta[] = [];
 
-  const walk = (node: unknown, depth: number): void => {
+  const walk = (node: unknown, path: string, depth: number): void => {
     if (depth > MAX_MIME_DEPTH || !node || typeof node !== 'object') return;
     const n = node as Record<string, unknown>;
+    const effectivePath = typeof n.part === 'string' ? n.part : path;
 
-    // Recurse first so we cover every branch.
+    // Recurse first so we cover every branch (ordre de sortie inchangé).
     if (Array.isArray(n.childNodes)) {
-      n.childNodes.forEach((child) => {
-        walk(child, depth + 1);
+      const isRfc822 =
+        (typeof n.type === 'string' ? n.type : '').toLowerCase() === 'message/rfc822';
+      n.childNodes.forEach((child, i) => {
+        walk(child, childPartPath(effectivePath, isRfc822, i), depth + 1);
       });
     }
 
     const classified = classifyAttachmentNode(n);
-    if (classified) out.push(classified);
+    // Message à partie unique : la racine n'a pas de numéro, sa section est « 1 ».
+    if (classified) out.push({ ...classified, partId: effectivePath || '1' });
   };
 
-  walk(bodyStructure, 0);
+  walk(bodyStructure, '', 0);
   return out;
 }
 
 export function hasAttachments(bodyStructure: unknown): boolean {
   // Delegate to the richer helper so legacy callers (e.g. getEmailStats,
   // WatcherService) use the same semantics as extractAttachmentMeta /
-  // EmailMeta.hasAttachments.
-  return extractAttachmentMeta(bodyStructure).length > 0;
+  // EmailMeta.hasAttachments. Les images inline à cid, listées mais pas
+  // « réelles », ne comptent pas : le résultat est celui d'avant leur listage.
+  return realAttachments(extractAttachmentMeta(bodyStructure)).length > 0;
 }
 
 /**
@@ -403,8 +450,7 @@ export function findMimePartByFilename(
     for (let i = 0; i < bs.childNodes.length; i++) {
       // A message/rfc822 wrapper does not add a numbering level: its single
       // embedded-message child inherits the wrapper's section number.
-      const indexed = effectivePath ? `${effectivePath}.${i + 1}` : String(i + 1);
-      const childPart = isRfc822 ? effectivePath || String(i + 1) : indexed;
+      const childPart = childPartPath(effectivePath, isRfc822, i);
       const found = findMimePartByFilename(bs.childNodes[i], targetFilename, childPart, depth + 1);
       if (found) return found;
     }
@@ -490,7 +536,8 @@ function messageToEmailMeta(msg: Record<string, unknown>): EmailMeta {
     seen: flags.has('\\Seen'),
     flagged: flags.has('\\Flagged'),
     answered: flags.has('\\Answered'),
-    hasAttachments: (attachments?.length ?? 0) > 0,
+    // Les images inline à cid sont listées mais ne comptent pas (voir realAttachments).
+    hasAttachments: realAttachments(attachments ?? []).length > 0,
     labels,
     ...(classification ? { classification } : {}),
     ...(attachments !== undefined ? { attachments } : {}),
@@ -548,11 +595,13 @@ function applyClientSideFilters(items: EmailMeta[], postFilters: PostFilters): E
   if (postFilters.attachmentFilename) {
     const needle = postFilters.attachmentFilename.toLowerCase();
     out = out.filter((m) =>
-      (m.attachments ?? []).some((a) => a.filename.toLowerCase().includes(needle)),
+      realAttachments(m.attachments ?? []).some((a) => a.filename.toLowerCase().includes(needle)),
     );
   }
   if (mimeRe) {
-    out = out.filter((m) => (m.attachments ?? []).some((a) => mimeRe.test(a.mimeType)));
+    out = out.filter((m) =>
+      realAttachments(m.attachments ?? []).some((a) => mimeRe.test(a.mimeType)),
+    );
   }
   return applyLiteralFilters(out, postFilters);
 }
@@ -3066,8 +3115,10 @@ export default class ImapService {
       options.mailbox,
     );
 
-    // Determine which existing attachments to carry forward.
-    const existingFilenames = existing.attachments.map((a) => a.filename);
+    // Determine which existing attachments to carry forward. Les images inline
+    // (cid) sont reportées à part, plus bas, selon que le corps les référence.
+    const existingReal = realAttachments(existing.attachments);
+    const existingFilenames = existingReal.map((a) => a.filename);
     const existingSet = new Set(existingFilenames);
 
     // Default keep set: ALL existing attachments. Explicit empty array drops everything.
@@ -3091,7 +3142,15 @@ export default class ImapService {
     });
 
     // Download the kept attachment bytes from the old draft (server-side, no MCP wire).
-    const kept = await this.fetchKeptAttachments(accountName, draftId, draftsPath, keepFilenames);
+    // Un nom gardé reprend TOUTES les pièces qui le portent (doublons
+    // compris), chacune par son numéro de partie.
+    const keepSet = new Set(keepFilenames);
+    const kept = await this.fetchKeptAttachments(
+      accountName,
+      draftId,
+      draftsPath,
+      existingReal.filter((a) => keepSet.has(a.filename)),
+    );
 
     // Resolve the add list (path | base64 | source-message-reference).
     let added: ResolvedAttachment[] = [];
@@ -3230,7 +3289,7 @@ export default class ImapService {
   }
 
   /**
-   * Download a subset of an existing message's attachments by filename.
+   * Download a subset of an existing message's attachments, by part number.
    * Strict: any per-file failure aborts the whole operation so we never
    * silently produce a draft missing attachments the caller asked to keep.
    */
@@ -3238,13 +3297,14 @@ export default class ImapService {
     accountName: string,
     emailId: number,
     mailbox: string,
-    filenames: string[],
+    metas: AttachmentMeta[],
   ): Promise<ResolvedAttachment[]> {
-    if (filenames.length === 0) return [];
-    const inputs: AttachmentInput[] = filenames.map((filename) => ({
+    if (metas.length === 0) return [];
+    const inputs: AttachmentInput[] = metas.map((meta) => ({
       sourceEmailId: String(emailId),
       sourceMailbox: mailbox,
-      filename,
+      filename: meta.filename,
+      ...(meta.partId !== undefined ? { partId: meta.partId } : {}),
     }));
     const result = await resolveAttachments(this, accountName, inputs);
     if (result.failures.length > 0) {
@@ -3336,11 +3396,16 @@ export default class ImapService {
   // Attachment download
   // -------------------------------------------------------------------------
 
+  /**
+   * Télécharge UNE pièce jointe, désignée par son `partId` (prioritaire) ou
+   * par son nom. Un nom porté par plusieurs pièces est refusé avec la liste
+   * des candidates (voir `selectAttachment`) : jamais « la première ».
+   */
   async downloadAttachment(
     accountName: string,
     emailId: string,
     mailbox: string,
-    filename: string,
+    ref: AttachmentRef,
     maxSizeBytes = 5 * 1024 * 1024,
   ): Promise<{
     filename: string;
@@ -3364,18 +3429,13 @@ export default class ImapService {
         throw new Error(`Email ${emailId} not found in ${mailbox}`);
       }
 
-      const attachments = extractAttachmentMeta(msg.bodyStructure);
-      const attachment = attachments.find((a) => a.filename === filename);
-      if (!attachment) {
-        throw new Error(
-          `Attachment "${filename}" not found. Available: ${attachments.map((a) => a.filename).join(', ') || 'none'}`,
-        );
-      }
-
-      // Find the MIME part number
-      const partNumber = findMimePartByFilename(msg.bodyStructure, filename);
+      const attachment = selectAttachment(extractAttachmentMeta(msg.bodyStructure), ref);
+      const { filename } = attachment;
+      // Le numéro de partie vient du même parcours que la liste : la pièce
+      // listée est exactement celle téléchargée, doublons de noms compris.
+      const partNumber = attachment.partId;
       if (!partNumber) {
-        throw new Error(`Could not locate MIME part for "${filename}"`);
+        throw new Error(`Could not locate MIME part for ${selectorLabel(ref)}`);
       }
 
       // Contrôle préalable sur la taille DÉCODÉE estimée. BODYSTRUCTURE donne la
@@ -3485,8 +3545,11 @@ export default class ImapService {
         { uid: true },
       );
       if (!msg) return [];
+      // Pièces « réelles » seulement : les images inline (logos de signature)
+      // ne sont pas ce qu'on veut sur disque, et n'y figuraient pas avant
+      // d'être listées.
       // biome-ignore format: line too long; eslint implicit-arrow-linebreak prevents multi-line implicit return
-      attachmentMetas = extractAttachmentMeta(msg.bodyStructure).filter((a) => a.size <= maxSizeBytes && !a.mimeType.includes('calendar') && !a.filename.toLowerCase().endsWith('.ics'));
+      attachmentMetas = realAttachments(extractAttachmentMeta(msg.bodyStructure)).filter((a) => a.size <= maxSizeBytes && !a.mimeType.includes('calendar') && !a.filename.toLowerCase().endsWith('.ics'));
     } finally {
       lock.release();
     }
@@ -3496,13 +3559,17 @@ export default class ImapService {
     const { mkdir } = await import('node:fs/promises');
     await mkdir(destDir, { recursive: true });
 
+    // Deux pièces de même nom (image001.png ×2) s'écrasaient l'une l'autre sur
+    // disque : la seconde devient « image001 (2).png ». Chacune est
+    // téléchargée par son numéro de partie.
+    const named = uniqueAttachmentNames(attachmentMetas);
     const results = await Promise.allSettled(
-      attachmentMetas.map(async (meta) => {
+      named.map(async (meta) => {
         const downloaded = await this.downloadAttachment(
           accountName,
           emailId,
           mailbox,
-          meta.filename,
+          meta.partId !== undefined ? { partId: meta.partId } : meta.filename,
           maxSizeBytes,
         );
         const safe = meta.filename.replace(/[/\\?%*:|"<>]/g, '_');
@@ -4289,7 +4356,7 @@ export default class ImapService {
     accountName: string,
     emailId: string,
     mailbox: string,
-    filename: string,
+    ref: AttachmentRef,
     destination: string,
     overwrite = false,
   ): Promise<AttachmentSaveResult> {
@@ -4298,27 +4365,10 @@ export default class ImapService {
     const { dirname, join } = await import('node:path');
     const { pipeline } = await import('node:stream/promises');
 
-    // Resolve target — directory vs file path
+    // Contrôle de la destination AVANT toute connexion ; le chemin final se
+    // calcule une fois la pièce choisie (son nom n'est connu qu'alors quand
+    // elle est désignée par partId).
     assertSafeDestination(destination);
-    let targetPath: string;
-    try {
-      const info = await stat(destination);
-      if (info.isDirectory()) {
-        targetPath = join(destination, sanitizeFilename(filename));
-      } else {
-        targetPath = destination;
-      }
-    } catch {
-      // Destination doesn't exist yet — treat as a file path.
-      targetPath = destination;
-    }
-    // Re-check the final resolved path (defense in depth — the file component
-    // is user-supplied and could include `..` in theory).
-    assertSafeDestination(targetPath);
-
-    // Auto-collision suffix when overwrite=false.
-    const finalPath = await resolveUniquePath(targetPath, overwrite);
-    await mkdir(dirname(finalPath), { recursive: true });
 
     const client = await this.connections.getImapClient(accountName);
     const uid = parseInt(emailId, 10);
@@ -4335,20 +4385,31 @@ export default class ImapService {
         throw new Error(`Email ${emailId} not found in ${mailbox}`);
       }
 
-      const attachments = extractAttachmentMeta(msg.bodyStructure);
-      const attachment = attachments.find((a) => a.filename === filename);
-      if (!attachment) {
-        throw new Error(
-          `Attachment "${filename}" not found. Available: ${
-            attachments.map((a) => a.filename).join(', ') || 'none'
-          }`,
-        );
+      const attachment = selectAttachment(extractAttachmentMeta(msg.bodyStructure), ref);
+      const { filename } = attachment;
+      const partNumber = attachment.partId;
+      if (!partNumber) {
+        throw new Error(`Could not locate MIME part for ${selectorLabel(ref)}`);
       }
 
-      const partNumber = findMimePartByFilename(msg.bodyStructure, filename);
-      if (!partNumber) {
-        throw new Error(`Could not locate MIME part for "${filename}"`);
+      // Resolve target — directory vs file path
+      let targetPath: string;
+      try {
+        const info = await stat(destination);
+        targetPath = info.isDirectory()
+          ? join(destination, sanitizeFilename(filename))
+          : destination;
+      } catch {
+        // Destination doesn't exist yet — treat as a file path.
+        targetPath = destination;
       }
+      // Re-check the final resolved path (defense in depth — the file component
+      // is user-supplied and could include `..` in theory).
+      assertSafeDestination(targetPath);
+
+      // Auto-collision suffix when overwrite=false.
+      const finalPath = await resolveUniquePath(targetPath, overwrite);
+      await mkdir(dirname(finalPath), { recursive: true });
 
       const downloadResult = await client.download(String(uid), partNumber, { uid: true });
       if (!downloadResult?.content) {
@@ -4436,7 +4497,8 @@ export default class ImapService {
 
     /* eslint-disable no-restricted-syntax, no-await-in-loop */
     for (const email of items) {
-      const atts = email.attachments ?? [];
+      // Pièces « réelles » seulement (comme les filtres de recherche).
+      const atts = realAttachments(email.attachments ?? []);
       const qualifying = atts.filter((a) => {
         if (nameNeedle && !a.filename.toLowerCase().includes(nameNeedle)) return false;
         if (mimeRe && !mimeRe.test(a.mimeType)) return false;
@@ -4467,11 +4529,13 @@ export default class ImapService {
 
           for (const att of qualifying) {
             try {
+              // Par numéro de partie : deux pièces de même nom sont chacune
+              // enregistrées (suffixe -1 automatique), pas la première deux fois.
               const saved = await this.saveAttachmentToDisk(
                 accountForEmail,
                 email.id,
                 input.searchOptions.mailbox ?? 'INBOX',
-                att.filename,
+                att.partId !== undefined ? { partId: att.partId } : att.filename,
                 subfolder,
                 false,
               );

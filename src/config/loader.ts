@@ -416,6 +416,8 @@ function normalizeConfig(raw: RawAppConfig): AppConfig {
       readOnly: raw.settings.read_only || process.env.MCP_EMAIL_READ_ONLY === 'true',
       replyLanguage: raw.settings.reply_language ?? 'fr',
       sentRetentionDays: raw.settings.scheduler?.sent_retention_days,
+      // Défaut 10 min (DEFAULT_DUPLICATE_WINDOW_MINUTES de services/send-guard.ts).
+      duplicateSendWindowMinutes: raw.settings.duplicate_send_window_minutes ?? 10,
       watcher: {
         enabled: raw.settings.watcher.enabled,
         folders: raw.settings.watcher.folders,
@@ -528,6 +530,7 @@ export function generateTemplate(): string {
 rate_limit = 10  # max emails per minute per account
 read_only = false  # true: send nothing (scheduled emails included), change no mailbox (hook actions included)
 # reply_language = "fr"  # "fr" | "en": quote line and forward header (overridable per account)
+# duplicate_send_window_minutes = 10  # refuse an identical send within N minutes (probable retry); 0 = off
 
 # [settings.scheduler]
 # sent_retention_days = 30  # days of sent scheduled-email history kept (default 30; 0 = keep all)

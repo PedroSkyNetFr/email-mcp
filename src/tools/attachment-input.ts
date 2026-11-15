@@ -43,7 +43,20 @@ const attachmentFromMessage = z.object({
   source_mailbox: z
     .string()
     .describe('Mailbox path containing the source message (e.g. "INBOX" or "Drafts")'),
-  filename: z.string().describe('Attachment filename on the source message — exact match'),
+  filename: z
+    .string()
+    .optional()
+    .describe(
+      'Attachment filename on the source message — exact match. Refused when several ' +
+        'attachments carry that name: pass part_id instead.',
+    ),
+  part_id: z
+    .string()
+    .optional()
+    .describe(
+      'partId of the attachment on the source message (shown by get_email); takes precedence ' +
+        'over filename and is the only way to pick one of two same-named attachments.',
+    ),
   cid: cidField,
 });
 
@@ -76,6 +89,7 @@ export function adaptAttachmentInput(raw: AttachmentInputRaw): AttachmentInput {
     sourceEmailId: raw.source_email_id,
     sourceMailbox: raw.source_mailbox,
     filename: raw.filename,
+    ...(raw.part_id !== undefined ? { partId: raw.part_id } : {}),
     cid: raw.cid,
   };
 }

@@ -17,6 +17,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import { CALENDAR_ATTACHMENTS_DIR } from '../config/xdg.js';
+import { realAttachments } from '../services/attachment-select.js';
 import type CalendarService from '../services/calendar.service.js';
 import type LocalCalendarService from '../services/local-calendar.service.js';
 import type { IMailService } from '../services/mail-service.types.js';
@@ -681,7 +682,8 @@ export default function registerCalendarTools(
         subject: email.subject,
         from: email.from.address,
         date: email.date,
-        attachmentCount: email.attachments.length,
+        // Pièces « réelles » : les images inline (logos) ne comptent pas.
+        attachmentCount: realAttachments(email.attachments).length,
         recommendation,
         alreadyAutoProcessed: alreadyProcessed,
         autoProcessedEntry: processedEntry?.entry ?? null,

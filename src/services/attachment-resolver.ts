@@ -23,7 +23,18 @@ export const REBUILD_ATTACHMENT_CAP_BYTES = 25 * 1024 * 1024;
 export type AttachmentInput =
   | { path: string; filename?: string; mimeType?: string; cid?: string }
   | { contentBase64: string; filename: string; mimeType?: string; cid?: string }
-  | { sourceEmailId: string; sourceMailbox: string; filename: string; cid?: string };
+  | {
+      sourceEmailId: string;
+      sourceMailbox: string;
+      /** Nom de la pièce sur le message source (compatibilité). */
+      filename?: string;
+      /**
+       * Identifiant de la pièce (numéro de partie IMAP, id Graph), prioritaire
+       * sur le nom : seul moyen de viser l'un de deux `image001.png`.
+       */
+      partId?: string;
+      cid?: string;
+    };
 
 export interface ResolvedAttachment {
   filename: string;
@@ -78,7 +89,7 @@ function guessMimeType(filename: string): string {
 function inputLabel(input: AttachmentInput): string {
   if ('path' in input) return input.filename ?? path.basename(input.path);
   if ('contentBase64' in input) return input.filename;
-  return input.filename;
+  return input.filename ?? (input.partId !== undefined ? `partId ${input.partId}` : '(unnamed)');
 }
 
 /**
@@ -143,7 +154,8 @@ async function resolveOne(
     accountName,
     input.sourceEmailId,
     input.sourceMailbox,
-    input.filename,
+    // partId prioritaire ; un nom ambigu (plusieurs pièces) est refusé.
+    { partId: input.partId, filename: input.filename },
     maxSizeBytes,
   );
   return applyInlineFields(

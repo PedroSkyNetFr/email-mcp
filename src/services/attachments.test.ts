@@ -132,12 +132,24 @@ describe('extractAttachmentMeta', () => {
       filename: 'lease_agreement_v7.pdf',
       mimeType: 'application/pdf',
       size: 204800,
+      partId: '2',
     });
   });
 
-  it('skips inline images (disposition=inline + content-id)', () => {
+  it('lists inline cid images marked inline, without counting them as attachments', () => {
     const result = extractAttachmentMeta(multipartMixedWithInlineImage);
-    expect(result).toEqual([]);
+    expect(result).toEqual([
+      {
+        filename: 'logo.png',
+        mimeType: 'image/png',
+        size: 8000,
+        partId: '1.2.2',
+        contentId: 'logo@example.com',
+        inline: true,
+      },
+    ]);
+    // has_attachment et le marqueur 📎 restent ceux d'avant le listage.
+    expect(hasAttachments(multipartMixedWithInlineImage)).toBe(false);
   });
 
   it('finds a PDF buried two multipart levels deep', () => {
@@ -358,7 +370,7 @@ describe('findMimePartByFilename', () => {
     expect(findMimePartByFilename(forwarded, 'nested.pdf')).toBe('2.2');
   });
 
-  it('does not resolve an inline image skipped by the metadata path (parity)', () => {
+  it('resolves an inline cid image listed by the metadata path (parity)', () => {
     const struct = {
       type: 'multipart/related',
       childNodes: [
@@ -373,8 +385,8 @@ describe('findMimePartByFilename', () => {
         },
       ],
     };
-    expect(extractAttachmentMeta(struct)).toEqual([]);
-    expect(findMimePartByFilename(struct, 'logo.png')).toBeUndefined();
+    expect(extractAttachmentMeta(struct)).toMatchObject([{ partId: '2', inline: true }]);
+    expect(findMimePartByFilename(struct, 'logo.png')).toBe('2');
   });
 
   it('metadata/part parity: every reported attachment resolves to a part', () => {

@@ -8,14 +8,18 @@ import audit from '../safety/audit.js';
 import { validateInputLength } from '../safety/validation.js';
 
 import type { IMailService } from '../services/mail-service.types.js';
+import SendGuard, { sendFingerprint } from '../services/send-guard.js';
 import type { ISendService } from '../services/send-service.types.js';
 import { adaptAttachmentInput, attachmentInputSchema } from './attachment-input.js';
+import { runGuardedSend, sendGuardParams } from './send-guard-params.js';
 import describeSendOutcome from './send-outcome.js';
 
 export default function registerSendTools(
   server: McpServer,
   smtpService: ISendService,
   imapService: IMailService,
+  // Garde anti-doublon partagée ; désactivée quand rien n'est fourni (tests).
+  sendGuard: SendGuard = new SendGuard({ windowMinutes: 0 }),
 ): void {
   // ---------------------------------------------------------------------------
   // send_email
@@ -29,7 +33,11 @@ export default function registerSendTools(
         'HTML mail also carries a generated plain-text alternative. The whole message, attachments ' +
         'encoded, must fit the size limit: on SMTP the limit the server announces (SIZE), or ' +
         'max_message_mb when set in the account config; on Graph 35 MB by default (Exchange Online), ' +
-        'or max_message_mb. An oversized message is refused before anything is sent.',
+        'or max_message_mb. An oversized message is refused before anything is sent. ' +
+        'Duplicate protection: an identical message sent from the same account in the last ' +
+        'duplicate_send_window_minutes (default 10) is refused as a probable retry (pass ' +
+        'allow_duplicate: true for a deliberate second copy); idempotency_key makes a retry return ' +
+        'the first result instead of sending again.',
       inputSchema: z.object({
         account: z.string().describe('Account name from list_accounts'),
         to: z.array(z.string().email()).min(1).describe('Recipient email addresses'),
@@ -56,6 +64,7 @@ export default function registerSendTools(
             "Append the account's configured signature (signature_path) below the body, with its " +
               'logo/images embedded inline (cid). Forces HTML. Defaults to the account signature_default; pass false to disable.',
           ),
+        ...sendGuardParams,
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
@@ -74,11 +83,42 @@ export default function registerSendTools(
               )
             : undefined;
 
-        const result = await smtpService.sendEmail(params.account, {
-          ...params,
-          attachments: resolvedAttachments,
-          appendSignature: params.append_signature,
-        });
+        const guarded = await runGuardedSend(
+          sendGuard,
+          {
+            account: params.account,
+            tool: 'send_email',
+            wording: { what: 'email' },
+            idempotencyKey: params.idempotency_key,
+            allowDuplicate: params.allow_duplicate,
+            // Empreinte calculée APRÈS résolution des pièces : leurs octets comptent.
+            fingerprint: sendFingerprint({
+              kind: 'send',
+              account: params.account,
+              to: params.to,
+              cc: params.cc,
+              bcc: params.bcc,
+              subject: params.subject,
+              body: params.body,
+              html: params.html,
+              attachments: resolvedAttachments,
+            }),
+          },
+          async () =>
+            smtpService.sendEmail(params.account, {
+              to: params.to,
+              subject: params.subject,
+              body: params.body,
+              cc: params.cc,
+              bcc: params.bcc,
+              html: params.html,
+              attachments: resolvedAttachments,
+              appendSignature: params.append_signature,
+            }),
+          (r) => r.messageId,
+        );
+        if ('stop' in guarded) return guarded.stop;
+        const { result } = guarded;
         await audit.log(
           'send_email',
           params.account,
@@ -134,7 +174,13 @@ export default function registerSendTools(
         '"Le DATE, NAME a écrit :" in French by default, "On DATE, NAME wrote:" with reply_language = "en"; ' +
         'on Graph accounts Exchange writes its own header in the mailbox language), ' +
         'as desktop clients do — set quoteOriginal=false to send the bare body only. ' +
-        'Sends immediately: to review the reply before it goes out, use reply_draft instead.',
+        'Sends immediately: to review the reply before it goes out, use reply_draft instead. ' +
+        'With includeAttachments, every attachment of the original is fetched by its partId — two ' +
+        'attachments with the same name are both carried, the second renamed "name (2).ext". ' +
+        'Duplicate protection: an identical message sent from the same account in the last ' +
+        'duplicate_send_window_minutes (default 10) is refused as a probable retry (pass ' +
+        'allow_duplicate: true for a deliberate second copy); idempotency_key makes a retry return ' +
+        'the first result instead of sending again.',
       inputSchema: z.object({
         account: z.string().describe('Account name from list_accounts'),
         emailId: z.string().describe('Email ID to reply to (from list_emails or get_email)'),
@@ -166,12 +212,51 @@ export default function registerSendTools(
             "Append the account's configured signature (signature_path) below the reply, with its " +
               'logo/images embedded inline (cid). Forces HTML. Defaults to the account signature_default; pass false to disable.',
           ),
+        ...sendGuardParams,
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
     async (params) => {
       try {
-        const result = await smtpService.replyToEmail(params.account, params);
+        const guarded = await runGuardedSend(
+          sendGuard,
+          {
+            account: params.account,
+            tool: 'reply_email',
+            wording: { what: 'reply' },
+            idempotencyKey: params.idempotency_key,
+            allowDuplicate: params.allow_duplicate,
+            // Les destinataires d'une réponse découlent de l'original : c'est
+            // lui (emailId + dossier) et les options qui la définissent.
+            fingerprint: sendFingerprint({
+              kind: 'reply',
+              account: params.account,
+              emailId: params.emailId,
+              mailbox: params.mailbox,
+              body: params.body,
+              html: params.html,
+              options: {
+                replyAll: params.replyAll,
+                includeAttachments: params.includeAttachments,
+                quoteOriginal: params.quoteOriginal,
+              },
+            }),
+          },
+          async () =>
+            smtpService.replyToEmail(params.account, {
+              emailId: params.emailId,
+              mailbox: params.mailbox,
+              body: params.body,
+              replyAll: params.replyAll,
+              html: params.html,
+              includeAttachments: params.includeAttachments,
+              quoteOriginal: params.quoteOriginal,
+              appendSignature: params.appendSignature,
+            }),
+          (r) => r.messageId,
+        );
+        if ('stop' in guarded) return guarded.stop;
+        const { result } = guarded;
         await audit.log(
           'reply_email',
           params.account,
@@ -218,7 +303,13 @@ export default function registerSendTools(
         'Forward an email to new recipients with optional additional message. The original is included ' +
         'below (as readable text; an HTML original is converted, not pasted as markup) and its ' +
         'attachments are carried across by default. Strict failure: if an attachment cannot be fetched, ' +
-        'nothing is sent (use includeAttachments=false to forward the body alone).',
+        'nothing is sent (use includeAttachments=false to forward the body alone). Attachments are ' +
+        'fetched by partId: two with the same name are both carried, the second renamed ' +
+        '"name (2).ext" (on Graph accounts Exchange forwards the originals natively, names unchanged). ' +
+        'Duplicate protection: an identical message sent from the same account in the last ' +
+        'duplicate_send_window_minutes (default 10) is refused as a probable retry (pass ' +
+        'allow_duplicate: true for a deliberate second copy); idempotency_key makes a retry return ' +
+        'the first result instead of sending again.',
       inputSchema: z.object({
         account: z.string().describe('Account name from list_accounts'),
         emailId: z.string().describe('Email ID to forward (from list_emails or get_email)'),
@@ -247,12 +338,47 @@ export default function registerSendTools(
             "Append the account's configured signature (signature_path) with its logo/images " +
               'embedded inline (cid). Forces HTML. Defaults to the account signature_default.',
           ),
+        ...sendGuardParams,
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
     async (params) => {
       try {
-        const result = await smtpService.forwardEmail(params.account, params);
+        const guarded = await runGuardedSend(
+          sendGuard,
+          {
+            account: params.account,
+            tool: 'forward_email',
+            wording: { what: 'forward' },
+            idempotencyKey: params.idempotency_key,
+            allowDuplicate: params.allow_duplicate,
+            fingerprint: sendFingerprint({
+              kind: 'forward',
+              account: params.account,
+              emailId: params.emailId,
+              mailbox: params.mailbox,
+              to: params.to,
+              cc: params.cc,
+              body: params.body,
+              html: params.html,
+              options: { includeAttachments: params.includeAttachments },
+            }),
+          },
+          async () =>
+            smtpService.forwardEmail(params.account, {
+              emailId: params.emailId,
+              mailbox: params.mailbox,
+              to: params.to,
+              body: params.body,
+              cc: params.cc,
+              includeAttachments: params.includeAttachments,
+              html: params.html,
+              appendSignature: params.appendSignature,
+            }),
+          (r) => r.messageId,
+        );
+        if ('stop' in guarded) return guarded.stop;
+        const { result } = guarded;
         await audit.log(
           'forward_email',
           params.account,

@@ -14,6 +14,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
+import type { AttachmentSelector } from '../services/attachment-select.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import { numeric } from './numeric-param.js';
 import {
@@ -23,6 +24,23 @@ import {
   SUBJECT_DESCRIPTION,
   TO_DESCRIPTION,
 } from './search-filter-params.js';
+
+/**
+ * Désignation d'une pièce jointe depuis les paramètres d'outil : `partId`
+ * prioritaire, nom de fichier en repli. Ni l'un ni l'autre : erreur explicite.
+ */
+function attachmentRef(
+  partId: string | undefined,
+  filename: string | undefined,
+): AttachmentSelector {
+  if ((partId === undefined || partId === '') && (filename === undefined || filename === '')) {
+    throw new Error('Provide partId or filename (see the attachment list of get_email)');
+  }
+  return {
+    ...(partId ? { partId } : {}),
+    ...(filename ? { filename } : {}),
+  };
+}
 
 export default function registerAttachmentTools(
   server: McpServer,
@@ -36,18 +54,36 @@ export default function registerAttachmentTools(
     'download_attachment',
     {
       description:
-        'Download an email attachment by filename. First use get_email to see available attachments and their filenames. Returns base64-encoded content for files ≤5MB.',
+        'Download an email attachment by partId (preferred) or filename. First use get_email: it lists ' +
+        'each attachment with its partId (MIME part number on IMAP, attachment id on Graph), inline cid ' +
+        'images included (marked inline). partId is unambiguous; a filename carried by several ' +
+        'attachments (e.g. two image001.png from an Outlook signature) is refused with the list of ' +
+        'candidates. Returns base64-encoded content for files ≤5MB.',
       inputSchema: z.object({
         account: z.string().describe('Account name from list_accounts'),
         id: z.string().describe('Email ID (UID) from list_emails or get_email'),
         mailbox: z.string().default('INBOX').describe('Mailbox containing the email'),
-        filename: z.string().describe('Exact attachment filename (from get_email metadata)'),
+        partId: z
+          .string()
+          .optional()
+          .describe('Attachment partId from get_email (takes precedence over filename)'),
+        filename: z
+          .string()
+          .optional()
+          .describe(
+            'Exact attachment filename (from get_email metadata). Refused when several attachments carry it.',
+          ),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    async ({ account, id, mailbox, filename }) => {
+    async ({ account, id, mailbox, filename, partId }) => {
       try {
-        const result = await imapService.downloadAttachment(account, id, mailbox, filename);
+        const result = await imapService.downloadAttachment(
+          account,
+          id,
+          mailbox,
+          attachmentRef(partId, filename),
+        );
 
         return {
           content: [
@@ -93,12 +129,23 @@ export default function registerAttachmentTools(
       description:
         'Save an email attachment directly to disk. Unlike download_attachment (which returns base64), ' +
         'this writes the file to your filesystem without size limits and without streaming bytes through ' +
-        'the MCP response. Default destination is ~/Downloads/<filename>.',
+        'the MCP response. Default destination is ~/Downloads/<filename>. Designate the attachment by ' +
+        'partId (from get_email, unambiguous) or by filename; a filename carried by several attachments ' +
+        'is refused with the list of candidates.',
       inputSchema: z.object({
         account: z.string().describe('Account name from list_accounts'),
         emailId: z.string().describe('Email ID (UID) from list_emails or get_email'),
         mailbox: z.string().default('INBOX').describe('Mailbox containing the email'),
-        filename: z.string().describe('Exact attachment filename from get_email metadata'),
+        partId: z
+          .string()
+          .optional()
+          .describe('Attachment partId from get_email (takes precedence over filename)'),
+        filename: z
+          .string()
+          .optional()
+          .describe(
+            'Exact attachment filename from get_email metadata. Refused when several attachments carry it.',
+          ),
         destination: z
           .string()
           .optional()
@@ -119,14 +166,14 @@ export default function registerAttachmentTools(
       }),
       annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    async ({ account, emailId, mailbox, filename, destination, open, overwrite }) => {
+    async ({ account, emailId, mailbox, partId, filename, destination, open, overwrite }) => {
       try {
         const target = destination ?? join(homedir(), 'Downloads');
         const result = await imapService.saveAttachmentToDisk(
           account,
           emailId,
           mailbox,
-          filename,
+          attachmentRef(partId, filename),
           target,
           overwrite,
         );
@@ -184,7 +231,8 @@ export default function registerAttachmentTools(
       description:
         'Run a search and download every attachment (optionally filtered by filename/mimetype) into a ' +
         'dated folder under ~/Downloads/. Useful for audit exports, year-end lease PDF sweeps, vendor ' +
-        'invoice collections.',
+        'invoice collections. Each attachment is fetched by its partId, so two attachments with the same ' +
+        'name are both saved (the second gets a -1 suffix); inline cid images (signature logos) are skipped.',
       inputSchema: z.object({
         account: z
           .string()

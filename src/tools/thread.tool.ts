@@ -8,6 +8,7 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
+import { describeAttachments } from '../services/attachment-select.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import { applyBodyFormat, DEFAULT_MULTI_BODY_MAX } from '../utils/body-format.js';
 import { bodyFormatParam, maxLengthParam, resolveMaxLength } from './body-params.js';
@@ -85,7 +86,7 @@ export default function registerThreadTools(server: McpServer, imapService: IMai
           parts.push(`Subject: ${email.subject}`);
 
           if (email.attachments.length > 0) {
-            parts.push(`📎 ${email.attachments.map((a) => a.filename).join(', ')}`);
+            parts.push(`📎 ${describeAttachments(email.attachments)}`);
           }
 
           // In newestFirst mode, only render body for the newest (first) message
