@@ -13,10 +13,16 @@
  *   - les champs d'en-tête interpolés (nom, date, objet) sont ramenés sur une
  *     ligne, tous sauts de ligne Unicode compris (NEL, U+2028, U+2029) : un nom
  *     d'expéditeur piégé ne peut pas fabriquer une seconde ligne « On … wrote: ».
+ *
+ * Langue : la ligne d'introduction de la citation et l'en-tête de transfert
+ * sont en français par défaut (`reply_language`, réglable globalement et par
+ * compte), en anglais sur demande. La date y est formatée selon la langue,
+ * dans le fuseau horaire local.
  */
 
-import type { Email, EmailAddress } from '../types/index.js';
-import { escapeHtml, htmlToPlainText } from './html-text.js';
+import type { Email, EmailAddress, ReplyLanguage } from '../types/index.js';
+import { bestPlainText } from './body-format.js';
+import { escapeHtml } from './html-text.js';
 
 /** Tous les sauts de ligne qu'un moteur de rendu peut interpréter comme tels. */
 const LINE_BREAK_RE = /\r\n|[\r\n\u0085\u2028\u2029]/g;
@@ -35,59 +41,132 @@ function nonEmpty(value: string | undefined): value is string {
 }
 
 /**
- * Texte lisible de l'original : sa partie text/plain si elle existe, sinon son
- * HTML converti — jamais le HTML brut.
+ * Texte lisible de l'original, choisi comme pour la lecture (`bestPlainText`) :
+ * sa partie text/plain, sauf si c'est un « bouchon » face au HTML (« Votre
+ * client ne lit pas le HTML… »), auquel cas le HTML converti — jamais le HTML
+ * brut. Avant, la partie texte gagnait toujours : une réponse citait le
+ * bouchon d'une ligne au lieu du vrai message.
  */
 export function originalAsPlainText(original: Pick<Email, 'bodyText' | 'bodyHtml'>): string {
-  if (nonEmpty(original.bodyText)) return original.bodyText.replace(LINE_BREAK_RE, '\n');
-  if (nonEmpty(original.bodyHtml)) return htmlToPlainText(original.bodyHtml);
-  return '';
+  return (bestPlainText(original) ?? '').replace(LINE_BREAK_RE, '\n');
 }
 
-function attribution(original: Pick<Email, 'date' | 'from'>): string {
-  return `On ${oneLine(original.date)}, ${formatAddress(original.from)} wrote:`;
+/** Langue par défaut des citations et en-têtes de transfert. */
+export const DEFAULT_REPLY_LANGUAGE: ReplyLanguage = 'fr';
+
+const LOCALES: Record<ReplyLanguage, string> = { fr: 'fr-FR', en: 'en-US' };
+
+/**
+ * Date de l'original lisible dans la langue, fuseau horaire local :
+ * « 15 nov. 2026 à 14:32 » (fr) ou « Nov 15, 2026, 2:32 PM » (en). Une date
+ * illisible est rendue telle quelle. Le résultat est ramené sur une ligne,
+ * comme toute valeur interpolée.
+ */
+export function formatQuoteDate(
+  value: string,
+  lang: ReplyLanguage = DEFAULT_REPLY_LANGUAGE,
+): string {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return oneLine(value);
+  if (lang === 'en') {
+    return oneLine(
+      new Intl.DateTimeFormat(LOCALES.en, { dateStyle: 'medium', timeStyle: 'short' }).format(date),
+    );
+  }
+  const day = new Intl.DateTimeFormat(LOCALES.fr, {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  }).format(date);
+  const time = new Intl.DateTimeFormat(LOCALES.fr, { hour: '2-digit', minute: '2-digit' }).format(
+    date,
+  );
+  return oneLine(`${day} à ${time}`);
+}
+
+/** Ligne qui introduit la citation : « Le …, X a écrit : » / « On …, X wrote: ». */
+export function attribution(
+  original: Pick<Email, 'date' | 'from'>,
+  lang: ReplyLanguage = DEFAULT_REPLY_LANGUAGE,
+): string {
+  const when = formatQuoteDate(original.date, lang);
+  const who = formatAddress(original.from);
+  return lang === 'en' ? `On ${when}, ${who} wrote:` : `Le ${when}, ${who} a écrit :`;
 }
 
 /**
  * Bloc cité, version texte (style Thunderbird / Mutt) :
  *
- *     On <date>, <expéditeur> wrote:
+ *     Le <date>, <expéditeur> a écrit :
  *     > ligne 1
  *     > ligne 2
  */
-export function quoteOriginalAsText(original: Email): string {
+export function quoteOriginalAsText(
+  original: Email,
+  lang: ReplyLanguage = DEFAULT_REPLY_LANGUAGE,
+): string {
   const quoted = originalAsPlainText(original)
     .split('\n')
     .map((line) => (line.trim() ? `> ${line}` : '>'))
     .join('\n');
-  return `\n\n${attribution(original)}\n${quoted}`;
+  return `\n\n${attribution(original, lang)}\n${quoted}`;
 }
 
 /**
  * Bloc cité, version HTML : `<blockquote type="cite">` (reconnu comme
  * citation par les clients), contenant l'original en texte échappé.
  */
-export function quoteOriginalAsHtml(original: Email): string {
+export function quoteOriginalAsHtml(
+  original: Email,
+  lang: ReplyLanguage = DEFAULT_REPLY_LANGUAGE,
+): string {
   const plain = originalAsPlainText(original);
   const inner = plain
     ? `<pre style="white-space:pre-wrap;font-family:inherit;margin:0">${escapeHtml(plain)}</pre>`
     : '';
   return (
-    `<br><br><div>${escapeHtml(attribution(original))}</div>` +
+    `<br><br><div>${escapeHtml(attribution(original, lang))}</div>` +
     `<blockquote type="cite" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">${inner}</blockquote>`
   );
 }
 
-/** Lignes d'en-tête du bloc « Forwarded message » (valeurs ramenées sur une ligne). */
-export function forwardHeaderLines(original: Email): string[] {
+/** Libellés de l'en-tête de transfert, par langue. */
+const FORWARD_LABELS: Record<
+  ReplyLanguage,
+  { title: string; from: string; date: string; subject: string; to: string; cc: string }
+> = {
+  fr: {
+    title: '---------- Message transféré ----------',
+    from: 'De :',
+    date: 'Date :',
+    subject: 'Objet :',
+    to: 'À :',
+    cc: 'Cc :',
+  },
+  en: {
+    title: '---------- Forwarded message ----------',
+    from: 'From:',
+    date: 'Date:',
+    subject: 'Subject:',
+    to: 'To:',
+    cc: 'Cc:',
+  },
+};
+
+/** Lignes d'en-tête du bloc « Message transféré » (valeurs ramenées sur une ligne). */
+export function forwardHeaderLines(
+  original: Email,
+  lang: ReplyLanguage = DEFAULT_REPLY_LANGUAGE,
+): string[] {
+  const labels = FORWARD_LABELS[lang];
   const cc = original.cc ?? [];
   return [
-    '---------- Forwarded message ----------',
-    `From: ${formatAddress(original.from)}`,
-    `Date: ${oneLine(original.date)}`,
-    `Subject: ${oneLine(original.subject)}`,
-    `To: ${original.to.map(formatAddress).join(', ')}`,
-    ...(cc.length > 0 ? [`Cc: ${cc.map(formatAddress).join(', ')}`] : []),
+    labels.title,
+    `${labels.from} ${formatAddress(original.from)}`,
+    `${labels.date} ${formatQuoteDate(original.date, lang)}`,
+    `${labels.subject} ${oneLine(original.subject)}`,
+    `${labels.to} ${original.to.map(formatAddress).join(', ')}`,
+    ...(cc.length > 0 ? [`${labels.cc} ${cc.map(formatAddress).join(', ')}`] : []),
   ];
 }
 
@@ -95,8 +174,12 @@ export function forwardHeaderLines(original: Email): string[] {
  * Corps texte d'un transfert : la note de l'utilisateur, l'en-tête du message
  * transféré, puis l'original en texte (HTML converti, pas collé brut).
  */
-export function forwardAsText(note: string | undefined, original: Email): string {
-  const header = forwardHeaderLines(original).join('\n');
+export function forwardAsText(
+  note: string | undefined,
+  original: Email,
+  lang: ReplyLanguage = DEFAULT_REPLY_LANGUAGE,
+): string {
+  const header = forwardHeaderLines(original, lang).join('\n');
   const prefix = nonEmpty(note) ? `${note}\n\n` : '';
   return `${prefix}${header}\n\n${originalAsPlainText(original)}`;
 }
@@ -127,6 +210,7 @@ export function forwardAsHtml(
   note: string | undefined,
   original: Email,
   noteIsHtml = false,
+  lang: ReplyLanguage = DEFAULT_REPLY_LANGUAGE,
 ): string {
   let noteHtml = '';
   if (nonEmpty(note)) {
@@ -134,7 +218,7 @@ export function forwardAsHtml(
       ? `<div>${note}</div>`
       : `<div>${escapeHtml(note).replace(/\n/g, '<br>')}</div>`;
   }
-  const header = forwardHeaderLines(original).map(escapeHtml).join('<br>');
+  const header = forwardHeaderLines(original, lang).map(escapeHtml).join('<br>');
   const originalHtml = nonEmpty(original.bodyHtml)
     ? renderableHtml(original.bodyHtml)
     : `<pre style="white-space:pre-wrap;font-family:inherit;margin:0">${escapeHtml(originalAsPlainText(original))}</pre>`;

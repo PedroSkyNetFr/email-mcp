@@ -17,6 +17,7 @@ import { htmlToPlainText } from '../utils/html-text.js';
 import type { ComposeOptions } from '../utils/mime-headers.js';
 import { buildReferences, composeMessage } from '../utils/mime-headers.js';
 import {
+  DEFAULT_REPLY_LANGUAGE,
   forwardAsHtml,
   forwardAsText,
   quoteOriginalAsHtml,
@@ -25,7 +26,7 @@ import {
 import { forwardSubject, replySubject } from '../utils/subject-prefix.js';
 import type { ResolvedAttachment } from './attachment-resolver.js';
 import type ImapService from './imap.service.js';
-import { assertMessageSize } from './send-limit.js';
+import { assertMessageSize, explainSmtpSizeRejection } from './send-limit.js';
 import { applyAccountSignature, shouldAppendSignature } from './signature-loader.js';
 
 // ---------------------------------------------------------------------------
@@ -299,7 +300,10 @@ export default class SmtpService {
     // a forcé le HTML). En HTML, l'original est cité en texte échappé.
     let { body } = signed;
     if (options.quoteOriginal !== false) {
-      body += signed.html ? quoteOriginalAsHtml(original) : quoteOriginalAsText(original);
+      const lang = account.replyLanguage ?? DEFAULT_REPLY_LANGUAGE;
+      body += signed.html
+        ? quoteOriginalAsHtml(original, lang)
+        : quoteOriginalAsText(original, lang);
     }
 
     // Build the raw message once — same bytes sent via SMTP and stored in Sent folder
@@ -386,6 +390,8 @@ export default class SmtpService {
     // décide. La signature se place sous la note, au-dessus du message transféré.
     const signing = shouldAppendSignature(account, options.appendSignature);
     const asHtml = options.html === true || signing;
+    // Langue de l'en-tête « Message transféré » (réglage reply_language).
+    const lang = account.replyLanguage ?? DEFAULT_REPLY_LANGUAGE;
 
     let parts: { html: string; text: string } | { text: string };
     let signatureAttachments: ResolvedAttachment[] = [];
@@ -398,16 +404,16 @@ export default class SmtpService {
       signatureAttachments = signed.attachments;
       const noteText = signed.html ? htmlToPlainText(signed.body) : options.body;
       parts = {
-        html: forwardAsHtml(signed.html ? signed.body : options.body, original, signed.html),
+        html: forwardAsHtml(signed.html ? signed.body : options.body, original, signed.html, lang),
         // L'alternative texte reprend la note (signature comprise) et l'original
         // converti — pas une conversion du HTML complet, qui perdrait la
         // structure de l'en-tête de transfert.
-        text: forwardAsText(noteText, original),
+        text: forwardAsText(noteText, original, lang),
       };
     } else {
       // Texte seul : l'original HTML est converti en texte lisible, jamais
       // collé brut (ses balises s'affichaient telles quelles).
-      parts = { text: forwardAsText(options.body, original) };
+      parts = { text: forwardAsText(options.body, original, lang) };
     }
 
     const attachments = [...fetched.attachments, ...signatureAttachments];
@@ -542,7 +548,11 @@ export default class SmtpService {
     const rawMessage = await composeMessage(params.mailOptions);
     assertMessageSize(account, rawMessage.length, params.attachments);
 
-    const result = await transport.sendMail({ envelope, raw: rawMessage });
+    const result = await transport
+      .sendMail({ envelope, raw: rawMessage })
+      .catch((error: unknown) => {
+        throw explainSmtpSizeRejection(error, account, rawMessage.length);
+      });
 
     // Append the SAME raw bytes to Sent — "one raw message, sent and stored".
     const sentCopy = await this.appendToSentFolder(accountName, rawMessage);
@@ -675,13 +685,18 @@ export default class SmtpService {
     // Message-ID/Date are already embedded in the raw bytes — leave them as-is.
     const sanitizedRaw = stripBccHeader(rawBuffer);
 
-    // Taille totale contrôlée avant l'envoi ; en cas de refus, le brouillon reste intact.
+    // Taille totale contrôlée avant l'envoi si le compte fixe `max_message_mb` ;
+    // en cas de refus, le brouillon reste intact.
     assertMessageSize(account, sanitizedRaw.length);
 
     // When sending pre-composed raw bytes, nodemailer cannot derive the SMTP
     // envelope from the opaque message — pass it explicitly (mirrors
     // replyToEmail) so the RCPT TO list covers every To + Cc + Bcc recipient.
-    const result = await transport.sendMail({ envelope, raw: sanitizedRaw });
+    const result = await transport
+      .sendMail({ envelope, raw: sanitizedRaw })
+      .catch((error: unknown) => {
+        throw explainSmtpSizeRejection(error, account, sanitizedRaw.length);
+      });
 
     // Append the SAME sanitized bytes to Sent BEFORE deleting the draft —
     // "one raw message, sent and stored".

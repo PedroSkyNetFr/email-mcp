@@ -17,7 +17,8 @@ describe('htmlToPlainText', () => {
 
   it('keeps the link target next to its text', () => {
     expect(htmlToPlainText('<a href="https://example.com/doc">la doc</a>')).toBe(
-      'la doc (https://example.com/doc)',
+      // Même notation qu'à la lecture (moteur html-to-text partagé).
+      'la doc [https://example.com/doc]',
     );
     // Texte identique à la cible : pas de doublon.
     expect(htmlToPlainText('<a href="https://example.com">https://example.com</a>')).toBe(
@@ -30,19 +31,22 @@ describe('htmlToPlainText', () => {
     const html =
       '<style>p{color:red}</style><script>alert(1)</script><!-- note -->' +
       '<ul><li>un</li><li>deux</li></ul><img src="cid:logo" alt="Logo"><img src="x.png">';
-    expect(htmlToPlainText(html)).toBe('- un\n- deux\n[Logo]');
+    expect(htmlToPlainText(html)).toBe('- un\n- deux\n\n[Logo]');
   });
 
   it('quotes <blockquote> content with ">" (nested included)', () => {
     const html =
       '<p>Réponse</p><blockquote><p>cité</p><blockquote>très cité</blockquote></blockquote>';
-    // Le « > » seul sépare le paragraphe cité de la citation imbriquée.
-    expect(htmlToPlainText(html)).toBe('Réponse\n\n> cité\n>\n>> très cité');
+    // Le « > » seul sépare le paragraphe cité de la citation imbriquée ;
+    // html-to-text préfixe chaque niveau par « > » (« > > »).
+    expect(htmlToPlainText(html)).toBe('Réponse\n\n> cité\n>\n> > très cité');
   });
 
   it('decodes entities, French accents included', () => {
     expect(htmlToPlainText('&Eacute;t&eacute; &amp; caf&#233; &#x2014; &nbsp;fin')).toBe(
-      'Été & café — fin',
+      // L'espace insécable est conservée (U+00A0) et ne fusionne pas avec
+      // l'espace voisine, comme dans un navigateur.
+      'Été & café —  fin',
     );
   });
 });

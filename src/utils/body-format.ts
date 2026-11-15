@@ -77,7 +77,13 @@ export const RAW_CAP = 256 * 1024;
  *   collées bout à bout ;
  * - titres et en-têtes de tableau laissés dans leur casse d'origine.
  */
-const HTML_TO_TEXT_OPTIONS: HtmlToTextOptions = {
+/**
+ * Options `html-to-text` partagées par la lecture et l'envoi (voir
+ * `utils/html-text.ts`, qui ne fait que remplacer le traitement des images) :
+ * un seul moteur de conversion, pour qu'un même HTML donne le même texte
+ * qu'on le lise ou qu'on l'envoie.
+ */
+export const HTML_TO_TEXT_OPTIONS: HtmlToTextOptions = {
   wordwrap: false,
   selectors: [
     { selector: 'a', options: { hideLinkHrefIfSameAsText: true, linkBrackets: ['[', ']'] } },
@@ -93,7 +99,9 @@ const HTML_TO_TEXT_OPTIONS: HtmlToTextOptions = {
       format: 'dataTable',
       options: { uppercaseHeaderCells: false, maxColumnWidth: 60 },
     },
-    { selector: 'ul', options: { itemPrefix: ' • ' } },
+    // « - » et non « • » : l'espace de tête du premier élément disparaissait au
+    // nettoyage final, décalant la liste (« • un » puis « • deux » indenté).
+    { selector: 'ul', options: { itemPrefix: '- ' } },
   ],
 };
 
@@ -209,6 +217,42 @@ export function isStubText(text: string, htmlAsText: string): boolean {
 }
 
 /**
+ * Au-delà de cette longueur (caractères) ou de ce nombre de mots, une partie
+ * texte n'est plus tenue pour un bouchon possible, et le HTML n'est pas
+ * converti pour le vérifier.
+ *
+ * Pourquoi : le test du bouchon impose de convertir TOUT le HTML (html-to-text,
+ * le poste le plus coûteux de la lecture d'un corps — plusieurs dizaines de ms
+ * sur une lettre d'information de 200 Ko) alors qu'un vrai bouchon tient en
+ * une ou deux lignes (« Votre client ne lit pas le HTML », un lien « voir en
+ * ligne »). Une partie texte de 2 000 caractères ou 300 mots est un vrai
+ * contenu. Risque assumé : un texte TRONQUÉ plus long que ce seuil, face à un
+ * HTML trois fois plus riche, n'est plus détecté — cas non rencontré.
+ */
+export const STUB_TEXT_MAX_CHARS = 2_000;
+export const STUB_TEXT_MAX_WORDS = 300;
+
+/** Vrai quand la partie texte est trop riche pour être un bouchon (pas de conversion). */
+export function cannotBeStub(text: string): boolean {
+  return text.length > STUB_TEXT_MAX_CHARS || countWords(text) >= STUB_TEXT_MAX_WORDS;
+}
+
+/**
+ * Choix entre la partie texte et le HTML converti, sans convertir le HTML quand
+ * c'est inutile : pas de HTML, ou partie texte trop riche pour être un bouchon.
+ * `htmlAsText` n'est rempli que si la conversion a eu lieu.
+ */
+function chooseText(
+  text: string | undefined,
+  html: string | undefined,
+): { htmlWins: boolean; htmlAsText?: string } {
+  if (!html) return { htmlWins: false };
+  if (text && cannotBeStub(text)) return { htmlWins: false };
+  const htmlAsText = htmlToPlainText(html);
+  return { htmlWins: !text || isStubText(text, htmlAsText), htmlAsText };
+}
+
+/**
  * The subset of an `Email` that drives body presentation. Passing the
  * object (not 4 positional args) keeps the three call sites from drifting.
  */
@@ -239,10 +283,8 @@ export interface BodySource {
 export function bestPlainText(src: Pick<BodySource, 'bodyText' | 'bodyHtml'>): string | undefined {
   const text = nonEmpty(src.bodyText);
   const html = nonEmpty(src.bodyHtml);
-  if (!html) return text;
-  const htmlAsText = htmlToPlainText(html);
-  if (!text) return htmlAsText;
-  return isStubText(text, htmlAsText) ? htmlAsText : text;
+  const { htmlWins, htmlAsText } = chooseText(text, html);
+  return htmlWins ? htmlAsText : text;
 }
 
 function capRaw(raw: string): string {
@@ -319,9 +361,9 @@ export function applyBodyFormat(
     if (format === 'html') {
       body = html ?? text ?? '';
     } else {
-      // Le HTML converti n'est calculé que s'il existe ET qu'il peut servir.
-      const htmlAsText = html ? htmlToPlainText(html) : undefined;
-      const htmlWins = !text || (htmlAsText !== undefined && isStubText(text, htmlAsText));
+      // Le HTML converti n'est calculé que s'il existe ET qu'il peut servir :
+      // une partie texte longue n'est pas un bouchon (voir cannotBeStub).
+      const { htmlWins, htmlAsText } = chooseText(text, html);
       if (format === 'full') {
         body = htmlWins ? (html ?? '') : (text ?? '');
       } else {

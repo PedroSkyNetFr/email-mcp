@@ -13,6 +13,7 @@ import type {
   AppConfig,
   HookRule,
   OAuth2Config,
+  ReplyLanguage,
   SearchPreset,
 } from '../types/index.js';
 import type { RawAccountConfig, RawAppConfig, RawSearchPreset } from './schema.js';
@@ -283,7 +284,11 @@ function normalizeOAuth2(
  * Exportée pour `account add/edit`, qui teste la connexion du compte saisi avec
  * exactement la forme que le serveur utilisera.
  */
-export function normalizeAccount(raw: RawAccountConfig): AccountConfig {
+export function normalizeAccount(
+  raw: RawAccountConfig,
+  /** `reply_language` de [settings], appliqué quand le compte n'en fixe pas. */
+  defaultReplyLanguage: ReplyLanguage = 'fr',
+): AccountConfig {
   return {
     name: raw.name,
     email: raw.email,
@@ -317,6 +322,7 @@ export function normalizeAccount(raw: RawAccountConfig): AccountConfig {
     backend: raw.backend,
     signatureDefault: raw.signature_default,
     maxMessageMb: raw.max_message_mb,
+    replyLanguage: raw.reply_language ?? defaultReplyLanguage,
   };
 }
 
@@ -408,6 +414,7 @@ function normalizeConfig(raw: RawAppConfig): AppConfig {
       // tightens it: a client entry can make one instance read-only, never
       // lift a read_only set in the file.
       readOnly: raw.settings.read_only || process.env.MCP_EMAIL_READ_ONLY === 'true',
+      replyLanguage: raw.settings.reply_language ?? 'fr',
       sentRetentionDays: raw.settings.scheduler?.sent_retention_days,
       watcher: {
         enabled: raw.settings.watcher.enabled,
@@ -436,7 +443,9 @@ function normalizeConfig(raw: RawAppConfig): AppConfig {
         calendarConfirm: raw.settings.hooks.calendar_confirm ?? true,
       },
     },
-    accounts: raw.accounts.map(normalizeAccount),
+    accounts: raw.accounts.map((account) =>
+      normalizeAccount(account, raw.settings.reply_language ?? 'fr'),
+    ),
     searches: (raw.searches ?? []).map(normalizeSearchPreset),
   };
 }
@@ -518,9 +527,10 @@ export function generateTemplate(): string {
 [settings]
 rate_limit = 10  # max emails per minute per account
 read_only = false  # true: send nothing (scheduled emails included), change no mailbox (hook actions included)
+# reply_language = "fr"  # "fr" | "en": quote line and forward header (overridable per account)
 
 # [settings.scheduler]
-# sent_retention_days = 90  # days of sent scheduled-email history kept (0 = keep all)
+# sent_retention_days = 30  # days of sent scheduled-email history kept (default 30; 0 = keep all)
 
 # [settings.watcher]
 # enabled = false        # enable IMAP IDLE real-time monitoring

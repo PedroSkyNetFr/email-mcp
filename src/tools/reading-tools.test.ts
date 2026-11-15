@@ -224,6 +224,27 @@ describe('list_emails / search_emails', () => {
     expect(service.listEmails.mock.calls[1][1].preview).toBe(true);
   });
 
+  it('search_all_accounts takes the same preview parameter as search_emails (7b)', async () => {
+    const service = { searchAcrossAccounts: vi.fn().mockResolvedValue(page([meta])) };
+    const call = captureTools((server) =>
+      registerEmailsTools(
+        server,
+        service as never,
+        {
+          getAccountNames: () => ['a', 'b'],
+        } as never,
+      ),
+    );
+
+    const plain = await call('search_all_accounts', { query: 'soldes' });
+    expect(plain.text).not.toContain('Les soldes commencent');
+    expect(service.searchAcrossAccounts.mock.calls[0][2].preview).toBe(false);
+
+    const withPreview = await call('search_all_accounts', { query: 'soldes', preview: true });
+    expect(withPreview.text).toContain('Les soldes commencent');
+    expect(service.searchAcrossAccounts.mock.calls[1][2].preview).toBe(true);
+  });
+
   it('list lines carry the mailing-list hint', async () => {
     const service = { listEmails: vi.fn().mockResolvedValue(page([meta])) };
     const call = captureTools((server) =>

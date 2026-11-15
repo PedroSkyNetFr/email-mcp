@@ -459,3 +459,62 @@ describe('GraphService — export', () => {
     }
   });
 });
+
+describe('GraphService — save_draft with in_reply_to (6)', () => {
+  /** Faux client dont les réponses dépendent de « MÉTHODE chemin ». */
+  function routed(found: boolean) {
+    const { client, service } = build();
+    client.request.mockImplementation(async (method: string, path: string) => {
+      if (method === 'GET' && path.startsWith('/me/messages?$filter=')) {
+        return { value: found ? [{ id: 'ORIG' }] : [] };
+      }
+      if (method === 'POST' && path === '/me/messages/ORIG/createReply') return { id: 'R1' };
+      if (method === 'POST' && path === '/me/messages') return { id: 'N1' };
+      return undefined;
+    });
+    const calls = () => client.request.mock.calls.map((c) => `${c[0]} ${c[1]}`);
+    return { client, service, calls };
+  }
+
+  const draft = {
+    to: ['a@example.com'],
+    subject: 'Re: devis',
+    body: 'Bonjour',
+    inReplyTo: '<orig@example.com>',
+  };
+
+  it('threads the draft: createReply on the original, then PATCH of the whole content', async () => {
+    // Avant : POST /me/messages, in_reply_to ignoré — brouillon hors du fil.
+    const { client, service, calls } = routed(true);
+
+    const result = await service.saveDraft('graph', draft);
+
+    expect(result).toEqual({ id: 'R1', mailbox: 'Drafts' });
+    expect(calls().slice(1)).toEqual([
+      'POST /me/messages/ORIG/createReply',
+      'PATCH /me/messages/R1',
+    ]);
+    expect(decodeURIComponent(calls()[0])).toContain("internetMessageId eq '<orig@example.com>'");
+    expect(client.request.mock.calls[2][2]).toMatchObject({
+      subject: 'Re: devis',
+      body: { contentType: 'Text', content: 'Bonjour' },
+      toRecipients: [{ emailAddress: { address: 'a@example.com' } }],
+    });
+  });
+
+  it('original not found: a normal draft, with a visible warning', async () => {
+    const { service, calls } = routed(false);
+
+    const result = await service.saveDraft('graph', draft);
+
+    expect(result.id).toBe('N1');
+    expect(result.warning).toMatch(/not found.*without threading/);
+    expect(calls().at(-1)).toBe('POST /me/messages');
+  });
+
+  it('without in_reply_to, nothing is looked up', async () => {
+    const { service, calls } = routed(true);
+    await service.saveDraft('graph', { ...draft, inReplyTo: undefined });
+    expect(calls()).toEqual(['POST /me/messages']);
+  });
+});

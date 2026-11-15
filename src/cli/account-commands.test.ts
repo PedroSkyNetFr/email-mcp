@@ -6,7 +6,12 @@
 import type { RawAccountConfig } from '../config/schema.js';
 import { AccountConfigSchema } from '../config/schema.js';
 import type { ServerSettings } from './account-commands.js';
-import { buildRawAccount, credentialFields, externalSecretSource } from './account-commands.js';
+import {
+  buildRawAccount,
+  credentialFields,
+  externalSecretSource,
+  resolveImapSecurityDefault,
+} from './account-commands.js';
 
 /** Paramètres serveur tels que l'éditeur les pré-remplit depuis le compte. */
 function serverOf(account: RawAccountConfig): ServerSettings {
@@ -14,6 +19,7 @@ function serverOf(account: RawAccountConfig): ServerSettings {
     imapHost: account.imap.host,
     imapPort: account.imap.port,
     imapTls: account.imap.tls,
+    imapStarttls: account.imap.starttls,
     smtpHost: account.smtp.host,
     smtpPort: account.smtp.port,
     smtpTls: account.smtp.tls,
@@ -132,6 +138,52 @@ describe('buildRawAccount — edit merges into the existing entry (1)', () => {
     );
     expect(created).toMatchObject({ name: 'new', username: 'new@example.com', password: 'pw' });
     expect(created.imap.verify_ssl).toBe(true);
+  });
+});
+
+describe('IMAP security is chosen explicitly, never inferred from "no TLS" (3)', () => {
+  it('a new account without TLS and without STARTTLS stays without STARTTLS', () => {
+    // Avant : `imapStarttls = true` dès que TLS était refusé.
+    const created = buildRawAccount(
+      { name: 'davmail', email: 'me@corp.example', fullName: '' },
+      { username: '', password: 'pw' },
+      {
+        ...serverOf(commandAccount),
+        imapHost: 'localhost',
+        imapPort: 1143,
+        imapTls: false,
+        imapStarttls: false,
+      },
+    );
+    expect(created.imap).toMatchObject({ tls: false, starttls: false });
+  });
+
+  it('switching an existing STARTTLS account to "none" is honoured', () => {
+    const updated = buildRawAccount(
+      identityOf(commandAccount),
+      { username: 'login-me', password: '' },
+      { ...serverOf(commandAccount), imapStarttls: false },
+      commandAccount,
+    );
+    expect(updated.imap).toMatchObject({ tls: false, starttls: false });
+  });
+
+  it('STARTTLS chosen explicitly is written, and never alongside implicit TLS', () => {
+    const base = { name: 'n', email: 'n@example.com', fullName: '' };
+    const creds = { username: '', password: 'pw' };
+    const server = serverOf(commandAccount);
+    expect(
+      buildRawAccount(base, creds, { ...server, imapTls: false, imapStarttls: true }).imap,
+    ).toMatchObject({ tls: false, starttls: true });
+    expect(
+      buildRawAccount(base, creds, { ...server, imapTls: true, imapStarttls: true }).imap,
+    ).toMatchObject({ tls: true, starttls: false });
+  });
+
+  it('the prompt pre-selects the current mode', () => {
+    expect(resolveImapSecurityDefault()).toBe('tls');
+    expect(resolveImapSecurityDefault({ imapTls: false, imapStarttls: true })).toBe('starttls');
+    expect(resolveImapSecurityDefault({ imapTls: false, imapStarttls: false })).toBe('none');
   });
 });
 

@@ -76,6 +76,12 @@ export interface ServerSettings {
   imapHost: string;
   imapPort: number;
   imapTls: boolean;
+  /**
+   * STARTTLS IMAP, choisi explicitement (sans effet si `imapTls`). L'ancien
+   * assistant le déduisait (`starttls = !imapTls`) : tout compte « sans TLS »
+   * se retrouvait en STARTTLS, y compris les passerelles locales en clair.
+   */
+  imapStarttls: boolean;
   smtpHost: string;
   smtpPort: number;
   smtpTls: boolean;
@@ -83,6 +89,13 @@ export interface ServerSettings {
   smtpPoolEnabled: boolean;
   smtpPoolMaxConnections: number;
   smtpPoolMaxMessages: number;
+}
+
+/** Choix « sécurité IMAP » proposé par défaut, d'après les réglages existants. */
+export function resolveImapSecurityDefault(defaults?: Partial<ServerSettings>): string {
+  if (defaults?.imapTls ?? true) return 'tls';
+  if (defaults?.imapStarttls) return 'starttls';
+  return 'none';
 }
 
 function resolveSmtpSecurityDefault(defaults?: Partial<ServerSettings>): string {
@@ -109,11 +122,20 @@ async function promptServerSettings(defaults?: Partial<ServerSettings>): Promise
   });
   assertNotCancel(imapPortStr);
 
-  const imapTls = await confirm({
-    message: 'IMAP use TLS?',
-    initialValue: defaults?.imapTls ?? true,
+  // Mode de sécurité IMAP demandé explicitement : TLS implicite, STARTTLS ou
+  // aucun. STARTTLS est obligatoire vers un hôte distant (la connexion échoue
+  // si le serveur ne le propose pas) ; « aucun » convient à une passerelle
+  // locale en clair (DavMail, Proton Bridge…).
+  const imapSecurity = await select({
+    message: 'IMAP security',
+    initialValue: resolveImapSecurityDefault(defaults),
+    options: [
+      { value: 'tls', label: 'TLS (port 993)' },
+      { value: 'starttls', label: 'STARTTLS (port 143, required for a remote host)' },
+      { value: 'none', label: 'None (local gateway only, e.g. DavMail / Bridge)' },
+    ],
   });
-  assertNotCancel(imapTls);
+  assertNotCancel(imapSecurity);
 
   const smtpHost = await text({
     message: 'SMTP host',
@@ -192,7 +214,8 @@ async function promptServerSettings(defaults?: Partial<ServerSettings>): Promise
   return {
     imapHost,
     imapPort: parseInt(imapPortStr || '993', 10),
-    imapTls,
+    imapTls: imapSecurity === 'tls',
+    imapStarttls: imapSecurity === 'starttls',
     smtpHost,
     smtpPort: parseInt(smtpPortStr || '465', 10),
     smtpTls: smtpSecurity === 'tls',
@@ -308,7 +331,7 @@ async function resolveServerSettings(
   if (provider) {
     log.success(`Auto-detected: ${provider.name}`);
     log.info(
-      `  IMAP: ${provider.imap.host}:${provider.imap.port} (${provider.imap.tls ? 'TLS' : 'plain'})`,
+      `  IMAP: ${provider.imap.host}:${provider.imap.port} (${formatSecurity(provider.imap.tls, provider.imap.starttls)})`,
     );
     const smtpLabel = getSmtpLabel(provider.smtp.starttls, provider.smtp.tls);
     log.info(`  SMTP: ${provider.smtp.host}:${provider.smtp.port} (${smtpLabel})`);
@@ -328,6 +351,7 @@ async function resolveServerSettings(
         imapHost: provider.imap.host,
         imapPort: provider.imap.port,
         imapTls: provider.imap.tls,
+        imapStarttls: provider.imap.starttls,
         smtpHost: provider.smtp.host,
         smtpPort: provider.smtp.port,
         smtpTls: provider.smtp.tls,
@@ -426,15 +450,10 @@ export function buildRawAccount(
   server: ServerSettings,
   existing?: RawAccountConfig,
 ): RawAccountConfig {
-  // STARTTLS IMAP : l'assistant ne pose que la question « TLS ? ». Sans TLS
-  // direct, on garde le choix STARTTLS déjà présent dans le fichier ; un compte
-  // qui passe de TLS à « pas de TLS » demande STARTTLS (le défaut historique).
-  let imapStarttls = true;
-  if (server.imapTls) {
-    imapStarttls = false;
-  } else if (existing && !existing.imap.tls) {
-    imapStarttls = existing.imap.starttls;
-  }
+  // STARTTLS IMAP : choisi explicitement dans l'assistant (TLS implicite /
+  // STARTTLS / aucun), plus jamais déduit de « pas de TLS ». TLS implicite et
+  // STARTTLS s'excluent.
+  const imapStarttls = !server.imapTls && server.imapStarttls;
 
   // L'identifiant par défaut est l'adresse : ne pas l'écrire explicitement dans
   // une entrée qui l'omettait et dont l'identifiant n'a pas changé.
@@ -700,6 +719,7 @@ async function editAccount(nameArg?: string): Promise<void> {
     imapHost: current.imap.host,
     imapPort: current.imap.port,
     imapTls: current.imap.tls,
+    imapStarttls: current.imap.starttls,
     smtpHost: current.smtp.host,
     smtpPort: current.smtp.port,
     smtpTls: current.smtp.tls,

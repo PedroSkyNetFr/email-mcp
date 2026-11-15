@@ -88,12 +88,18 @@ describe('Connection Modes', () => {
       await services.connections.closeAll();
     });
 
-    it('should connect via IMAP with STARTTLS', async () => {
+    // GreenMail n'annonce pas STARTTLS sur son port IMAP (3143), et il écoute
+    // sur l'hôte de bouclage. STARTTLS n'est obligatoire que pour un hôte
+    // distant (buildImapFlowOptions) : sur localhost, le comportement reste
+    // opportuniste, comme pour les passerelles locales en clair (DavMail,
+    // Proton Bridge). La connexion doit donc réussir, sans STARTTLS. Le refus
+    // pour un hôte distant est couvert par manager.connexions.test.ts.
+    it('connects via IMAP on a loopback host even though the server offers no STARTTLS', async () => {
       const mailboxes = await services.imapService.listMailboxes(account.name);
       expect(mailboxes.find((m) => m.path === 'INBOX')).toBeDefined();
     });
 
-    it('should list emails via IMAP with STARTTLS', async () => {
+    it('lists emails via IMAP on a loopback host with starttls = true', async () => {
       const list = await services.imapService.listEmails(account.name);
       expect(list.items).toBeInstanceOf(Array);
     });
@@ -111,7 +117,7 @@ describe('Connection Modes', () => {
       ).rejects.toThrow(/STARTTLS/i);
     });
 
-    it('should fetch full email content via STARTTLS', async () => {
+    it('fetches full email content on a loopback host with starttls = true', async () => {
       const list = await services.imapService.listEmails(account.name, { pageSize: 1 });
       if (list.items.length > 0) {
         const email = await services.imapService.getEmail(account.name, list.items[0].id);
@@ -119,7 +125,7 @@ describe('Connection Modes', () => {
       }
     });
 
-    it('should set flags via STARTTLS', async () => {
+    it('sets flags on a loopback host with starttls = true', async () => {
       const list = await services.imapService.listEmails(account.name, { pageSize: 1 });
       if (list.items.length > 0) {
         await services.imapService.setFlags(account.name, list.items[0].id, 'INBOX', 'read');

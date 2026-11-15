@@ -56,6 +56,7 @@ import { buildCoverage, MAX_SCANNED_MESSAGES, SEARCH_SCAN_BUDGET_MS } from '../s
 import { applyLiteralFilters } from '../search-criteria.js';
 import { applyAccountSignature } from '../signature-loader.js';
 import type GraphClient from './graph.client.js';
+import GraphSendService from './graph-send.service.js';
 
 /** Graph mailFolder subset we rely on. */
 interface GraphFolder {
@@ -598,7 +599,9 @@ export default class GraphService {
     return {
       total: folder.totalItemCount ?? 0,
       unread: folder.unreadItemCount ?? 0,
-      receivedToday: today['@odata.count'] ?? today.value.length,
+      // Sans `@odata.count`, le nombre reste inconnu : `value.length` vaudrait
+      // au plus 1 (à cause de `$top=1`) et afficherait un faux compteur.
+      receivedToday: today['@odata.count'],
     };
   }
 
@@ -1120,21 +1123,48 @@ export default class GraphService {
       cc?: string[];
       bcc?: string[];
       html?: boolean;
+      /** Message-ID auquel le brouillon répond : il est alors rattaché au fil. */
+      inReplyTo?: string;
       attachments?: { filename: string; content: Buffer; contentType: string; cid?: string }[];
     },
-  ): Promise<{ id: number | string; mailbox: string }> {
+  ): Promise<{ id: number | string; mailbox: string; warning?: string }> {
     const recipients = (addresses?: string[]) =>
       (addresses ?? [])
         .map((address) => address.trim())
         .filter(Boolean)
         .map((address) => ({ emailAddress: { address } }));
-
-    const created = await this.client(accountName).request<{ id: string }>('POST', '/me/messages', {
+    const client = this.client(accountName);
+    const message = {
       subject: options.subject,
       body: { contentType: options.html ? 'HTML' : 'Text', content: options.body },
       toRecipients: recipients(options.to),
       ccRecipients: recipients(options.cc),
       bccRecipients: recipients(options.bcc),
+    };
+
+    // in_reply_to était ignoré : le brouillon partait comme un nouveau fil.
+    // Graph ne permet pas de poser In-Reply-To ; on part donc d'un brouillon
+    // createReply sur l'original, comme l'envoi planifié (même code).
+    let warning: string | undefined;
+    if (options.inReplyTo) {
+      const originalId = await GraphSendService.findByInternetMessageId(client, options.inReplyTo);
+      if (originalId) {
+        const draft = await GraphSendService.createThreadedReplyDraft(client, originalId, message);
+        try {
+          await GraphSendService.addAttachments(client, draft.id, options.attachments ?? []);
+        } catch (err) {
+          await GraphSendService.discardDraft(client, draft.id);
+          throw err;
+        }
+        return { id: draft.id, mailbox: 'Drafts' };
+      }
+      warning =
+        `The message being replied to (${options.inReplyTo}) was not found in this mailbox, so ` +
+        'the draft was saved without threading (Graph cannot set In-Reply-To directly).';
+    }
+
+    const created = await client.request<{ id: string }>('POST', '/me/messages', {
+      ...message,
       ...(options.attachments?.length
         ? {
             attachments: options.attachments.map((attachment) => ({
@@ -1149,7 +1179,7 @@ export default class GraphService {
     });
 
     // Graph files new messages in Drafts itself; the id is opaque, not a UID.
-    return { id: created.id, mailbox: 'Drafts' };
+    return { id: created.id, mailbox: 'Drafts', ...(warning ? { warning } : {}) };
   }
 
   /**
@@ -1191,10 +1221,11 @@ export default class GraphService {
       cc?: string[];
       bcc?: string[];
       html?: boolean;
+      inReplyTo?: string;
       attachments?: AttachmentInput[];
       appendSignature?: boolean;
     },
-  ): Promise<{ id: number | string; mailbox: string }> {
+  ): Promise<{ id: number | string; mailbox: string; warning?: string }> {
     let resolved: ResolvedAttachment[] = [];
     if (options.attachments?.length) {
       const result = await resolveAttachments(
@@ -1222,6 +1253,7 @@ export default class GraphService {
       cc: options.cc,
       bcc: options.bcc,
       html: signed.html,
+      inReplyTo: options.inReplyTo,
       attachments: signed.attachments,
     });
   }

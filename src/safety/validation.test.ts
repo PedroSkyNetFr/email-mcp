@@ -108,6 +108,19 @@ describe('validateWebhookUrl', () => {
     ['IPv4 encapsulée (boucle locale)', 'http://[::ffff:127.0.0.1]/hook'],
     ['écriture décimale de 127.0.0.1', 'http://2130706433/hook'],
     ['sous-domaine de localhost', 'http://api.localhost/hook'],
+    ['localhost avec point final', 'http://localhost./hook'],
+    ['sous-domaine de localhost avec point final', 'http://api.localhost./hook'],
+    ['NAT64 vers la boucle locale', 'http://[64:ff9b::7f00:1]/hook'],
+    [
+      'NAT64 vers les métadonnées cloud (notation pointée)',
+      'http://[64:ff9b::169.254.169.254]/hook',
+    ],
+    ['NAT64 vers 10/8', 'http://[64:ff9b::a00:1]/hook'],
+    ['multicast 224.0.0.0/4', 'http://224.0.0.1/hook'],
+    ['multicast 224.0.0.0/4 (borne haute)', 'http://239.255.255.250/hook'],
+    ["bancs d'essai 198.18.0.0/15", 'http://198.19.255.1/hook'],
+    ['réservé 240.0.0.0/4', 'http://240.0.0.1/hook'],
+    ['diffusion limitée', 'http://255.255.255.255/hook'],
   ])('throws on %s', (_label, url) => {
     expect(() => validateWebhookUrl(url)).toThrow('loopback or private');
   });
@@ -116,6 +129,11 @@ describe('validateWebhookUrl', () => {
     expect(() => validateWebhookUrl('https://100.128.0.1/hook')).not.toThrow();
     expect(() => validateWebhookUrl('https://172.32.0.1/hook')).not.toThrow();
     expect(() => validateWebhookUrl('http://[2001:db8::1]/hook')).not.toThrow();
+    // NAT64 vers une IPv4 publique, et bornes des nouvelles plages.
+    expect(() => validateWebhookUrl('http://[64:ff9b::808:808]/hook')).not.toThrow();
+    expect(() => validateWebhookUrl('http://198.17.255.1/hook')).not.toThrow();
+    expect(() => validateWebhookUrl('http://198.20.0.1/hook')).not.toThrow();
+    expect(() => validateWebhookUrl('http://223.255.255.1/hook')).not.toThrow();
   });
 
   it('allows valid public https URL', () => {

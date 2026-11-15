@@ -100,7 +100,9 @@ export default function registerDraftTools(
           content: [
             {
               type: 'text' as const,
-              text: `📝 Draft saved (ID: ${result.id}, folder: ${result.mailbox}${attachSummary}).`,
+              text: `📝 Draft saved (ID: ${result.id}, folder: ${result.mailbox}${attachSummary}).${
+                'warning' in result && result.warning ? `\n⚠️ ${result.warning}` : ''
+              }`,
             },
           ],
         };

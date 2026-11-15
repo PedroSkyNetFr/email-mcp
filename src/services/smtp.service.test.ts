@@ -1,8 +1,10 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { simpleParser } from 'mailparser';
 import type { IConnectionManager } from '../connections/types.js';
 import type RateLimiter from '../safety/rate-limiter.js';
+import { formatQuoteDate } from '../utils/quote.js';
 import type { ResolvedAttachment } from './attachment-resolver.js';
 import type ImapService from './imap.service.js';
 import SmtpService, { normalizeEnvelopeRecipients, stripBccHeader } from './smtp.service.js';
@@ -959,6 +961,11 @@ describe('SmtpService — envoi et brouillons', () => {
     return (transport.sendMail.mock.calls[0][0].raw as Buffer).toString('utf-8');
   }
 
+  /** Message envoyé, décodé (en-têtes RFC 2047, corps quoted-printable). */
+  async function sentParsed() {
+    return simpleParser(transport.sendMail.mock.calls[0][0].raw as Buffer);
+  }
+
   beforeEach(() => {
     transport = createMockTransport();
     connections = createMockConnectionManager(transport);
@@ -1070,7 +1077,11 @@ describe('SmtpService — envoi et brouillons', () => {
       expect(raw).not.toMatch(/Content-Type: text\/html/i);
       expect(raw).not.toContain('<b>');
       expect(raw).toContain('Bonjour Jean');
-      expect(raw).toContain('---------- Forwarded message ----------');
+      // En-tête de transfert en français par défaut (reply_language).
+      const parsed = await sentParsed();
+      expect(parsed.text).toContain('---------- Message transféré ----------');
+      expect(parsed.text).toContain('De : Sender <sender@example.com>');
+      expect(parsed.text).toContain('Objet : ');
     });
 
     it('html=true adds an HTML part with the original HTML, plus the text alternative', async () => {
@@ -1101,7 +1112,8 @@ describe('SmtpService — envoi et brouillons', () => {
 
       await service.forwardEmail('test', { emailId: '42', to: ['f@example.com'] });
 
-      expect(sentRaw()).toMatch(/^Subject: TR: R/m);
+      // L'objet peut être encodé (RFC 2047) : on compare sa valeur décodée.
+      expect((await sentParsed()).subject).toBe('TR: Réunion');
       expect(sentRaw()).not.toContain('Fwd: TR:');
     });
   });
@@ -1116,11 +1128,38 @@ describe('SmtpService — envoi et brouillons', () => {
 
       await service.replyToEmail('test', { emailId: '42', body: 'Merci' });
 
-      const raw = sentRaw();
-      expect(raw).toContain('Merci');
-      expect(raw).toContain('On 2025-01-01, Sender <sender@example.com> wrote:');
-      expect(raw).toContain('> ligne 1');
-      expect(raw).toContain('> ligne 2');
+      const { text } = await sentParsed();
+      expect(text).toContain('Merci');
+      // Français par défaut, date formatée dans le fuseau local.
+      expect(text).toContain(
+        `Le ${formatQuoteDate('2025-01-01', 'fr')}, Sender <sender@example.com> a écrit :`,
+      );
+      expect(text).toContain('> ligne 1');
+      expect(text).toContain('> ligne 2');
+    });
+
+    it('reply_language = "en" on the account keeps the English attribution (14)', async () => {
+      const conn = createMockConnectionManager(transport, { replyLanguage: 'en' });
+      const service = new SmtpService(conn, rateLimiter, imapWith({ bodyText: 'ligne 1' }));
+
+      await service.replyToEmail('test', { emailId: '42', body: 'Thanks' });
+
+      const { text } = await sentParsed();
+      expect(text).toContain(
+        `On ${formatQuoteDate('2025-01-01', 'en')}, Sender <sender@example.com> wrote:`,
+      );
+      expect(text).not.toContain('a écrit');
+    });
+
+    it('reply_language = "en" also gives the English forward header (14)', async () => {
+      const conn = createMockConnectionManager(transport, { replyLanguage: 'en' });
+      const service = new SmtpService(conn, rateLimiter, imapWith({ bodyText: 'x' }));
+
+      await service.forwardEmail('test', { emailId: '42', to: ['f@example.com'] });
+
+      const { text } = await sentParsed();
+      expect(text).toContain('---------- Forwarded message ----------');
+      expect(text).toContain('From: Sender <sender@example.com>');
     });
 
     it('sends the bare body with quoteOriginal=false', async () => {
@@ -1134,6 +1173,7 @@ describe('SmtpService — envoi et brouillons', () => {
 
       expect(sentRaw()).not.toContain('texte original');
       expect(sentRaw()).not.toContain('wrote:');
+      expect((await sentParsed()).text).not.toContain('a écrit');
     });
 
     it('quotes the original HTML as escaped text in an HTML reply', async () => {
@@ -1199,7 +1239,7 @@ describe('SmtpService — envoi et brouillons', () => {
 
       const raw = sentRaw();
       expect(raw).toMatch(/multipart\/alternative/i);
-      expect(raw).toContain('le lien (https://example.com/x)');
+      expect(raw).toContain('le lien [https://example.com/x]');
     });
 
     it('sets In-Reply-To and References when replying from a scheduled send', async () => {
@@ -1238,6 +1278,39 @@ describe('SmtpService — envoi et brouillons', () => {
         }),
       ).rejects.toThrow(/too large.*a\.bin/s);
       expect(transport.sendMail).not.toHaveBeenCalled();
+    });
+
+    it('without max_message_mb, applies no local limit on SMTP (the server SIZE decides)', async () => {
+      const service = new SmtpService(connections, rateLimiter, imapWith({}));
+
+      // ~34 Mo une fois encodé : refusé autrefois par la limite locale de 25 Mo.
+      await service.sendEmail('test', {
+        to: ['r@example.com'],
+        subject: 'S',
+        body: 'b',
+        attachments: [
+          {
+            filename: 'big.bin',
+            content: Buffer.alloc(25 * 1024 * 1024),
+            contentType: 'application/octet-stream',
+          },
+        ],
+      });
+
+      expect(transport.sendMail).toHaveBeenCalledTimes(1);
+    });
+
+    it('turns a server-side size rejection (SIZE / 552) into a clear error', async () => {
+      const sizeError = Object.assign(new Error('Message size larger than allowed 10485760'), {
+        code: 'EMESSAGE',
+        command: 'MAIL FROM',
+      });
+      transport.sendMail.mockRejectedValueOnce(sizeError);
+      const service = new SmtpService(connections, rateLimiter, imapWith({}));
+
+      await expect(
+        service.sendEmail('test', { to: ['r@example.com'], subject: 'S', body: 'b' }),
+      ).rejects.toThrow(/too large for the SMTP server.*server limit 10\.0 MB.*Nothing was sent/s);
     });
 
     it('reports a failed Sent copy in the result instead of swallowing it', async () => {

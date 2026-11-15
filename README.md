@@ -213,12 +213,13 @@ tls = true
 | `gmail_auto_save` | `true` | Gmail files sent mail itself, so the append is skipped on Gmail; `false` appends anyway. |
 | `signature_path` | — | Outlook `.htm` signature appended on request ([signatures](#outlook-signature)). |
 | `signature_default` | `false` | Append the signature to every composed message unless a call says otherwise. |
-| `max_message_mb` | `25` (SMTP), `35` (Graph) | Largest outgoing message, attachments encoded included; a larger one is refused before anything is sent ([size limit](#size-limit)). |
+| `max_message_mb` | none (SMTP), `35` (Graph) | Largest outgoing message, attachments encoded included; a larger one is refused before anything is sent ([size limit](#size-limit)). On SMTP, unset means the server's own announced limit applies. |
+| `reply_language` | `[settings]` value | `"fr"` or `"en"`: language of the quote line and forward header for this account ([replies and forwards](#replies-forwards-and-what-happens-after-sending)). |
 | `imap.host` / `smtp.host` | *required* | Server host names — required by the schema even for a Graph account, where they are unused. |
 | `imap.port` | `993` | |
 | `smtp.port` | `465` | |
 | `imap.tls` / `smtp.tls` | `true` | Implicit TLS. |
-| `imap.starttls` / `smtp.starttls` | `false` | STARTTLS (for SMTP on port 587: `tls = false`, `starttls = true`). |
+| `imap.starttls` / `smtp.starttls` | `false` | STARTTLS (for SMTP on port 587: `tls = false`, `starttls = true`). On IMAP towards a remote host, STARTTLS is required: the connection fails if the server does not offer it, never falls back to plaintext. On a loopback host (`localhost`, `127.0.0.0/8`, `::1`) it stays opportunistic, for local plaintext gateways (DavMail, Proton Bridge). |
 | `imap.verify_ssl` / `smtp.verify_ssl` | `true` | Verify the server certificate. |
 | `smtp.pool.enabled` | `true` | Reuse SMTP connections. |
 | `smtp.pool.max_connections` | `1` | |
@@ -349,6 +350,8 @@ against code running as the same user, which can run the same command.
 |-----|---------|---------|
 | `rate_limit` | `10` | Max messages sent per minute and per account (SMTP sends). |
 | `read_only` | `false` | Read-only mode: write tools are not registered and the scheduled queue is not processed ([details](#read-only-mode)). |
+| `reply_language` | `"fr"` | Language of the line introducing a quoted original and of the forward header: `"fr"` or `"en"`; overridable per account. |
+| `scheduler.sent_retention_days` | `30` | Days of sent scheduled-email history kept in `scheduled/sent/`; `0` keeps everything ([scheduled sending](#scheduled-sending)). |
 | `watcher.enabled` | `false` | IMAP IDLE watcher. |
 | `watcher.folders` | `["INBOX"]` | Folders watched in each account. |
 | `watcher.idle_timeout` | `1740` | IDLE renewal, in seconds (60–1740). |
@@ -718,7 +721,7 @@ matches); above 20 000 matches without a client-side filter, the order falls
 back to folder order (UID) and a warning says so. Graph sorts by
 `receivedDateTime` on the server.
 
-**Preview.** `list_emails` and `search_emails` take `preview: true` to add a
+**Preview.** `list_emails`, `search_emails` and `search_all_accounts` take `preview: true` to add a
 ~200-character body preview per message. On IMAP it reads the first 1.5 KB of
 each message's text part (one extra FETCH per page), so it is off by default;
 Graph serves it at no cost but shows it only on request too, so both backends
@@ -854,7 +857,9 @@ while the data stays on disk, so large exports do not fill the conversation.
   `subject`, `labels`, `attachments`, `has_attachments`, `seen`, `flagged`;
   `columns` picks among `id`, `account`, `date`, `from`, `to`, `subject`, `flags`,
   `labels`, `attachments`, `preview`, `size` (on IMAP, `preview` reads the first
-  1.5 KB of each message's text part). NDJSON writes the full record. Default
+  1.5 KB of each message's text part). NDJSON writes the full record, body
+  preview included on both backends (on IMAP, that same partial read for every
+  exported message). Default
   file: `~/Downloads/email-export-<timestamp>.csv`.
 - **`save_email`** — the exact RFC 822 source, so attachments, formatting, DKIM
   signatures and the Received chain survive, and the file reopens in any mail
@@ -914,18 +919,33 @@ Graph accounts, attachments over 3 MB go through an upload session.
 ### Size limit
 
 Each attachment is capped at 25 MB, and the whole message — attachments
-base64-encoded, which adds about 37 % — must fit the account limit: 25 MB on
-SMTP, 35 MB on Graph (Exchange Online's default send limit), or `max_message_mb`
-when set. A larger message is refused before anything is sent, with the size of
-each attachment, instead of bouncing later with an opaque SMTP `552`.
+base64-encoded, which adds about 37 % — must fit the size limit:
+
+- **SMTP**: no local limit by default. The server announces its own (the `SIZE`
+  extension) and the message is refused before its content is transmitted if it
+  exceeds it; the error says the message is too large and that nothing was sent.
+  Set `max_message_mb` to check the size locally, with the size of each
+  attachment in the error.
+- **Graph**: 35 MB (Exchange Online's default send limit, which Graph does not
+  announce), or `max_message_mb` when set. A larger message is refused before
+  anything is sent, with the size of each attachment.
 
 ### Replies, forwards and what happens after sending
 
-- `reply_email` quotes the original below the reply by default (`On DATE, NAME
-  wrote:` and `>`-prefixed lines; in an HTML reply, a `<blockquote type="cite">`
+- `reply_email` quotes the original below the reply by default (an attribution
+  line and `>`-prefixed lines; in an HTML reply, a `<blockquote type="cite">`
   holding the original as escaped text, never its raw HTML). `quoteOriginal:
   false` sends the bare body; on Graph this goes through a reply draft whose body
   is replaced.
+- Language (`reply_language`, `[settings]` or per account, French by default):
+  `"fr"` gives `Le 15 nov. 2026 à 14:32, Jean Dupont <jean@x.fr> a écrit :` and a
+  `---------- Message transféré ----------` header with `De :`, `Date :`,
+  `Objet :`, `À :`, `Cc :`; `"en"` gives `On Nov 15, 2026, 2:32 PM, … wrote:` and
+  `---------- Forwarded message ----------` with `From:`, `Date:`, `Subject:`,
+  `To:`, `Cc:`. The date is shown in the server's local time zone. This applies
+  to messages composed locally (IMAP/SMTP accounts). On Graph accounts, the
+  native `/reply` and `/forward` let Exchange write its own quote header, in the
+  mailbox's language: email-mcp does not control it.
 - `forward_email` includes the original as readable text (an HTML original is
   converted, not pasted as markup); `html: true` adds an HTML part carrying the
   original HTML. On Graph the server builds the forward and the original keeps
@@ -940,6 +960,14 @@ each attachment, instead of bouncing later with an opaque SMTP `552`.
 - A scheduled reply (`schedule_email` with `in_reply_to`) keeps its thread: SMTP
   sets `In-Reply-To` and `References`; Graph, which cannot set those headers,
   sends it as a reply to the original message, or warns when it cannot find it.
+  `save_draft` with `in_reply_to` works the same way: on Graph the draft is
+  created as a reply to the original (so it stays in the thread), or saved as a
+  plain draft with a warning when the original is not found.
+- On Graph, when `/send` fails without a clear answer (network cut, 5xx, 429),
+  the message may have gone out: the draft is kept and the error says to check
+  Sent Items before sending again (a scheduled send is then marked failed, not
+  retried). A clear refusal (4xx) deletes the draft — Graph moves it to Deleted
+  Items.
 
 ### Inline images (`cid`)
 
@@ -1151,6 +1179,13 @@ marked `failed` after 15 minutes ("Interrupted while sending: it may have gone
 out"); check the Sent folder before scheduling it again. An instance only sends
 the emails of the accounts it serves. `cancel_scheduled` removes the entry and its
 draft.
+
+History: once sent, an entry moves to `scheduled/sent/`. Entries older than
+`[settings.scheduler] sent_retention_days` (**30** days by default; `0` keeps
+everything) are deleted by the running server (every 6 hours) and by
+`scheduler check`. Only entries whose own status is `sent` are ever deleted —
+pending, failed or unreadable ones stay — and nothing is deleted in read-only
+mode.
 
 ## Mailbox management
 

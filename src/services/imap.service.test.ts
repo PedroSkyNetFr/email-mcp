@@ -462,6 +462,34 @@ describe('ImapService', () => {
         expect(listed.warning).toBeUndefined();
       });
 
+      it('page 2 reuses the INTERNALDATE order of page 1 while the folder is unchanged', async () => {
+        // Avant : chaque page relisait l'INTERNALDATE des 30 candidats.
+        client.mailbox = { exists: 30, uidValidity: BigInt(7), uidNext: 31 } as never;
+        // Passe de tri = FETCH limité à UID + INTERNALDATE (la page lit plus).
+        const internalDatePasses = () =>
+          client.fetch.mock.calls.filter(
+            (c) => JSON.stringify(c[1]) === JSON.stringify({ uid: true, internalDate: true }),
+          ).length;
+
+        const p1 = await service.listEmails('test', { pageSize: 5 });
+        const p2 = await service.listEmails('test', { pageSize: 5, page: 2 });
+
+        expect(internalDatePasses()).toBe(1);
+        expect(p1.items.map((m) => m.id)).toEqual(['30', '29', '28', '27', '26']);
+        expect(p2.items.map((m) => m.id)).toEqual(['25', '24', '23', '22', '21']);
+
+        // Un message arrivé (UIDNEXT et nombre changent) invalide l'ordre en cache.
+        client.mailbox = { exists: 31, uidValidity: BigInt(7), uidNext: 32 } as never;
+        client.search.mockResolvedValue(Array.from({ length: 31 }, (_, i) => i + 1));
+        const fresh = await service.listEmails('test', { pageSize: 5 });
+        expect(internalDatePasses()).toBe(2);
+        expect(fresh.items[0].id).toBe('31');
+
+        // Autres critères de recherche : autre entrée, nouvelle lecture.
+        await service.searchEmails('test', '', { pageSize: 5, seen: false });
+        expect(internalDatePasses()).toBe(3);
+      });
+
       it('when every match fits in one page, the page orders itself (no extra INTERNALDATE pass)', async () => {
         client.search.mockResolvedValue([3, 2, 1]);
         // UID 3 reçu le plus tôt : il doit finir dernier.

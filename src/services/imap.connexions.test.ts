@@ -153,10 +153,37 @@ describe('getMailboxSnapshot (6)', () => {
     expect(client.status).toHaveBeenCalledWith('INBOX', { messages: true, unseen: true });
     const [criteria, options] = client.search.mock.calls[0] as [{ since: Date }, unknown];
     expect(options).toEqual({ uid: true });
-    expect(criteria.since.getHours()).toBe(0);
-    expect(criteria.since.getDate()).toBe(new Date().getDate());
+    // imapflow formate SINCE avec `toISOString()` : la date UTC du critère
+    // doit être la date LOCALE du jour.
+    const now = new Date();
+    const localDay = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    expect(criteria.since.toISOString().slice(0, 10)).toBe(localDay);
     expect(client.fetch).not.toHaveBeenCalled();
     expect(client._releaseFn).toHaveBeenCalled();
+  });
+
+  it('SINCE carries the local date even just after local midnight east of UTC (Paris)', async () => {
+    // 00:30 à Paris le 15 juin = 22:30Z le 14 : un minuit local passé tel quel
+    // à imapflow serait formaté « 14-Jun-2026 » et compterait deux jours.
+    const previousTz = process.env.TZ;
+    process.env.TZ = 'Europe/Paris';
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-06-14T22:30:00Z'));
+    try {
+      const client = createClient();
+      client.status.mockResolvedValue({ messages: 1, unseen: 0 });
+      client.search.mockResolvedValue([]);
+      const service = new ImapService(createConnections(client));
+
+      await service.getMailboxSnapshot('test', 'INBOX');
+
+      const [criteria] = client.search.mock.calls[0] as [{ since: Date }];
+      expect(criteria.since.toISOString()).toBe('2026-06-15T00:00:00.000Z');
+    } finally {
+      vi.useRealTimers();
+      if (previousTz === undefined) delete process.env.TZ;
+      else process.env.TZ = previousTz;
+    }
   });
 
   it('falls back to zero when STATUS is refused', async () => {

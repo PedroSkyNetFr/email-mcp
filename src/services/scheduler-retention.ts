@@ -12,7 +12,7 @@
  * La rétention est fondée sur l'âge, pas sur un nombre d'entrées : la question
  * qu'on se pose est « jusqu'où puis-je remonter ? », jamais « combien en
  * garder ? ». Elle se règle par `[settings.scheduler] sent_retention_days`
- * (90 par défaut, 0 pour tout garder).
+ * (30 par défaut, décision de l'utilisateur ; 0 pour tout garder).
  */
 
 import fs from 'node:fs/promises';
@@ -20,8 +20,11 @@ import path from 'node:path';
 
 import { SCHEDULED_SENT_DIR } from '../config/xdg.js';
 
-/** Environ un trimestre d'historique. */
-export const DEFAULT_SENT_RETENTION_DAYS = 90;
+/**
+ * Un mois d'historique : de quoi vérifier qu'un envoi récent est bien parti,
+ * sans accumuler indéfiniment. Choix de l'utilisateur (30 jours).
+ */
+export const DEFAULT_SENT_RETENTION_DAYS = 30;
 
 /** Intervalle minimal entre deux purges dans un même processus de longue durée. */
 export const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;

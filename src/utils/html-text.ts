@@ -8,13 +8,13 @@
  *   2. citer ou transférer un original HTML dans un message texte, au lieu d'y
  *      coller le HTML brut.
  *
- * Volontairement local et sans dépendance : `html-to-text` n'est pas une
- * dépendance directe du projet (seulement transitive, via mailparser), et
- * l'import d'une dépendance transitive casse sous pnpm. Le convertisseur de
- * lecture (`stripHtml`, body-format.ts) reste distinct : il vise l'affichage
- * au modèle, celui-ci la lisibilité pour un destinataire humain (liens
- * conservés, citations `>` pour les <blockquote>, listes).
+ * Le moteur est `html-to-text`, partagé avec la lecture (body-format.ts) :
+ * un même HTML donne le même texte qu'on le lise ou qu'on l'envoie.
  */
+
+import type { HtmlToTextOptions } from 'html-to-text';
+import { convert } from 'html-to-text';
+import { HTML_TO_TEXT_OPTIONS, htmlToPlainText as readingHtmlToPlainText } from './body-format.js';
 
 /** Entités nommées les plus fréquentes dans le courrier (dont les accents français). */
 const NAMED_ENTITIES: Record<string, string> = {
@@ -133,129 +133,44 @@ export function textToHtml(text: string): string {
   return escapeHtml(text).replace(/\r\n|\r|\n/g, '<br>');
 }
 
-// Marqueurs internes (caractères de la zone privée Unicode : absents d'un vrai courrier).
-const QUOTE_OPEN = '\uE000';
-const QUOTE_CLOSE = '\uE001';
-const PRE_MARK = '\uE002';
-
-/** Balises de bloc : un saut de ligne avant et après. */
-const BLOCK_TAGS =
-  'address|article|aside|center|dd|div|dl|dt|fieldset|figcaption|figure|footer|form|header|main|nav|ol|section|table|tbody|thead|tfoot|tr|ul';
-
-function attr(tag: string, name: string): string | undefined {
-  const match = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i').exec(tag);
-  if (!match) return undefined;
-  return decodeHtmlEntities(match[2] ?? match[3] ?? match[4] ?? '');
-}
-
-function stripTags(html: string): string {
-  return html.replace(/<[^>]*>/g, '');
-}
+/**
+ * Options de l'envoi : celles de la lecture (`HTML_TO_TEXT_OPTIONS`), sauf
+ * les images. La lecture les ignore (le modèle n'en a pas l'usage) ; pour un
+ * destinataire humain, une image porteuse de sens laisse son texte
+ * alternatif « [Logo] » — une image sans alt disparaît, et sa source n'est
+ * jamais écrite (une URI data: ferait des centaines de Ko de texte).
+ */
+const OUTBOUND_OPTIONS: HtmlToTextOptions = {
+  ...HTML_TO_TEXT_OPTIONS,
+  formatters: {
+    altOnly: (elem, _walk, builder) => {
+      const alt = (elem as { attribs?: Record<string, string> }).attribs?.alt?.trim();
+      if (alt) builder.addInline(`[${alt}]`);
+    },
+  },
+  selectors: [
+    ...(HTML_TO_TEXT_OPTIONS.selectors ?? []).filter((s) => s.selector !== 'img'),
+    { selector: 'img', format: 'altOnly' },
+  ],
+};
 
 /**
- * Convertit du HTML en texte lisible par un humain :
- *   - <br>, paragraphes, titres et blocs deviennent des sauts de ligne ;
- *   - <li> devient « - élément » ;
- *   - un lien garde sa cible : « texte (https://…) » (sauf si le texte EST l'URL) ;
- *   - <img alt="Logo"> devient « [Logo] » ; une image sans alt disparaît ;
- *   - <blockquote> devient des lignes préfixées par « > » (imbrication comprise) ;
- *   - <pre> garde ses espaces et ses retours à la ligne ;
- *   - <style>, <script>, <head> et les commentaires sont supprimés.
+ * Convertit du HTML en texte lisible par un humain (alternative text/plain
+ * d'un envoi HTML, citation ou transfert d'un original HTML).
+ *
+ * Même moteur que la lecture (`html-to-text`, voir `body-format.ts`) pour
+ * qu'un même HTML donne le même texte des deux côtés : liens conservés,
+ * listes, <blockquote> préfixés par « > », <pre> préservé, toutes les
+ * entités décodées. Seules les images diffèrent (voir OUTBOUND_OPTIONS). Ne
+ * lève jamais : en cas d'échec du moteur, repli sur la conversion de lecture.
  */
 export function htmlToPlainText(html: string): string {
-  let src = html
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<(script|style|head|title|xml)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
-
-  // <pre> : mis de côté avant l'écrasement des espaces, restitué à la fin.
-  const preBlocks: string[] = [];
-  src = src.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre\s*>/gi, (_whole, inner: string) => {
-    const text = decodeHtmlEntities(stripTags(inner.replace(/<br\s*\/?>/gi, '\n')));
-    preBlocks.push(text.replace(/\r\n?/g, '\n'));
-    return `\n${PRE_MARK}${preBlocks.length - 1}${PRE_MARK}\n`;
-  });
-
-  // Hors <pre>, les blancs HTML (dont les retours à la ligne) valent une espace.
-  src = src.replace(/\s+/g, ' ');
-
-  src = src
-    // Liens : texte puis cible, quand la cible apporte quelque chose.
-    .replace(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi, (_whole, attrs: string, inner: string) => {
-      const text = decodeHtmlEntities(stripTags(inner)).trim();
-      const href = attr(`<a ${attrs}>`, 'href')?.trim();
-      if (!href || href.startsWith('#') || /^javascript:/i.test(href)) return text;
-      const target = href.replace(/^mailto:/i, '');
-      if (!text) return target;
-      if (
-        text === href ||
-        text === target ||
-        text.replace(/\/$/, '') === target.replace(/\/$/, '')
-      ) {
-        return text;
-      }
-      return `${text} (${target})`;
-    })
-    .replace(/<img\b[^>]*>/gi, (tag) => {
-      const alt = attr(tag, 'alt')?.trim();
-      return alt ? `[${alt}]` : '';
-    })
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<hr\b[^>]*>/gi, '\n----\n')
-    .replace(/<blockquote\b[^>]*>/gi, `\n${QUOTE_OPEN}\n`)
-    .replace(/<\/blockquote\s*>/gi, `\n${QUOTE_CLOSE}\n`)
-    // L'ouverture de <li> suffit à changer de ligne : traiter aussi la
-    // fermeture laisserait une ligne vide entre deux éléments.
-    .replace(/<li\b[^>]*>/gi, '\n- ')
-    .replace(/<\/?(p|h[1-6])\b[^>]*>/gi, '\n\n')
-    .replace(new RegExp(`</?(${BLOCK_TAGS})\\b[^>]*>`, 'gi'), '\n')
-    .replace(/<\/t[dh]\s*>/gi, ' ');
-
-  src = decodeHtmlEntities(stripTags(src));
-
-  // Nettoyage ligne à ligne, puis restitution des <pre>.
-  const lines = src
-    .split('\n')
-    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
-    .join('\n')
-    .replace(
-      new RegExp(`${PRE_MARK}(\\d+)${PRE_MARK}`, 'g'),
-      (_w, index: string) => preBlocks[Number(index)] ?? '',
-    )
-    .split('\n');
-
-  // Lignes vides : au plus une à la suite, aucune juste après l'ouverture ou
-  // juste avant la fermeture d'une citation (sinon des « > » orphelins).
-  const compact: string[] = [];
-  lines.forEach((line) => {
-    const prev = compact[compact.length - 1];
-    if (line === '' && (prev === undefined || prev === '' || prev === QUOTE_OPEN)) return;
-    if (line === QUOTE_CLOSE && prev === '') compact.pop();
-    compact.push(line);
-  });
-
-  // Citations : chaque ligne reçoit autant de « > » que de <blockquote> ouverts.
-  let depth = 0;
-  const quoted: string[] = [];
-  compact.forEach((line) => {
-    if (line === QUOTE_OPEN) {
-      depth += 1;
-      return;
-    }
-    if (line === QUOTE_CLOSE) {
-      depth = Math.max(0, depth - 1);
-      quoted.push(''); // une ligne vide sépare la citation de ce qui suit
-      return;
-    }
-    if (depth === 0) {
-      quoted.push(line);
-      return;
-    }
-    const prefix = '>'.repeat(depth);
-    quoted.push(line ? `${prefix} ${line}` : prefix);
-  });
-
-  return quoted
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  try {
+    return convert(html, OUTBOUND_OPTIONS)
+      .replace(/[ \t]+$/gm, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  } catch {
+    return readingHtmlToPlainText(html);
+  }
 }

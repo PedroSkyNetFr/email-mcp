@@ -172,6 +172,50 @@ ${MINIMAL_TOML}`,
       expect(config.settings.sentRetentionDays).toBe(30);
     });
 
+    describe('reply_language (14)', () => {
+      const twoAccounts = (settings: string, secondAccountExtra: string) => `${settings}
+${MINIMAL_TOML}
+[[accounts]]
+name = "pro"
+email = "pro@example.com"
+password = "secret"
+${secondAccountExtra}
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+`;
+
+      it('defaults to French when nothing is set', async () => {
+        const configPath = path.join(tmpDir, 'config.toml');
+        await fs.writeFile(configPath, MINIMAL_TOML);
+        const config = await loadConfig(configPath);
+        expect(config.settings.replyLanguage).toBe('fr');
+        expect(config.accounts[0].replyLanguage).toBe('fr');
+      });
+
+      it('[settings] reply_language applies to every account, an account can override it', async () => {
+        const configPath = path.join(tmpDir, 'config.toml');
+        await fs.writeFile(
+          configPath,
+          twoAccounts('[settings]\nreply_language = "en"', 'reply_language = "fr"'),
+        );
+        const config = await loadConfig(configPath);
+        expect(config.accounts.map((a) => [a.name, a.replyLanguage])).toEqual([
+          ['test', 'en'],
+          ['pro', 'fr'],
+        ]);
+      });
+
+      it('refuses an unknown language', async () => {
+        const configPath = path.join(tmpDir, 'config.toml');
+        await fs.writeFile(configPath, `[settings]\nreply_language = "de"\n${MINIMAL_TOML}`);
+        await expect(loadConfig(configPath)).rejects.toThrow(/reply_language/);
+      });
+    });
+
     it('normalizes snake_case to camelCase', async () => {
       const toml = `
 [[accounts]]

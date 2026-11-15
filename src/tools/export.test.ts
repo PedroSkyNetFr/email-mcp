@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { EmailMeta } from '../types/index.js';
-import { writeExport } from './export.tool.js';
+import { exportNeedsPreview, writeExport } from './export.tool.js';
 
 function sampleEmail(partial: Partial<EmailMeta> = {}): EmailMeta {
   return {
@@ -22,6 +22,20 @@ function sampleEmail(partial: Partial<EmailMeta> = {}): EmailMeta {
     ...partial,
   };
 }
+
+describe('exportNeedsPreview (7a)', () => {
+  it('NDJSON always reads the preview, so IMAP and Graph write the same EmailMeta', () => {
+    // Avant : jamais d'aperçu en NDJSON sur IMAP, toujours un sur Graph.
+    expect(exportNeedsPreview('ndjson')).toBe(true);
+    expect(exportNeedsPreview('ndjson', ['id'])).toBe(true);
+  });
+
+  it('CSV reads it only when the preview column is requested', () => {
+    expect(exportNeedsPreview('csv')).toBe(false);
+    expect(exportNeedsPreview('csv', ['id', 'subject'])).toBe(false);
+    expect(exportNeedsPreview('csv', ['id', 'preview'])).toBe(true);
+  });
+});
 
 describe('writeExport', () => {
   let tmpDir: string;

@@ -50,6 +50,8 @@ import { htmlToPlainText } from '../utils/html-text.js';
 import { imapCommand } from '../utils/imap-error.js';
 import { CLASSIFICATION_HEADERS, classifyFromHeaders } from '../utils/mail-classification.js';
 import { buildReferences, composeMessage } from '../utils/mime-headers.js';
+import type { ArrivalCacheRef } from './arrival-order-cache.js';
+import { ArrivalOrderCache } from './arrival-order-cache.js';
 import type { AttachmentInput, ResolvedAttachment } from './attachment-resolver.js';
 import { resolveAttachments } from './attachment-resolver.js';
 import {
@@ -656,16 +658,31 @@ function byUidDesc(uids: number[]): Candidate[] {
 async function orderForPaging(
   client: ImapFlow,
   uids: number[],
-  opts: { force: boolean; pageSize: number },
+  opts: {
+    force: boolean;
+    pageSize: number;
+    /** Cache de l'ordre déjà calculé (voir arrival-order-cache.ts) et sa clé. */
+    cache?: { store: ArrivalOrderCache; ref: ArrivalCacheRef | undefined };
+  },
 ): Promise<PagingOrder> {
+  // Lecture des INTERNALDATE, servie par le cache quand le dossier et la
+  // recherche n'ont pas changé depuis la page précédente.
+  const byArrival = async (): Promise<Candidate[]> => {
+    const ref = opts.cache?.ref;
+    const hit = ref ? opts.cache?.store.get(ref, uids) : undefined;
+    if (hit) return hit;
+    const ordered = await orderByArrival(client, uids);
+    if (ref) opts.cache?.store.set(ref, ordered);
+    return ordered;
+  };
   if (opts.force) {
-    return { ordered: await orderByArrival(client, uids), mode: 'global' };
+    return { ordered: await byArrival(), mode: 'global' };
   }
   if (uids.length <= opts.pageSize) {
     return { ordered: byUidDesc(uids), mode: 'page' };
   }
   if (uids.length <= ARRIVAL_SORT_MAX) {
-    return { ordered: await orderByArrival(client, uids), mode: 'global' };
+    return { ordered: await byArrival(), mode: 'global' };
   }
   return {
     ordered: byUidDesc(uids),
@@ -1051,6 +1068,30 @@ export default class ImapService {
    * cross-account call. TTL'd at `MAILBOX_CACHE_TTL_MS`.
    */
   private mailboxListCache = new Map<string, { list: MailboxRef[]; expiresAt: number }>();
+
+  /**
+   * Ordre par date de réception déjà calculé pour une liste ou une recherche
+   * (orderForPaging), pour ne pas relire l'INTERNALDATE de tous les candidats
+   * à chaque page. Borné et invalidé par l'état du dossier.
+   */
+  private arrivalOrderCache = new ArrivalOrderCache();
+
+  /** Cache d'ordre et clé pour le dossier actuellement sélectionné sur `client`. */
+  private arrivalCacheFor(
+    client: ImapFlow,
+    accountName: string,
+    mailbox: string,
+    criteria: unknown,
+  ): { store: ArrivalOrderCache; ref: ArrivalCacheRef | undefined } {
+    const state = (client as unknown as { mailbox?: unknown }).mailbox as
+      | { uidValidity?: bigint; uidNext?: number; exists?: number }
+      | false
+      | undefined;
+    return {
+      store: this.arrivalOrderCache,
+      ref: ArrivalOrderCache.keyFor(accountName, mailbox, state, criteria),
+    };
+  }
 
   private static readonly MAILBOX_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -1484,7 +1525,11 @@ export default class ImapService {
       const clientSide = hasClientSideFilters(postFilters);
       // Valide la regex attachment_mimetype avant le premier FETCH.
       if (clientSide) compileMimetypeFilter(postFilters.attachmentMimetype);
-      const order = await orderForPaging(client, uids, { force: clientSide, pageSize });
+      const order = await orderForPaging(client, uids, {
+        force: clientSide,
+        pageSize,
+        cache: this.arrivalCacheFor(client, accountName, mailbox, criteria),
+      });
       if (order.warning) warnings.push(order.warning);
       uids = order.ordered.map((c) => c.uid);
       if (clientSide) {
@@ -1789,7 +1834,11 @@ export default class ImapService {
       // filtres (voir scanClientSide).
       const clientSide = hasClientSideFilters(postFilters);
       if (clientSide) compileMimetypeFilter(postFilters.attachmentMimetype);
-      const order = await orderForPaging(client, uids, { force: clientSide, pageSize });
+      const order = await orderForPaging(client, uids, {
+        force: clientSide,
+        pageSize,
+        cache: this.arrivalCacheFor(client, accountName, mailbox, criteria),
+      });
       if (order.warning) warnings.push(order.warning);
       uids = order.ordered.map((c) => c.uid);
       if (clientSide) {
@@ -3800,12 +3849,17 @@ export default class ImapService {
     // `false` : STATUS refusé sur un dossier existant ; compteurs à zéro.
     const counts = status === false ? undefined : status;
 
-    const midnight = new Date();
-    midnight.setHours(0, 0, 0, 0);
+    // SINCE ne porte qu'une date (sans heure) : imapflow la formate via
+    // `toISOString()`, donc en UTC. Un minuit local (`setHours(0,0,0,0)`)
+    // devient la veille à Paris (23:00Z ou 22:00Z) et « reçus aujourd'hui »
+    // compterait deux jours. On construit donc minuit UTC de la date LOCALE,
+    // comme `normalizeDate` (src/utils/date.ts).
+    const now = new Date();
+    const today = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
     const lock = await client.getMailboxLock(path);
     let receivedToday = 0;
     try {
-      const uids = await client.search({ since: midnight }, { uid: true });
+      const uids = await client.search({ since: today }, { uid: true });
       receivedToday = Array.isArray(uids) ? uids.length : 0;
     } finally {
       lock.release();
@@ -4067,7 +4121,11 @@ export default class ImapService {
       if (clientSide) compileMimetypeFilter(postFilters.attachmentMimetype);
       // pageSize = maxRows : sous ce nombre, rien n'est coupé et l'ordre final
       // est de toute façon refait plus bas sur la date.
-      const order = await orderForPaging(client, uids, { force: clientSide, pageSize: maxRows });
+      const order = await orderForPaging(client, uids, {
+        force: clientSide,
+        pageSize: maxRows,
+        cache: this.arrivalCacheFor(client, accountName, mailbox, criteria),
+      });
       uids = order.ordered.map((c) => c.uid);
       let coverage: SearchCoverage | undefined;
       if (clientSide) {

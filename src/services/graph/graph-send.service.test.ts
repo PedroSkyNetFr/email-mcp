@@ -1,6 +1,7 @@
 import type { AccountConfig } from '../../types/index.js';
 import type GraphClient from './graph.client.js';
-import GraphSendService from './graph-send.service.js';
+import { GraphError } from './graph.client.js';
+import GraphSendService, { UncertainSendError } from './graph-send.service.js';
 
 const account: AccountConfig = {
   name: 'work',
@@ -104,6 +105,45 @@ describe('GraphSendService', () => {
       ).rejects.toThrow('boom');
       expect(fake.calls.at(-1)).toMatchObject({ method: 'DELETE', path: '/me/messages/D1' });
       expect(fake.calls.some((c) => c.path.endsWith('/send'))).toBe(false);
+    });
+  });
+
+  describe('sendViaDraft: what happens to the draft when /send fails (5)', () => {
+    /** Transfert sans pièces : createForward, suppression des pièces, /send. */
+    const forwardWith = (sendOutcome: unknown) => {
+      const fake = fakeClient(
+        {
+          'POST /me/messages/AAA/createForward': { id: 'D1' },
+          'POST /me/messages/D1/send': sendOutcome,
+        },
+        { '/me/messages/D1/attachments': [] },
+      );
+      const run = service(fake.client).forwardEmail('work', {
+        emailId: 'AAA',
+        to: ['to@example.com'],
+        includeAttachments: false,
+      });
+      return { fake, run };
+    };
+    const deleted = (fake: ReturnType<typeof fakeClient>) =>
+      fake.calls.some((c) => c.method === 'DELETE' && c.path === '/me/messages/D1');
+
+    it('a clear 4xx refusal of /send deletes the draft and fails', async () => {
+      const { fake, run } = forwardWith(new GraphError('Graph POST failed (400)', 400, '{}'));
+      await expect(run).rejects.toThrow('(400)');
+      expect(deleted(fake)).toBe(true);
+    });
+
+    it.each([
+      ['a network error', new TypeError('fetch failed')],
+      ['a 5xx', new GraphError('Graph POST failed (503)', 503, '')],
+      ['a 429', new GraphError('Graph POST failed (429)', 429, '')],
+    ])('%s on /send keeps the draft and reports an uncertain outcome', async (_label, error) => {
+      // Avant : le brouillon était supprimé alors que le message était peut-être parti.
+      const { fake, run } = forwardWith(error);
+      await expect(run).rejects.toBeInstanceOf(UncertainSendError);
+      await expect(run).rejects.toThrow(/uncertain.*Check Sent Items before sending again/s);
+      expect(deleted(fake)).toBe(false);
     });
   });
 

@@ -51,7 +51,9 @@ export default function registerStatsResource(
         date: new Date().toISOString().split('T')[0],
         inbox_total: mailbox.total,
         inbox_unread: mailbox.unread,
-        inbox_today: mailbox.receivedToday,
+        // `null` (et non 0) quand le serveur n'a pas donné le compte du jour :
+        // la clé reste présente et l'absence se distingue d'une journée vide.
+        inbox_today: mailbox.receivedToday ?? null,
         quota: quota ?? undefined,
       };
 

@@ -919,6 +919,14 @@ export default function registerEmailsTools(
           'Gmail accounts ONLY (when targeted accounts include Gmail). Non-Gmail accounts in the ' +
             'fan-out will error individually and appear in warnings.',
         ),
+      preview: z
+        .boolean()
+        .default(false)
+        .describe(
+          'Include a ~200-character body preview per message (default: false). On IMAP accounts this ' +
+            'reads the first 1.5 KB of each message text part (one extra FETCH per account page); ' +
+            'Microsoft Graph serves it at no extra cost.',
+        ),
     },
     { readOnlyHint: true, destructiveHint: false },
     async (params) => {
@@ -971,6 +979,7 @@ export default function registerEmailsTools(
           attachmentMimetype: params.attachment_mimetype,
           facets: params.facets,
           gmailRaw: params.gmail_raw,
+          preview: params.preview,
           ...literalFilterOptions(params),
         });
 
@@ -989,7 +998,7 @@ export default function registerEmailsTools(
           content: [
             {
               type: 'text' as const,
-              text: formatSearchResult(result, header, emptyMsg),
+              text: formatSearchResult(result, header, emptyMsg, params.preview),
             },
           ],
         };

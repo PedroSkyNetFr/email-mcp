@@ -126,6 +126,20 @@ function columnValue(meta: EmailMeta, col: CsvColumn | DefaultColumn): string {
  * pressure is bounded by `max_rows` (hard ceiling 50_000) × per-row size,
  * well below any reasonable budget.
  */
+/**
+ * L'export doit-il lire l'aperçu du corps ?
+ *
+ * - NDJSON : oui, toujours. La description promet « full EmailMeta », et Graph
+ *   fournit de toute façon `bodyPreview` avec chaque message ; sans cela, un
+ *   export NDJSON IMAP n'avait jamais d'aperçu alors qu'un export Graph en
+ *   avait un — le même outil rendait deux formats selon le backend.
+ * - CSV : seulement si la colonne `preview` est demandée, car sur IMAP c'est
+ *   une lecture partielle de la partie texte PAR message.
+ */
+export function exportNeedsPreview(format: 'csv' | 'ndjson', columns?: string[]): boolean {
+  return format === 'ndjson' || (columns ?? []).includes('preview');
+}
+
 export async function writeExport(params: {
   format: 'csv' | 'ndjson';
   items: EmailMeta[];
@@ -169,9 +183,9 @@ export default function registerExportTools(
     `Run any search_emails / search_all_accounts query and stream the result set to a CSV or ` +
       `NDJSON file under ~/Downloads/ (or a caller-supplied destination). Bypasses the MCP response ` +
       `byte budget — returns only a summary (path, rows_written, truncated). Default CSV columns: ` +
-      `id, account, date, from, subject, labels, attachments, has_attachments, seen, flagged. ${
-        COVERAGE_NOTE
-      }`,
+      `id, account, date, from, subject, labels, attachments, has_attachments, seen, flagged. ` +
+      `NDJSON writes the full EmailMeta of each message, body preview included (on IMAP this ` +
+      `reads the start of each message's text part). ${COVERAGE_NOTE}`,
     {
       account: z.string().optional().describe('Single-account mode'),
       accounts: z
@@ -226,7 +240,10 @@ export default function registerExportTools(
           ]),
         )
         .optional()
-        .describe('CSV only; ignored for NDJSON (NDJSON always writes full EmailMeta JSON)'),
+        .describe(
+          'CSV only; ignored for NDJSON (NDJSON always writes full EmailMeta JSON, body preview ' +
+            'included on both IMAP and Graph)',
+        ),
       destination: z
         .string()
         .optional()
@@ -287,9 +304,8 @@ export default function registerExportTools(
             attachmentMimetype: params.attachment_mimetype,
             gmailRaw: params.gmail_raw,
             ...literalFilterOptions(params),
-            // Aperçu lu seulement si la colonne `preview` est demandée : sur IMAP
-            // c'est une lecture partielle de la partie texte PAR message.
-            preview: params.format === 'csv' && (params.columns ?? []).includes('preview'),
+            // Aperçu : toujours en NDJSON, sur demande en CSV (exportNeedsPreview).
+            preview: exportNeedsPreview(params.format, params.columns),
             maxRows: params.max_rows,
           },
         );

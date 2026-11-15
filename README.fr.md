@@ -218,12 +218,13 @@ tls = true
 | `gmail_auto_save` | `true` | Gmail classe lui-même les messages envoyés, donc l'ajout est omis sur Gmail ; `false` l'ajoute quand même. |
 | `signature_path` | — | Signature Outlook `.htm` ajoutée à la demande ([signatures](#signature-outlook)). |
 | `signature_default` | `false` | Ajoute la signature à chaque message rédigé, sauf si l'appel dit le contraire. |
-| `max_message_mb` | `25` (SMTP), `35` (Graph) | Taille maximale d'un message sortant, pièces jointes encodées comprises ; au-delà, le message est refusé avant tout envoi ([limite de taille](#limite-de-taille)). |
+| `reply_language` | valeur de `[settings]` | `"fr"` ou `"en"` : langue de la ligne de citation et de l'en-tête de transfert pour ce compte ([réponses et transferts](#réponses-transferts-et-suites-de-lenvoi)). |
+| `max_message_mb` | aucune (SMTP), `35` (Graph) | Taille maximale d'un message sortant, pièces jointes encodées comprises ; au-delà, le message est refusé avant tout envoi ([limite de taille](#limite-de-taille)). En SMTP, sans valeur, c'est la limite annoncée par le serveur qui s'applique. |
 | `imap.host` / `smtp.host` | *obligatoire* | Noms des serveurs — exigés par le schéma même pour un compte Graph, qui ne s'en sert pas. |
 | `imap.port` | `993` | |
 | `smtp.port` | `465` | |
 | `imap.tls` / `smtp.tls` | `true` | TLS implicite. |
-| `imap.starttls` / `smtp.starttls` | `false` | STARTTLS (pour SMTP sur le port 587 : `tls = false`, `starttls = true`). |
+| `imap.starttls` / `smtp.starttls` | `false` | STARTTLS (pour SMTP sur le port 587 : `tls = false`, `starttls = true`). En IMAP vers un hôte distant, STARTTLS est obligatoire : la connexion échoue si le serveur ne le propose pas, sans jamais repasser en clair. Sur un hôte de bouclage (`localhost`, `127.0.0.0/8`, `::1`), il reste opportuniste, pour les passerelles locales en clair (DavMail, Proton Bridge). |
 | `imap.verify_ssl` / `smtp.verify_ssl` | `true` | Vérifie le certificat du serveur. |
 | `smtp.pool.enabled` | `true` | Réutilise les connexions SMTP. |
 | `smtp.pool.max_connections` | `1` | |
@@ -359,6 +360,8 @@ la même commande.
 |-----|--------|------|
 | `rate_limit` | `10` | Nombre maximal de messages envoyés par minute et par compte (envois SMTP). |
 | `read_only` | `false` | Mode lecture seule : les outils d'écriture ne sont pas enregistrés et la file des envois programmés n'est pas traitée ([détails](#mode-lecture-seule)). |
+| `reply_language` | `"fr"` | Langue de la ligne qui introduit l'original cité et de l'en-tête de transfert : `"fr"` ou `"en"` ; surchargeable par compte. |
+| `scheduler.sent_retention_days` | `30` | Jours d'historique d'envois programmés gardés dans `scheduled/sent/` ; `0` garde tout ([envoi programmé](#envoi-programmé)). |
 | `watcher.enabled` | `false` | Surveillance IMAP IDLE. |
 | `watcher.folders` | `["INBOX"]` | Dossiers surveillés dans chaque compte. |
 | `watcher.idle_timeout` | `1740` | Renouvellement de l'IDLE, en secondes (60–1740). |
@@ -735,7 +738,7 @@ page 1 (≈ 1,3 Mo et 0,2 s d'analyse pour 20 000 correspondances) ; au-delà de
 dossier (UID) et un avertissement le dit. Graph trie par `receivedDateTime` côté
 serveur.
 
-**Aperçu.** `list_emails` et `search_emails` acceptent `preview: true` pour
+**Aperçu.** `list_emails`, `search_emails` et `search_all_accounts` acceptent `preview: true` pour
 ajouter un aperçu du corps d'environ 200 caractères par message. Sur IMAP, il lit
 les 1,5 premiers Ko de la partie texte de chaque message (un FETCH de plus par
 page) : il est donc désactivé par défaut ; Graph le fournit sans coût mais ne
@@ -880,7 +883,9 @@ conversation.
   `flagged` ; `columns` choisit parmi `id`, `account`, `date`, `from`, `to`,
   `subject`, `flags`, `labels`, `attachments`, `preview`, `size` (sur IMAP, `preview`
   lit les 1,5 premiers Ko de la partie texte de chaque message). Le NDJSON écrit
-  l'enregistrement complet. Fichier par défaut :
+  l'enregistrement complet, aperçu du corps compris sur les deux backends (sur
+  IMAP, au prix de cette même lecture partielle pour chaque message exporté).
+  Fichier par défaut :
   `~/Downloads/email-export-<horodatage>.csv`.
 - **`save_email`** — la source RFC 822 exacte : pièces jointes, mise en forme,
   signatures DKIM et chaîne Received sont conservées, et le fichier se rouvre dans
@@ -946,19 +951,35 @@ passent par une session de téléversement.
 ### Limite de taille
 
 Chaque pièce jointe est plafonnée à 25 Mo, et le message entier — pièces
-encodées en base64, ce qui ajoute environ 37 % — doit tenir dans la limite du
-compte : 25 Mo en SMTP, 35 Mo sur Graph (limite d'envoi par défaut d'Exchange
-Online), ou `max_message_mb` s'il est renseigné. Un message plus gros est refusé
-avant tout envoi, avec la taille de chaque pièce, au lieu d'être rejeté plus tard
-par un `552` SMTP opaque.
+encodées en base64, ce qui ajoute environ 37 % — doit tenir dans la limite de
+taille :
+
+- **SMTP** : pas de limite locale par défaut. Le serveur annonce la sienne
+  (extension `SIZE`) et le message est refusé avant la transmission de son
+  contenu s'il la dépasse ; l'erreur indique que le message est trop gros et que
+  rien n'a été envoyé. Renseigner `max_message_mb` pour contrôler la taille en
+  local, avec la taille de chaque pièce dans l'erreur.
+- **Graph** : 35 Mo (limite d'envoi par défaut d'Exchange Online, que Graph
+  n'annonce pas), ou `max_message_mb` s'il est renseigné. Un message plus gros
+  est refusé avant tout envoi, avec la taille de chaque pièce.
 
 ### Réponses, transferts et suites de l'envoi
 
-- `reply_email` cite l'original sous la réponse par défaut (`On DATE, NAME
-  wrote:` puis des lignes préfixées par `>` ; dans une réponse HTML, un
+- `reply_email` cite l'original sous la réponse par défaut (une ligne
+  d'introduction puis des lignes préfixées par `>` ; dans une réponse HTML, un
   `<blockquote type="cite">` contenant l'original en texte échappé, jamais son
   HTML brut). `quoteOriginal: false` envoie le corps seul ; sur Graph, cela passe
   par un brouillon de réponse dont le corps est remplacé.
+- Langue (`reply_language`, dans `[settings]` ou par compte, français par
+  défaut) : `"fr"` donne `Le 15 nov. 2026 à 14:32, Jean Dupont <jean@x.fr> a
+  écrit :` et un en-tête `---------- Message transféré ----------` avec `De :`,
+  `Date :`, `Objet :`, `À :`, `Cc :` ; `"en"` donne `On Nov 15, 2026, 2:32 PM, …
+  wrote:` et `---------- Forwarded message ----------` avec `From:`, `Date:`,
+  `Subject:`, `To:`, `Cc:`. La date est affichée dans le fuseau horaire local du
+  serveur. Cela vaut pour les messages composés localement (comptes IMAP/SMTP).
+  Sur un compte Graph, les actions natives `/reply` et `/forward` laissent
+  Exchange écrire son propre en-tête de citation, dans la langue de la boîte :
+  email-mcp ne le contrôle pas.
 - `forward_email` reprend l'original en texte lisible (un original HTML est
   converti, pas collé en balises) ; `html: true` ajoute une partie HTML portant
   le HTML d'origine. Sur Graph, le serveur construit le transfert et l'original
@@ -974,7 +995,15 @@ par un `552` SMTP opaque.
 - Une réponse planifiée (`schedule_email` avec `in_reply_to`) reste dans son fil :
   en SMTP, `In-Reply-To` et `References` sont posés ; Graph, qui ne permet pas de
   poser ces en-têtes, l'envoie comme réponse au message d'origine, ou avertit
-  s'il ne le trouve pas.
+  s'il ne le trouve pas. `save_draft` avec `in_reply_to` suit la même règle :
+  sur Graph, le brouillon est créé comme réponse à l'original (il reste dans le
+  fil), ou enregistré comme brouillon simple avec un avertissement si
+  l'original est introuvable.
+- Sur Graph, quand `/send` échoue sans réponse claire (coupure réseau, 5xx,
+  429), le message a pu partir : le brouillon est gardé et l'erreur demande de
+  vérifier Éléments envoyés avant de renvoyer (un envoi planifié passe alors en
+  échec, sans nouvel essai automatique). Un refus net (4xx) supprime le
+  brouillon — Graph le déplace dans Éléments supprimés.
 
 ### Images intégrées (`cid`)
 
@@ -1193,6 +1222,13 @@ automatiquement — le serveur l'a peut-être déjà accepté — et il est marq
 out ») ; vérifiez le dossier Envoyés avant de le reprogrammer. Une instance
 n'envoie que les messages des comptes qu'elle sert. `cancel_scheduled` retire
 l'entrée et son brouillon.
+
+Historique : une fois envoyée, une entrée passe dans `scheduled/sent/`. Les
+entrées plus anciennes que `[settings.scheduler] sent_retention_days` (**30**
+jours par défaut ; `0` garde tout) sont supprimées par le serveur en marche
+(toutes les 6 heures) et par `scheduler check`. Seules les entrées dont le
+statut propre est `sent` sont supprimées — en attente, en échec ou illisibles,
+elles restent — et rien n'est supprimé en mode lecture seule.
 
 ## Gestion de la boîte
 

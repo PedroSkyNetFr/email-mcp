@@ -49,6 +49,12 @@ export interface SmtpConfig {
 // Authentication
 // ---------------------------------------------------------------------------
 
+/**
+ * Langue de la ligne qui introduit une citation (« Le …, X a écrit : ») et de
+ * l'en-tête d'un transfert. Défaut : français.
+ */
+export type ReplyLanguage = 'fr' | 'en';
+
 export interface OAuth2Config {
   provider: 'google' | 'microsoft' | 'custom';
   clientId: string;
@@ -81,10 +87,18 @@ export interface AccountConfig {
   /** Append the signature by default on every composed message (unless overridden per call). */
   signatureDefault?: boolean;
   /**
-   * Taille maximale d'un message sortant, encodé (Mo). Défaut : 25 en SMTP,
-   * 35 sur Graph (limite d'envoi par défaut d'Exchange Online). Voir send-limit.ts.
+   * Taille maximale d'un message sortant, encodé (Mo). Défaut : aucune limite
+   * locale en SMTP (le serveur décide, extension SIZE), 35 sur Graph (limite
+   * d'envoi par défaut d'Exchange Online). Voir send-limit.ts.
    */
   maxMessageMb?: number;
+  /**
+   * Langue des citations et en-têtes de transfert composés localement (IMAP /
+   * SMTP) : `reply_language` du compte, sinon celle de `[settings]`, sinon
+   * « fr ». Sans effet sur Graph `/reply` et `/forward`, dont Exchange écrit
+   * lui-même l'en-tête dans la langue de la boîte.
+   */
+  replyLanguage?: ReplyLanguage;
 }
 
 export interface WatcherConfig {
@@ -160,7 +174,9 @@ export interface AppConfig {
     readOnly: boolean;
     watcher: WatcherConfig;
     hooks: HooksConfig;
-    /** Jours d'historique d'envois programmés conservés (0 = tout garder). */
+    /** Langue par défaut des citations et en-têtes de transfert (défaut « fr »). */
+    replyLanguage?: ReplyLanguage;
+    /** Jours d'historique d'envois programmés conservés (défaut 30 ; 0 = tout garder). */
     sentRetentionDays?: number;
   };
   accounts: AccountConfig[];
@@ -240,8 +256,11 @@ export interface MailboxSnapshot {
   total: number;
   /** Messages non lus. */
   unread: number;
-  /** Messages reçus depuis minuit (heure locale). */
-  receivedToday: number;
+  /**
+   * Messages reçus depuis minuit (heure locale). Absent quand le serveur ne
+   * fournit pas le compte (Graph sans `@odata.count`) : inconnu, pas zéro.
+   */
+  receivedToday?: number;
 }
 
 // ---------------------------------------------------------------------------

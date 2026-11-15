@@ -25,8 +25,9 @@ export default function registerSendTools(
     'Send a new email. Supports plain text or HTML body, CC, BCC, and attachments ' +
       '(from a local path, inline base64 bytes, or a reference to an attachment on an existing message). ' +
       'HTML mail also carries a generated plain-text alternative. The whole message, attachments ' +
-      'encoded, must fit the account limit (default 25 MB on SMTP, 35 MB on Graph; max_message_mb ' +
-      'in the account config): an oversized message is refused before anything is sent.',
+      'encoded, must fit the size limit: on SMTP the limit the server announces (SIZE), or ' +
+      'max_message_mb when set in the account config; on Graph 35 MB by default (Exchange Online), ' +
+      'or max_message_mb. An oversized message is refused before anything is sent.',
     {
       account: z.string().describe('Account name from list_accounts'),
       to: z.array(z.string().email()).min(1).describe('Recipient email addresses'),
@@ -121,7 +122,9 @@ export default function registerSendTools(
   server.tool(
     'reply_email',
     'Reply to an email with proper threading (In-Reply-To & References headers). Use get_email first to read the original. ' +
-      'The original message is quoted below the reply by default ("On DATE, NAME wrote:" + quoted text), ' +
+      'The original message is quoted below the reply by default (attribution line + quoted text: ' +
+      '"Le DATE, NAME a écrit :" in French by default, "On DATE, NAME wrote:" with reply_language = "en"; ' +
+      'on Graph accounts Exchange writes its own header in the mailbox language), ' +
       'as desktop clients do — set quoteOriginal=false to send the bare body only.',
     {
       account: z.string().describe('Account name from list_accounts'),

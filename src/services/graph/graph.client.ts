@@ -22,6 +22,16 @@ import type OAuthService from '../oauth.service.js';
 
 const GRAPH_ROOT = 'https://graph.microsoft.com/v1.0';
 
+/**
+ * Une réponse 429/503 justifie-t-elle une seconde tentative ?
+ * 429 : toujours (requête refusée sans être traitée). 503 : jamais pour un
+ * POST, qui peut avoir été exécuté avant la panne (risque de double envoi).
+ */
+export function shouldRetry(method: string, status: number): boolean {
+  if (status === 429) return true;
+  return status === 503 && method.toUpperCase() !== 'POST';
+}
+
 /** Graph paging envelope. */
 interface GraphPage<T> {
   value: T[];
@@ -60,7 +70,8 @@ export default class GraphClient {
   }
 
   /**
-   * Issue a Graph request. Retries once on 429/503 honouring `Retry-After`,
+   * Issue a Graph request. Retries once on 429 (and on 503 for non-POST
+   * methods, see {@link shouldRetry}) honouring `Retry-After`,
    * which Graph uses liberally; anything else surfaces as a {@link GraphError}
    * carrying the response body, since Graph explains failures in it.
    */
@@ -81,7 +92,13 @@ export default class GraphClient {
 
     let response = await send();
 
-    if (response.status === 429 || response.status === 503) {
+    // 429 (limitation de débit) : Graph a refusé la requête avant de la
+    // traiter, la rejouer est toujours sûr. 503 : la requête a pu être
+    // traitée avant la panne — rejouer un POST (`/send`, `/reply`,
+    // `/forward`, `sendMail`) pourrait envoyer le mail deux fois. On ne
+    // rejoue donc un 503 que pour les méthodes sans effet de bord cumulatif ;
+    // un POST remonte l'erreur, que l'appelant traite comme un état incertain.
+    if (shouldRetry(method, response.status)) {
       const retryAfter = Number.parseInt(response.headers.get('retry-after') ?? '2', 10);
       const waitMs = Math.min(Number.isNaN(retryAfter) ? 2 : retryAfter, 30) * 1000;
       await new Promise((resolve) => {

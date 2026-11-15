@@ -159,13 +159,38 @@ describe('testImap — error listener (3)', () => {
 });
 
 describe('STARTTLS is enforced when requested (4)', () => {
-  it('passes doSTARTTLS: true when starttls is set without TLS', () => {
+  it('passes doSTARTTLS: true when starttls is set without TLS (remote host)', () => {
     const account = makeAccount({
       imap: { host: 'mail.example.com', port: 143, tls: false, starttls: true, verifySsl: true },
     });
     const options = buildImapFlowOptions(account, { user: 'u', pass: 'p' });
     expect(options.secure).toBe(false);
     expect(options.doSTARTTLS).toBe(true);
+  });
+
+  it.each(['localhost', 'localhost.', '127.0.0.1', '127.0.0.2', '::1', '[::1]'])(
+    'keeps opportunistic STARTTLS on the loopback host %s (local clear-text gateways)',
+    (host) => {
+      const account = makeAccount({
+        imap: { host, port: 1143, tls: false, starttls: true, verifySsl: true },
+      });
+      const options = buildImapFlowOptions(account, { user: 'u', pass: 'p' });
+      expect(options.secure).toBe(false);
+      expect(options.doSTARTTLS).toBeUndefined();
+    },
+  );
+
+  it('still requires STARTTLS on a host that only looks local', () => {
+    const account = makeAccount({
+      imap: {
+        host: 'localhost.evil.example',
+        port: 143,
+        tls: false,
+        starttls: true,
+        verifySsl: true,
+      },
+    });
+    expect(buildImapFlowOptions(account, { user: 'u' }).doSTARTTLS).toBe(true);
   });
 
   it('leaves direct TLS alone (secure and doSTARTTLS are mutually exclusive in imapflow)', () => {

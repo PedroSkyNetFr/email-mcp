@@ -17,7 +17,9 @@
  *     du comportement natif : réponse sans citation, transfert sans les pièces
  *     de l'original, pièces à ajouter (signature, includeAttachments), réponse
  *     planifiée à rattacher à son fil. Si une étape échoue avant l'envoi, le
- *     brouillon est supprimé : il ne reste pas d'orphelin dans Brouillons.
+ *     brouillon est supprimé (Graph le déplace dans Éléments supprimés) : il
+ *     ne reste pas d'orphelin dans Brouillons. Si c'est l'envoi lui-même dont
+ *     l'issue est inconnue, le brouillon est gardé (voir sendViaDraft).
  */
 
 import type { AccountConfig, SendResult } from '../../types/index.js';
@@ -25,6 +27,8 @@ import type { ResolvedAttachment } from '../attachment-resolver.js';
 import { assertMessageSize, estimateEncodedMessageSize } from '../send-limit.js';
 import { applyAccountSignature } from '../signature-loader.js';
 import type GraphClient from './graph.client.js';
+import { GraphError } from './graph.client.js';
+import UncertainSendError from './uncertain-send-error.js';
 
 interface GraphRecipient {
   emailAddress: { address: string; name?: string };
@@ -75,6 +79,24 @@ function odataString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+/**
+ * Un échec de `/send` est-il un refus net (rien n'est parti) ? Oui pour une
+ * réponse 4xx du serveur, sauf 429 (trop de requêtes : le message a pu être
+ * accepté avant la limitation) et 408 (délai dépassé). Tout le reste — coupure
+ * réseau sans réponse, 5xx — laisse l'issue inconnue.
+ */
+function isDefiniteRejection(err: unknown): boolean {
+  return (
+    err instanceof GraphError &&
+    err.status >= 400 &&
+    err.status < 500 &&
+    err.status !== 429 &&
+    err.status !== 408
+  );
+}
+
+export { UncertainSendError };
+
 export default class GraphSendService {
   constructor(
     private readonly clients: Map<string, GraphClient>,
@@ -93,8 +115,11 @@ export default class GraphSendService {
   // Briques communes
   // -------------------------------------------------------------------------
 
-  /** Ajoute des pièces à un message existant : en ligne sous ~3 Mo, par session d'upload au-delà. */
-  private static async addAttachments(
+  /**
+   * Ajoute des pièces à un message existant : en ligne sous ~3 Mo, par session
+   * d'upload au-delà. Publique : aussi utilisée par `GraphService.saveDraft`.
+   */
+  static async addAttachments(
     client: GraphClient,
     messageId: string,
     attachments: ResolvedAttachment[],
@@ -115,9 +140,32 @@ export default class GraphSendService {
   }
 
   /**
-   * Prépare puis envoie un brouillon créé par `create`. Si une étape de
-   * `prepare` (ou l'envoi) échoue, le brouillon est supprimé avant de relever
-   * l'erreur — rien n'est parti, et Brouillons ne garde pas de reste.
+   * Supprime un brouillon sans jamais lever. `DELETE /me/messages/{id}` ne
+   * détruit pas le message : Graph le DÉPLACE dans Éléments supprimés, d'où il
+   * reste récupérable.
+   */
+  static async discardDraft(client: GraphClient, draftId: string): Promise<void> {
+    try {
+      await client.request('DELETE', `/me/messages/${draftId}`);
+    } catch {
+      // Le nettoyage est accessoire : l'erreur d'origine est celle qui compte.
+    }
+  }
+
+  /**
+   * Prépare puis envoie un brouillon créé par `create`.
+   *
+   * - Échec de `prepare` (PATCH, pièces jointes) : rien n'est parti ; le
+   *   brouillon est supprimé et l'erreur relevée.
+   * - Échec de `/send` par un refus net (4xx hors 429/408) : rien n'est parti
+   *   non plus ; même traitement.
+   * - Échec de `/send` sans réponse claire (réseau, 5xx, 429, 408) : le
+   *   message a PU partir. Le brouillon est gardé — le supprimer effacerait la
+   *   seule trace locale si l'envoi a échoué — et une `UncertainSendError`
+   *   demande de vérifier Éléments envoyés avant de renvoyer.
+   *
+   * L'appel `/send` est hors du bloc de nettoyage : avant, toute erreur de
+   * `/send` supprimait le brouillon, y compris quand le message était parti.
    */
   private static async sendViaDraft(
     client: GraphClient,
@@ -127,19 +175,60 @@ export default class GraphSendService {
     const draft = await create();
     try {
       await prepare(draft.id);
+    } catch (err) {
+      await GraphSendService.discardDraft(client, draft.id);
+      throw err;
+    }
+
+    try {
       await client.request('POST', `/me/messages/${draft.id}/send`);
     } catch (err) {
-      try {
-        await client.request('DELETE', `/me/messages/${draft.id}`);
-      } catch {
-        // Le nettoyage est accessoire : l'erreur d'origine est celle qui compte.
+      if (isDefiniteRejection(err)) {
+        await GraphSendService.discardDraft(client, draft.id);
+        throw err;
       }
-      throw err;
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new UncertainSendError(
+        `Send outcome uncertain: the request to send failed (${reason}), but the server may ` +
+          'have sent the message anyway. Check Sent Items before sending again; the draft was ' +
+          'kept in Drafts.',
+        { cause: err },
+      );
     }
   }
 
+  /**
+   * Brouillon de RÉPONSE à `originalId`, au contenu entièrement remplacé par
+   * `message`. Graph ne laisse pas poser In-Reply-To / References (seuls les
+   * en-têtes X- sont acceptés) : partir de `createReply` est le seul moyen
+   * qu'un message rejoigne le fil — Graph y pose lui-même les en-têtes. Le
+   * PATCH du corps entier efface la citation que createReply a insérée, et les
+   * destinataires qu'il a pré-remplis.
+   *
+   * Partagé par l'envoi planifié (sendEmail) et `save_draft` (GraphService).
+   * Si le PATCH échoue, le brouillon est supprimé avant de relever l'erreur.
+   */
+  static async createThreadedReplyDraft(
+    client: GraphClient,
+    originalId: string,
+    message: Record<string, unknown>,
+  ): Promise<{ id: string }> {
+    const draft = await client.request<{ id: string }>(
+      'POST',
+      `/me/messages/${originalId}/createReply`,
+      {},
+    );
+    try {
+      await client.request('PATCH', `/me/messages/${draft.id}`, message);
+    } catch (err) {
+      await GraphSendService.discardDraft(client, draft.id);
+      throw err;
+    }
+    return draft;
+  }
+
   /** Id Graph du message portant ce Message-ID (toute la boîte), ou undefined. */
-  private static async findByInternetMessageId(
+  static async findByInternetMessageId(
     client: GraphClient,
     internetMessageId: string,
   ): Promise<string | undefined> {
@@ -248,23 +337,15 @@ export default class GraphSendService {
     };
     const warnings: string[] = [];
 
-    // Graph ne laisse pas poser In-Reply-To / References (seuls les en-têtes
-    // X- sont acceptés). Pour qu'une réponse planifiée rejoigne son fil, on
-    // part donc d'un vrai brouillon de réponse au message d'origine — Graph y
-    // pose lui-même les en-têtes de fil — dont on remplace tout le contenu.
+    // Réponse planifiée : elle doit rejoindre son fil, donc partir d'un vrai
+    // brouillon de réponse au message d'origine (voir createThreadedReplyDraft).
     if (options.inReplyTo) {
       const originalId = await GraphSendService.findByInternetMessageId(client, options.inReplyTo);
       if (originalId) {
         await GraphSendService.sendViaDraft(
           client,
-          async () =>
-            client.request<{ id: string }>('POST', `/me/messages/${originalId}/createReply`, {}),
-          async (draftId) => {
-            // PATCH du corps entier : la citation que createReply a insérée
-            // disparaît, le message est exactement celui qui a été planifié.
-            await client.request('PATCH', `/me/messages/${draftId}`, message);
-            await GraphSendService.addAttachments(client, draftId, signed.attachments);
-          },
+          async () => GraphSendService.createThreadedReplyDraft(client, originalId, message),
+          async (draftId) => GraphSendService.addAttachments(client, draftId, signed.attachments),
         );
         return { messageId: '', status: 'sent' };
       }

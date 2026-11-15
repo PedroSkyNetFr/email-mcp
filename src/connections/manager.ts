@@ -16,11 +16,31 @@ import { mcpLog } from '../logging.js';
 import type OAuthService from '../services/oauth.service.js';
 import type { AccountConfig } from '../types/index.js';
 import { authFailureHint, withAuthGuidance } from '../utils/auth-error.js';
+import { isLoopbackHost } from '../utils/host.js';
 import type { IConnectionManager } from './types.js';
+
+/**
+ * Rappel de nodemailer pour obtenir un jeton OAuth2 : `renew` vaut vrai quand
+ * le serveur vient de refuser le jeton courant.
+ */
+type ProvisionCallback = (
+  user: string,
+  renew: boolean,
+  callback: (err: Error | null, accessToken?: string, expires?: number) => void,
+) => void;
 
 type SmtpAuth =
   | { user: string; pass?: string }
-  | { type: string; user: string; accessToken: string };
+  | {
+      type: 'OAuth2';
+      user: string;
+      accessToken: string;
+      expires?: number;
+      provisionCallback: ProvisionCallback;
+    };
+
+/** Marge avant l'expiration au-delà de laquelle nodemailer redemande un jeton. */
+const SMTP_TOKEN_MARGIN_MS = 60_000;
 
 /** Identifiants IMAP : mot de passe, ou jeton d'accès OAuth2 (XOAUTH2). */
 export interface ImapAuth {
@@ -58,21 +78,31 @@ export function redactSecrets(message: string, secrets: (string | undefined)[]):
  * source de vérité, pour qu'une option de sécurité ne puisse plus manquer à
  * l'une d'elles.
  *
- * STARTTLS : `starttls = true` avec `tls = false` devient `doSTARTTLS: true`,
- * c'est-à-dire une montée en TLS OBLIGATOIRE — la connexion échoue si le
- * serveur ne la propose pas. Sans cette option, ImapFlow ne fait qu'un STARTTLS
- * opportuniste : un intermédiaire qui retire la capacité STARTTLS de la
- * réponse (reçue en clair) obtenait l'identifiant en clair, alors que la
- * configuration demandait explicitement le chiffrement. Les autres cas ne
- * changent pas : `tls = true` reste du TLS direct, `tls = false` +
- * `starttls = false` garde le comportement opportuniste d'ImapFlow.
+ * STARTTLS : pour un hôte DISTANT, `starttls = true` avec `tls = false`
+ * devient `doSTARTTLS: true`, c'est-à-dire une montée en TLS OBLIGATOIRE — la
+ * connexion échoue si le serveur ne la propose pas. Sans cette option, ImapFlow
+ * ne fait qu'un STARTTLS opportuniste : un intermédiaire qui retire la capacité
+ * STARTTLS de la réponse (reçue en clair) obtenait l'identifiant en clair,
+ * alors que la configuration demandait explicitement le chiffrement.
+ *
+ * Exception, l'hôte de bouclage (localhost, 127.0.0.0/8, ::1) : le trafic ne
+ * quitte pas la machine, il n'y a pas d'intermédiaire à craindre, et l'ancien
+ * assistant écrivait `starttls = !tls` — beaucoup de configurations de
+ * passerelles locales en clair (DavMail, Proton Bridge…) portent donc
+ * `starttls = true` sans que la passerelle propose STARTTLS. Elles gardent le
+ * comportement opportuniste d'avant : STARTTLS si proposé, clair sinon.
+ *
+ * Les autres cas ne changent pas : `tls = true` reste du TLS direct,
+ * `tls = false` + `starttls = false` garde le comportement opportuniste
+ * d'ImapFlow.
  */
 export function buildImapFlowOptions(
   account: AccountConfig,
   auth: ImapAuth,
   extra: Partial<ImapFlowOptions> = {},
 ): ImapFlowOptions {
-  const requireStarttls = !account.imap.tls && account.imap.starttls;
+  const requireStarttls =
+    !account.imap.tls && account.imap.starttls && !isLoopbackHost(account.imap.host);
   return {
     host: account.imap.host,
     port: account.imap.port,
@@ -127,6 +157,14 @@ export default class ConnectionManager implements IConnectionManager {
   private imapConnecting = new Map<string, Promise<ImapFlow>>();
 
   private smtpTransports = new Map<string, Transporter>();
+
+  /**
+   * Transports SMTP en cours de création, par compte — même raison que
+   * `imapConnecting` : deux envois simultanés sur un compte sans transport en
+   * créaient chacun un ; le second écrasait le premier dans le cache, qui
+   * restait ouvert (pool compris) sans plus aucune référence.
+   */
+  private smtpConnecting = new Map<string, Promise<Transporter>>();
 
   private accounts = new Map<string, AccountConfig>();
 
@@ -351,16 +389,63 @@ export default class ConnectionManager implements IConnectionManager {
       }
     }
 
-    const account = this.getAccount(accountName);
+    // Un transport est déjà en cours de création pour ce compte : l'attendre.
+    const pending = this.smtpConnecting.get(accountName);
+    if (pending) return pending;
 
-    // Build auth config based on auth type
-    let auth: SmtpAuth;
-    if (account.oauth2 && this.oauthService) {
-      const accessToken = await this.oauthService.getAccessToken(account.oauth2);
-      auth = { type: 'OAuth2', user: account.username, accessToken };
-    } else {
-      auth = { user: account.username, pass: account.password };
+    const attempt = this.connectSmtpTransport(accountName);
+    this.smtpConnecting.set(accountName, attempt);
+    try {
+      return await attempt;
+    } finally {
+      // Retirée sur échec aussi, pour que l'appel suivant retente.
+      if (this.smtpConnecting.get(accountName) === attempt) {
+        this.smtpConnecting.delete(accountName);
+      }
     }
+  }
+
+  /**
+   * Identifiants SMTP d'un compte. En OAuth2, le transport reçoit un
+   * `provisionCallback` au lieu d'un jeton figé : le transport mis en cache
+   * gardait le jeton du premier envoi, et tout envoi après son expiration
+   * (~1 h chez Microsoft et Google) échouait en « 535 authentication failed ».
+   * Nodemailer rappelle désormais ce rappel quand le jeton a expiré (`expires`)
+   * ou que le serveur l'a refusé (`renew`), et le service OAuth fournit un
+   * jeton frais — chaque connexion du pool comprise.
+   */
+  private async resolveSmtpAuth(account: AccountConfig): Promise<SmtpAuth> {
+    const { oauth2 } = account;
+    const { oauthService } = this;
+    if (!oauth2 || !oauthService) {
+      return { user: account.username, pass: account.password };
+    }
+    const expiresAt = (): number | undefined =>
+      oauth2.tokenExpiry ? oauth2.tokenExpiry - SMTP_TOKEN_MARGIN_MS : undefined;
+    const accessToken = await oauthService.getAccessToken(oauth2);
+    return {
+      type: 'OAuth2',
+      user: account.username,
+      accessToken,
+      expires: expiresAt(),
+      provisionCallback: (_user, renew, callback) => {
+        if (renew) {
+          // Jeton refusé par le serveur alors qu'il paraissait valide : on
+          // l'oublie pour forcer un vrai rafraîchissement.
+          Object.assign(oauth2, { accessToken: undefined, tokenExpiry: undefined });
+        }
+        oauthService.getAccessToken(oauth2).then(
+          (token) => callback(null, token, expiresAt()),
+          (err: unknown) => callback(err instanceof Error ? err : new Error(String(err))),
+        );
+      },
+    };
+  }
+
+  /** Crée, vérifie et met en cache un nouveau transport SMTP pour un compte. */
+  private async connectSmtpTransport(accountName: string): Promise<Transporter> {
+    const account = this.getAccount(accountName);
+    const auth = await this.resolveSmtpAuth(account);
 
     const transport = nodemailer.createTransport(
       ConnectionManager.buildSmtpTransportOptions(account, auth),
@@ -377,6 +462,16 @@ export default class ConnectionManager implements IConnectionManager {
       'smtp',
       `Connected to ${account.smtp.host}:${account.smtp.port} for "${accountName}"`,
     );
+    // Un transport précédent encore en cache (remplacé) est fermé, pour ne pas
+    // laisser ses connexions de pool ouvertes sans référence.
+    const previous = this.smtpTransports.get(accountName);
+    if (previous && previous !== transport) {
+      try {
+        previous.close();
+      } catch {
+        /* déjà fermé */
+      }
+    }
     this.smtpTransports.set(accountName, transport);
     return transport;
   }

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { pruneSentHistory } from './scheduler-retention.js';
+import { DEFAULT_SENT_RETENTION_DAYS, pruneSentHistory } from './scheduler-retention.js';
 
 const DAY = 86_400_000;
 const NOW = Date.parse('2026-11-15T12:00:00Z');
@@ -23,6 +23,29 @@ describe('pruneSentHistory', () => {
 
   afterEach(async () => {
     await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('keeps 30 days of history by default (user decision)', () => {
+    expect(DEFAULT_SENT_RETENTION_DAYS).toBe(30);
+  });
+
+  it('with the default window, a 40-day-old sent entry goes and a 20-day-old one stays', async () => {
+    await write('d40.json', { status: 'sent', sentAt: new Date(NOW - 40 * DAY).toISOString() });
+    await write('d20.json', { status: 'sent', sentAt: new Date(NOW - 20 * DAY).toISOString() });
+    // Jamais supprimée, quel que soit son âge : son statut n'est pas « sent ».
+    await write('failed.json', {
+      status: 'failed',
+      createdAt: new Date(NOW - 400 * DAY).toISOString(),
+    });
+
+    const result = await pruneSentHistory({
+      retentionDays: DEFAULT_SENT_RETENTION_DAYS,
+      dir,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ deleted: 1, kept: 2 });
+    expect((await fs.readdir(dir)).sort()).toEqual(['d20.json', 'failed.json']);
   });
 
   it('deletes sent entries older than the window and keeps the rest', async () => {

@@ -10,11 +10,16 @@
  * fichier de 20 Mo fait ainsi ~27 Mo sur le fil et dépasse une limite de 25 Mo.
  *
  * Limites par défaut, par backend :
- *   - SMTP : 25 Mo, la limite la plus répandue (Gmail, Yahoo, la plupart des
- *     hébergeurs ; Outlook.com et iCloud sont à 20 Mo) ;
+ *   - SMTP : AUCUNE limite locale par défaut. Le serveur annonce la sienne
+ *     (extension SIZE, RFC 1870) et nodemailer refuse déjà, avant DATA, un
+ *     message qui la dépasse ; une limite locale arbitraire (25 Mo) bloquait à
+ *     tort les serveurs plus généreux. Le contrôle local ne s'applique que si
+ *     le compte fixe `max_message_mb` ; un refus du serveur pour taille est
+ *     traduit en message clair par `explainSmtpSizeRejection` ;
  *   - Graph : 35 Mo, la limite d'envoi par défaut d'une boîte Exchange Online
  *     (MaxSendSize). La session d'upload accepte des pièces jusqu'à 150 Mo,
- *     mais le message reste refusé au-delà de la limite de la boîte.
+ *     mais le message reste refusé au-delà de la limite de la boîte, et Graph
+ *     n'annonce pas cette limite à l'avance.
  * Réglable par compte avec `max_message_mb` (config.toml).
  */
 
@@ -22,18 +27,17 @@ import type { AccountConfig } from '../types/index.js';
 
 const MB = 1024 * 1024;
 
-export const DEFAULT_SMTP_MAX_MESSAGE_MB = 25;
 export const DEFAULT_GRAPH_MAX_MESSAGE_MB = 35;
 
-/** Limite applicable au compte, en octets. */
-export function maxMessageBytes(account: AccountConfig): number {
-  const fallback =
-    account.backend === 'graph' ? DEFAULT_GRAPH_MAX_MESSAGE_MB : DEFAULT_SMTP_MAX_MESSAGE_MB;
-  const mb =
-    typeof account.maxMessageMb === 'number' && account.maxMessageMb > 0
-      ? account.maxMessageMb
-      : fallback;
-  return Math.floor(mb * MB);
+/**
+ * Limite applicable au compte, en octets ; `undefined` quand aucune limite
+ * locale ne s'applique (compte SMTP sans `max_message_mb` : le serveur décide).
+ */
+export function maxMessageBytes(account: AccountConfig): number | undefined {
+  if (typeof account.maxMessageMb === 'number' && account.maxMessageMb > 0) {
+    return Math.floor(account.maxMessageMb * MB);
+  }
+  return account.backend === 'graph' ? DEFAULT_GRAPH_MAX_MESSAGE_MB * MB : undefined;
 }
 
 /** Taille base64 d'un contenu de `bytes` octets, fins de ligne MIME (76 + CRLF) comprises. */
@@ -77,7 +81,7 @@ export function assertMessageSize(
   attachments: { filename: string; content: Buffer }[] = [],
 ): void {
   const limit = maxMessageBytes(account);
-  if (encodedBytes <= limit) return;
+  if (limit === undefined || encodedBytes <= limit) return;
   const table = attachments
     .map((a) => `  - ${a.filename}: ${formatSize(a.content.length)}`)
     .join('\n');
@@ -92,5 +96,41 @@ ${table}`
 ` +
       'Remove or shrink attachments, or raise max_message_mb for this account if its server ' +
       'accepts more.',
+  );
+}
+
+/**
+ * Refus du serveur SMTP pour cause de taille : soit nodemailer lui-même
+ * (« Message size larger than allowed N », code EMESSAGE, levé avant DATA
+ * quand le serveur annonce SIZE), soit une réponse 552 / 5.3.4 du serveur.
+ */
+function isSmtpSizeRejection(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const e = error as Error & { code?: string; responseCode?: number; response?: string };
+  const text = `${e.message} ${e.response ?? ''}`;
+  if (e.code === 'EMESSAGE' && /size/i.test(e.message)) return true;
+  if (e.responseCode === 552 && /size|too (?:big|large)|exceed/i.test(text)) return true;
+  return text.includes('5.3.4');
+}
+
+/**
+ * Traduit un refus de taille du serveur SMTP en erreur explicite (taille du
+ * message, limite annoncée si connue, rien n'a été envoyé, comment réagir) ;
+ * toute autre erreur est rendue telle quelle.
+ */
+export function explainSmtpSizeRejection(
+  error: unknown,
+  account: AccountConfig,
+  encodedBytes: number,
+): unknown {
+  if (!isSmtpSizeRejection(error)) return error;
+  const { message } = error as Error;
+  const announced = /larger than allowed (\d+)/i.exec(message);
+  const limit = announced ? `, server limit ${formatSize(Number(announced[1]))}` : '';
+  return new Error(
+    `Message too large for the SMTP server of account "${account.name}": ` +
+      `${formatSize(encodedBytes)} once encoded${limit}. Nothing was sent. ` +
+      `Remove or shrink attachments (base64 adds ~37%). Server said: ${message}`,
+    { cause: error },
   );
 }

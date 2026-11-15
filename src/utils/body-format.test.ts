@@ -187,8 +187,14 @@ describe('htmlToPlainText', () => {
 
   it('keeps heading case and list bullets', () => {
     expect(htmlToPlainText('<h1>Monthly report</h1><ul><li>one</li><li>two</li></ul>')).toBe(
-      'Monthly report\n\n • one\n • two',
+      'Monthly report\n\n- one\n- two',
     );
+  });
+
+  it('aligns every list item when the list opens the body', () => {
+    // Régression : avec le préfixe « • », le trim final retirait l'espace du
+    // seul premier élément (« • un » puis «  • deux »).
+    expect(htmlToPlainText('<ul><li>un</li><li>deux</li></ul>')).toBe('- un\n- deux');
   });
 
   it('stripHtml is kept as an alias for existing callers', () => {

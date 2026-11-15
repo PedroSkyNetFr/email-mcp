@@ -101,4 +101,33 @@ describe('stats resource', () => {
     expect(decodeURIComponent(todayUrl)).toContain('receivedDateTime ge ');
     expect(todayUrl).toContain('$count=true');
   });
+
+  it('Graph: without @odata.count, inbox_today is null rather than value.length', async () => {
+    const client = {
+      request: vi.fn(async (_method: string, url: string) => {
+        if (url.startsWith('/me/mailFolders/inbox?')) {
+          return { totalItemCount: 512, unreadItemCount: 4 };
+        }
+        // `$top=1` : une seule ligne, alors que la journée en compte peut-être 40.
+        return { value: [{ id: 'x' }] };
+      }),
+      collect: vi.fn().mockResolvedValue([]),
+    };
+    const graph = new GraphService(
+      new Map([['exchange', client as unknown as GraphClient]]),
+      () => graphAccount,
+    );
+    const router = createMailRouter(
+      { getMailboxSnapshot: vi.fn(), getQuota: vi.fn() } as unknown as ImapService,
+      graph,
+      (name) => accounts[name],
+    );
+
+    const snapshot = await graph.getMailboxSnapshot('exchange', 'INBOX');
+    expect(snapshot.receivedToday).toBeUndefined();
+
+    const stats = await readStats(register(router), 'exchange');
+    expect(stats).toMatchObject({ inbox_total: 512, inbox_unread: 4 });
+    expect(stats.inbox_today).toBeNull();
+  });
 });
