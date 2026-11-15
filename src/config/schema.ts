@@ -83,6 +83,9 @@ export const AccountConfigSchema = z
     // (send/reply/forward/draft) for this account, unless a call passes
     // append_signature:false. Requires signature_path. Defaults to false.
     signature_default: z.boolean().optional(),
+    // Taille maximale d'un message sortant, pièces jointes encodées comprises
+    // (Mo). Défaut : 25 en SMTP, 35 sur Graph. Voir services/send-limit.ts.
+    max_message_mb: z.number().positive().max(1024).optional(),
   })
   .refine((data) => !(data.password && data.password_command), {
     message: 'Set password or password_command, not both',

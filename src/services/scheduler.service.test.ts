@@ -431,3 +431,25 @@ describe('SchedulerService.checkAndSend — accounts this instance does not serv
     expect(sent.map((e) => e?.attempts)).toEqual([1, 1, 1]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fil de discussion d'une réponse planifiée
+// ---------------------------------------------------------------------------
+
+describe('SchedulerService.checkAndSend — threading', () => {
+  it('passes In-Reply-To and References to the send service', async () => {
+    // Sans eux, une réponse planifiée arrivait comme un nouveau message.
+    await seed({ inReplyTo: '<orig@example.com>', references: ['<root@example.com>'] });
+    const smtp = createFakeSmtp();
+
+    await createScheduler(smtp).checkAndSend();
+
+    expect(smtp.sendEmail).toHaveBeenCalledWith(
+      'work',
+      expect.objectContaining({
+        inReplyTo: '<orig@example.com>',
+        references: ['<root@example.com>'],
+      }),
+    );
+  });
+});

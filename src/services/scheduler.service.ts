@@ -156,7 +156,11 @@ export default class SchedulerService {
         subject: `[Scheduled: ${sendAtDate.toLocaleString()}] ${options.subject}`,
         body: options.body,
         cc: options.cc,
+        bcc: options.bcc,
         html: options.html,
+        // Le brouillon miroir porte les mêmes en-têtes de fil que l'envoi.
+        inReplyTo: options.inReplyTo,
+        references: options.references,
       });
       scheduled.draftMessageId = String(draftResult.id);
       scheduled.draftMailbox = draftResult.mailbox;
@@ -408,6 +412,10 @@ export default class SchedulerService {
           cc: scheduled.cc,
           bcc: scheduled.bcc,
           html: scheduled.html,
+          // Une réponse planifiée doit rejoindre son fil : sans ces en-têtes,
+          // elle arrivait comme un nouveau message (sur IMAP comme sur Graph).
+          inReplyTo: scheduled.inReplyTo,
+          references: scheduled.references,
         });
       } catch (err) {
         // Not sent: back in the queue for another attempt, or failed for good

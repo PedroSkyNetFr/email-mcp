@@ -264,6 +264,7 @@ function normalizeAccount(raw: RawAccountConfig): AccountConfig {
     signaturePath: raw.signature_path,
     backend: raw.backend,
     signatureDefault: raw.signature_default,
+    maxMessageMb: raw.max_message_mb,
   };
 }
 

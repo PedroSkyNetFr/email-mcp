@@ -1062,6 +1062,76 @@ describe('ImapService', () => {
   // appendToSent
   // -----------------------------------------------------------------------
 
+  // -----------------------------------------------------------------------
+  // saveDraft — le brouillon stocké doit porter tout ce qui a été demandé
+  // -----------------------------------------------------------------------
+
+  describe('saveDraft', () => {
+    async function appendedDraft(options: Parameters<ImapService['saveDraft']>[1]) {
+      client.list.mockResolvedValue([{ name: 'Drafts', path: 'Drafts', specialUse: '\\Drafts' }]);
+      await service.saveDraft('test', options);
+      const [, raw] = client.append.mock.calls[0] as [string, Buffer];
+      return raw.toString('binary');
+    }
+
+    it('keeps Bcc in the stored draft', async () => {
+      // MimeNode retire Bcc par défaut (l'enveloppe SMTP le porte à l'envoi),
+      // mais un brouillon n'a pas d'enveloppe : la liste serait perdue.
+      const raw = await appendedDraft({
+        to: ['geof@example.com'],
+        subject: 'past due',
+        body: 'hello',
+        bcc: ['kayla@example.com', 'justin@example.com'],
+      });
+
+      expect(raw).toMatch(/^Bcc: .*kayla@example\.com/m);
+      expect(raw).toContain('justin@example.com');
+    });
+
+    it('never folds an attachment filename mid-value', async () => {
+      const raw = await appendedDraft({
+        to: ['geof@example.com'],
+        subject: 'past due',
+        body: 'hello',
+        attachments: [
+          {
+            filename: 'Farmpedals Statement 08-07-2026.pdf',
+            content: Buffer.from('%PDF-1.4 pretend'),
+            contentType: 'application/pdf',
+          },
+        ],
+      });
+
+      expect(raw).toContain('filename="Farmpedals Statement 08-07-2026.pdf"');
+      expect(raw).not.toMatch(/filename="[^"]*\r\n/);
+    });
+
+    it('sets References along with In-Reply-To', async () => {
+      const raw = await appendedDraft({
+        to: ['a@example.com'],
+        subject: 'Re: x',
+        body: 'b',
+        inReplyTo: '<orig@example.com>',
+      });
+
+      expect(raw).toContain('In-Reply-To: <orig@example.com>');
+      expect(raw).toContain('References: <orig@example.com>');
+    });
+
+    it('gives an HTML draft a text/plain alternative', async () => {
+      const raw = await appendedDraft({
+        to: ['a@example.com'],
+        subject: 's',
+        body: '<p>Bonjour <b>vous</b></p>',
+        html: true,
+      });
+
+      expect(raw).toMatch(/multipart\/alternative/i);
+      expect(raw).toMatch(/Content-Type: text\/plain/i);
+      expect(raw).toContain('Bonjour vous');
+    });
+  });
+
   describe('appendToSent', () => {
     it('appends message to resolved Sent folder with \\Seen flag', async () => {
       client.list.mockResolvedValue([{ name: 'Sent', path: 'Sent', specialUse: '\\Sent' }]);
@@ -1629,6 +1699,63 @@ describe('ImapService', () => {
       await expect(service.downloadAttachment('test', '42', 'INBOX', 'lease.pdf')).rejects.toThrow(
         /returned no data for MIME part 2/,
       );
+    });
+
+    // BODYSTRUCTURE donne la taille ENCODÉE : une pièce base64 de 4 Mo réels
+    // en annonce ~5,5. La comparer telle quelle au plafond refusait à tort.
+    function primeBase64Part(declaredSize: number, payload: Buffer) {
+      const withMethods = client as unknown as {
+        fetchOne: ReturnType<typeof vi.fn>;
+        download: ReturnType<typeof vi.fn>;
+      };
+      withMethods.fetchOne = vi.fn().mockResolvedValue({
+        uid: 42,
+        bodyStructure: {
+          type: 'multipart/mixed',
+          childNodes: [
+            { type: 'text/plain', size: 50, part: '1' },
+            {
+              type: 'application/pdf',
+              size: declaredSize,
+              part: '2',
+              encoding: 'base64',
+              disposition: 'attachment',
+              dispositionParameters: { filename: 'lease.pdf' },
+            },
+          ],
+        },
+      });
+      withMethods.download = vi.fn().mockResolvedValue({ content: asyncFrom([payload]) });
+    }
+
+    it('downloadAttachment compares the DECODED size estimate, not the encoded one', async () => {
+      const MB = 1024 * 1024;
+      // 5,5 Mo encodés ≈ 4 Mo décodés : sous un plafond de 5 Mo.
+      primeBase64Part(Math.round(5.5 * MB), Buffer.from('PDF'));
+
+      const result = await service.downloadAttachment('test', '42', 'INBOX', 'lease.pdf', 5 * MB);
+
+      expect(result.size).toBe(3);
+    });
+
+    it('downloadAttachment refuses early when the decoded estimate exceeds the cap', async () => {
+      primeBase64Part(8 * 1024 * 1024, Buffer.from('PDF'));
+
+      await expect(
+        service.downloadAttachment('test', '42', 'INBOX', 'lease.pdf', 5 * 1024 * 1024),
+      ).rejects.toThrow(/exceeds 5MB limit/);
+      expect(
+        (client as unknown as { download: ReturnType<typeof vi.fn> }).download,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('downloadAttachment checks the real size while streaming (server under-declared)', async () => {
+      // Taille annoncée minuscule, contenu réel plus gros que le plafond.
+      primeBase64Part(10, Buffer.alloc(2048));
+
+      await expect(
+        service.downloadAttachment('test', '42', 'INBOX', 'lease.pdf', 1024),
+      ).rejects.toThrow(/once downloaded, exceeds/);
     });
 
     it('auto-suffixes when target exists and overwrite=false', async () => {

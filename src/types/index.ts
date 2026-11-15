@@ -79,6 +79,11 @@ export interface AccountConfig {
   backend?: 'imap' | 'graph';
   /** Append the signature by default on every composed message (unless overridden per call). */
   signatureDefault?: boolean;
+  /**
+   * Taille maximale d'un message sortant, encodé (Mo). Défaut : 25 en SMTP,
+   * 35 sur Graph (limite d'envoi par défaut d'Exchange Online). Voir send-limit.ts.
+   */
+  maxMessageMb?: number;
 }
 
 export interface WatcherConfig {
@@ -291,9 +296,38 @@ export interface Email extends EmailMeta {
 // Results
 // ---------------------------------------------------------------------------
 
+/**
+ * Sort de la copie d'un message envoyé dans le dossier Envoyés (IMAP APPEND).
+ *
+ * Un échec ne fait jamais échouer l'envoi — le message est déjà parti, et
+ * annoncer un échec pousserait à le renvoyer en double. Il est donc rapporté,
+ * pas levé. `skipped` : copie volontairement omise (save_to_sent désactivé, ou
+ * Gmail qui la classe lui-même).
+ */
+export type SentCopyResult =
+  | { kind: 'filed' }
+  | { kind: 'skipped'; reason: string }
+  | { kind: 'failed'; error: string };
+
+/**
+ * Sort du brouillon après send_draft. `kept` : volontairement conservé (la
+ * copie dans Envoyés a échoué : le supprimer ferait disparaître la seule trace
+ * du message). `failed` : la suppression a échoué APRÈS un envoi réussi.
+ */
+export type DraftCleanupResult =
+  | { kind: 'removed' }
+  | { kind: 'kept'; reason: string }
+  | { kind: 'failed'; error: string };
+
 export interface SendResult {
   messageId: string;
   status: 'sent' | 'failed';
+  /** Copie dans Envoyés (IMAP uniquement ; Graph classe la copie lui-même). */
+  sentCopy?: SentCopyResult;
+  /** send_draft uniquement : ce qu'il est advenu du brouillon. */
+  draftCleanup?: DraftCleanupResult;
+  /** Écarts non bloquants à signaler à l'appelant (jamais un échec masqué). */
+  warnings?: string[];
 }
 
 /**

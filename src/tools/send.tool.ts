@@ -10,6 +10,7 @@ import { validateInputLength } from '../safety/validation.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import type { ISendService } from '../services/send-service.types.js';
 import { adaptAttachmentInput, attachmentInputSchema } from './attachment-input.js';
+import describeSendOutcome from './send-outcome.js';
 
 export default function registerSendTools(
   server: McpServer,
@@ -22,7 +23,10 @@ export default function registerSendTools(
   server.tool(
     'send_email',
     'Send a new email. Supports plain text or HTML body, CC, BCC, and attachments ' +
-      '(from a local path, inline base64 bytes, or a reference to an attachment on an existing message).',
+      '(from a local path, inline base64 bytes, or a reference to an attachment on an existing message). ' +
+      'HTML mail also carries a generated plain-text alternative. The whole message, attachments ' +
+      'encoded, must fit the account limit (default 25 MB on SMTP, 35 MB on Graph; max_message_mb ' +
+      'in the account config): an oversized message is refused before anything is sent.',
     {
       account: z.string().describe('Account name from list_accounts'),
       to: z.array(z.string().email()).min(1).describe('Recipient email addresses'),
@@ -85,7 +89,7 @@ export default function registerSendTools(
           content: [
             {
               type: 'text' as const,
-              text: `✅ Email sent successfully!\nTo: ${params.to.join(', ')}\nSubject: ${params.subject}\nMessage-ID: ${result.messageId}`,
+              text: `✅ Email sent successfully!\nTo: ${params.to.join(', ')}\nSubject: ${params.subject}\nMessage-ID: ${result.messageId}${describeSendOutcome(result)}`,
             },
           ],
         };
@@ -116,7 +120,9 @@ export default function registerSendTools(
   // ---------------------------------------------------------------------------
   server.tool(
     'reply_email',
-    'Reply to an email with proper threading (In-Reply-To & References headers). Use get_email first to read the original.',
+    'Reply to an email with proper threading (In-Reply-To & References headers). Use get_email first to read the original. ' +
+      'The original message is quoted below the reply by default ("On DATE, NAME wrote:" + quoted text), ' +
+      'as desktop clients do — set quoteOriginal=false to send the bare body only.',
     {
       account: z.string().describe('Account name from list_accounts'),
       emailId: z.string().describe('Email ID to reply to (from list_emails or get_email)'),
@@ -127,7 +133,17 @@ export default function registerSendTools(
       includeAttachments: z
         .boolean()
         .default(false)
-        .describe('Re-attach attachments from the original email to this reply'),
+        .describe(
+          'Re-attach attachments from the original email to this reply. Strict: if one cannot be ' +
+            'fetched (or exceeds 25 MB), nothing is sent and the error names it.',
+        ),
+      quoteOriginal: z
+        .boolean()
+        .default(true)
+        .describe(
+          'Quote the original message below the reply (default true). In an HTML reply the original ' +
+            'is quoted as escaped text inside <blockquote type="cite">. Set false for the bare body only.',
+        ),
       appendSignature: z
         .boolean()
         .optional()
@@ -150,7 +166,7 @@ export default function registerSendTools(
           content: [
             {
               type: 'text' as const,
-              text: `✅ Reply sent successfully!\nMessage-ID: ${result.messageId}`,
+              text: `✅ Reply sent successfully!\nMessage-ID: ${result.messageId}${describeSendOutcome(result)}`,
             },
           ],
         };
@@ -181,7 +197,10 @@ export default function registerSendTools(
   // ---------------------------------------------------------------------------
   server.tool(
     'forward_email',
-    'Forward an email to new recipients with optional additional message. Original email is quoted below.',
+    'Forward an email to new recipients with optional additional message. The original is included ' +
+      'below (as readable text; an HTML original is converted, not pasted as markup) and its ' +
+      'attachments are carried across by default. Strict failure: if an attachment cannot be fetched, ' +
+      'nothing is sent (use includeAttachments=false to forward the body alone).',
     {
       account: z.string().describe('Account name from list_accounts'),
       emailId: z.string().describe('Email ID to forward (from list_emails or get_email)'),
@@ -189,6 +208,20 @@ export default function registerSendTools(
       to: z.array(z.string().email()).min(1).describe('Forward to these recipients'),
       body: z.string().optional().describe('Additional message above the forwarded content'),
       cc: z.array(z.string().email()).optional().describe('CC recipients'),
+      includeAttachments: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Carry the original email's attachments into the forward (default true). Set false for a body-only forward.",
+        ),
+      html: z
+        .boolean()
+        .default(false)
+        .describe(
+          'Also send an HTML part carrying the original HTML (default false: text only, the original ' +
+            'converted to readable text). On Graph accounts the server builds the forward and the ' +
+            'original always keeps its own format.',
+        ),
       appendSignature: z
         .boolean()
         .optional()
@@ -211,7 +244,7 @@ export default function registerSendTools(
           content: [
             {
               type: 'text' as const,
-              text: `✅ Email forwarded successfully!\nTo: ${params.to.join(', ')}\nMessage-ID: ${result.messageId}`,
+              text: `✅ Email forwarded successfully!\nTo: ${params.to.join(', ')}\nMessage-ID: ${result.messageId}${!params.includeAttachments ? '\n(original attachments not included)' : ''}${describeSendOutcome(result)}`,
             },
           ],
         };

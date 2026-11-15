@@ -213,6 +213,7 @@ tls = true
 | `gmail_auto_save` | `true` | Gmail files sent mail itself, so the append is skipped on Gmail; `false` appends anyway. |
 | `signature_path` | — | Outlook `.htm` signature appended on request ([signatures](#outlook-signature)). |
 | `signature_default` | `false` | Append the signature to every composed message unless a call says otherwise. |
+| `max_message_mb` | `25` (SMTP), `35` (Graph) | Largest outgoing message, attachments encoded included; a larger one is refused before anything is sent ([size limit](#size-limit)). |
 | `imap.host` / `smtp.host` | *required* | Server host names — required by the schema even for a Graph account, where they are unused. |
 | `imap.port` | `993` | |
 | `smtp.port` | `465` | |
@@ -555,8 +556,8 @@ server is [read-only](#read-only-mode).
 | Tool | What it does | Backend | Read-only |
 |------|--------------|---------|-----------|
 | `send_email` | New message: text or HTML, cc/bcc, attachments, inline images, signature. | both | — |
-| `reply_email` | Threaded reply (`replyAll`, `includeAttachments`, `appendSignature`). | both | — |
-| `forward_email` | Forward with the original quoted. | both | — |
+| `reply_email` | Threaded reply quoting the original (`replyAll`, `quoteOriginal`, `includeAttachments`, `appendSignature`). | both | — |
+| `forward_email` | Forward with the original and its attachments (`cc`, `includeAttachments`, `html`, `appendSignature`). | both | — |
 | `save_draft` | Save a draft (attachments, `in_reply_to`, signature). | both | — |
 | `update_draft` | Rewrite a draft, keeping or changing its attachments. | both | — |
 | `send_draft` | Send a draft and remove it from Drafts. | both | — |
@@ -852,8 +853,42 @@ not be able to steer a write into a startup folder.
 
 The third form copies an attachment from an existing message without the bytes
 travelling through the conversation. `reply_email` can re-attach the original's
-files with `includeAttachments: true`. On Graph accounts, attachments over 3 MB
-go through an upload session.
+files with `includeAttachments: true`; `forward_email` carries them by default
+(`includeAttachments: false` forwards the body alone). Both are strict: if one
+attachment cannot be fetched or exceeds 25 MB, nothing is sent and the error
+names it. Attachments are addressed by filename, so when the original carries two
+attachments with the same name only the first is included, with a warning. On
+Graph accounts, attachments over 3 MB go through an upload session.
+
+### Size limit
+
+Each attachment is capped at 25 MB, and the whole message — attachments
+base64-encoded, which adds about 37 % — must fit the account limit: 25 MB on
+SMTP, 35 MB on Graph (Exchange Online's default send limit), or `max_message_mb`
+when set. A larger message is refused before anything is sent, with the size of
+each attachment, instead of bouncing later with an opaque SMTP `552`.
+
+### Replies, forwards and what happens after sending
+
+- `reply_email` quotes the original below the reply by default (`On DATE, NAME
+  wrote:` and `>`-prefixed lines; in an HTML reply, a `<blockquote type="cite">`
+  holding the original as escaped text, never its raw HTML). `quoteOriginal:
+  false` sends the bare body; on Graph this goes through a reply draft whose body
+  is replaced.
+- `forward_email` includes the original as readable text (an HTML original is
+  converted, not pasted as markup); `html: true` adds an HTML part carrying the
+  original HTML. On Graph the server builds the forward and the original keeps
+  its own format. Cc recipients are honoured on both backends.
+- Subjects do not stack prefixes: `RE:`, `AW:`, `SV:`, `Antw:`, `Rif:`,
+  `Re[2]:`… are recognised (case-insensitive), as are `FW:`, `TR:`, `WG:`,
+  `Enc:`… for forwards.
+- HTML messages carry a generated plain-text alternative.
+- After an SMTP send, the result reports the copy to the Sent folder: filed,
+  skipped on purpose (setting off, Gmail) or **failed** — the message was sent
+  anyway, do not resend it.
+- A scheduled reply (`schedule_email` with `in_reply_to`) keeps its thread: SMTP
+  sets `In-Reply-To` and `References`; Graph, which cannot set those headers,
+  sends it as a reply to the original message, or warns when it cannot find it.
 
 ### Inline images (`cid`)
 
@@ -891,8 +926,13 @@ ignored with a warning.
 
 ### Drafts
 
-- `save_draft` saves to the Drafts folder; `send_draft` sends it and removes it,
-  keeping its attachments.
+- `save_draft` saves to the Drafts folder, Bcc recipients included (they ride
+  in the SMTP envelope at send time and never reach the delivered message);
+  `send_draft` sends it and removes it, keeping its attachments. Once the message
+  is sent, `send_draft` never reports a failure: if the copy to the Sent folder
+  failed, the draft is **kept** (it is the only local copy left); if deleting the
+  draft failed, the result says so. In both cases the message went out — do not
+  resend it.
 - `update_draft` rewrites a draft. Omitted fields (subject, body, recipients)
   keep their value; `attachments_keep` (all by default, `[]` drops them),
   `attachments_add` and `attachments_remove` handle files. On IMAP, which has no

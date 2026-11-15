@@ -6,7 +6,6 @@
 
 import type { ImapFlow, ImapFlowErrorCode } from 'imapflow';
 import { simpleParser } from 'mailparser';
-import MailComposer from 'nodemailer/lib/mail-composer';
 import type { IConnectionManager } from '../connections/types.js';
 import { sanitizeMailboxName } from '../safety/validation.js';
 import type {
@@ -40,6 +39,8 @@ import {
   parseHeaderBlock,
   splitHeaderBlock,
 } from '../utils/headers.js';
+import { htmlToPlainText } from '../utils/html-text.js';
+import { buildReferences, composeMessage } from '../utils/mime-headers.js';
 import type { AttachmentInput, ResolvedAttachment } from './attachment-resolver.js';
 import { resolveAttachments } from './attachment-resolver.js';
 import {
@@ -2426,6 +2427,8 @@ export default class ImapService {
       bcc?: string[];
       html?: boolean;
       inReplyTo?: string;
+      /** Chaîne References du fil ; défaut : `[inReplyTo]` quand il est fourni. */
+      references?: string[];
       attachments?: ResolvedAttachment[];
       appendSignature?: boolean;
     },
@@ -2455,17 +2458,22 @@ export default class ImapService {
       bcc: options.bcc?.length ? options.bcc.join(', ') : undefined,
       subject: options.subject,
       inReplyTo: options.inReplyTo,
+      // Sans References, un client qui ne regarde que cet en-tête (Gmail en
+      // tête) ne rattache pas le brouillon envoyé à son fil.
+      references: buildReferences(options.inReplyTo, options.references),
       date: new Date(),
-      ...(signed.html ? { html: signed.body } : { text: signed.body }),
+      // Un brouillon HTML reçoit son alternative text/plain dès l'écriture :
+      // send_draft transmet ces octets tels quels, sans recomposer.
+      ...(signed.html
+        ? { html: signed.body, text: htmlToPlainText(signed.body) }
+        : { text: signed.body }),
       ...(hasDraftAttachments ? { attachments: signed.attachments } : {}),
     };
 
-    const rawMessage = await new Promise<Buffer>((resolve, reject) => {
-      new MailComposer(mailOptions).compile().build((err: Error | null, buf: Buffer) => {
-        if (err) reject(err);
-        else resolve(buf);
-      });
-    });
+    // keepBcc : un brouillon n'a pas d'enveloppe SMTP, l'en-tête Bcc est le seul
+    // endroit où garder les destinataires cachés (voir composeMessage). Le
+    // pliage des noms de fichiers longs est corrigé au passage.
+    const rawMessage = await composeMessage(mailOptions, { keepBcc: true });
 
     const appendResult = await client.append(draftsPath, rawMessage, ['\\Draft', '\\Seen']);
 
@@ -2517,6 +2525,7 @@ export default class ImapService {
       bcc?: string[];
       html?: boolean;
       inReplyTo?: string;
+      references?: string[];
       attachments?: AttachmentInput[];
       appendSignature?: boolean;
     },
@@ -2540,6 +2549,7 @@ export default class ImapService {
       bcc: options.bcc,
       html: options.html,
       inReplyTo: options.inReplyTo,
+      references: options.references,
       attachments: resolved,
       appendSignature: options.appendSignature,
     });
@@ -2727,6 +2737,9 @@ export default class ImapService {
     const cc = options.cc ?? existing.cc?.map((a) => a.address);
     const bcc = options.bcc ?? existing.bcc?.map((a) => a.address);
     const inReplyTo = options.inReplyTo ?? existing.inReplyTo;
+    // Les References héritées ne valent que pour le fil d'origine : un nouvel
+    // in_reply_to les remplace (buildReferences repart alors de lui).
+    const references = options.inReplyTo === undefined ? existing.references : undefined;
 
     // Signature : uniquement sur demande explicite ET sous un nouveau corps.
     // Sous un corps hérité, elle ferait doublon avec celle qu'il contient déjà.
@@ -2798,6 +2811,7 @@ export default class ImapService {
       bcc,
       html,
       inReplyTo,
+      references,
       attachments: allAttachments,
       // Explicite : sans ce false, saveDraft appliquerait signature_default et
       // ajouterait la signature du compte à chaque mise à jour.
@@ -2864,6 +2878,36 @@ export default class ImapService {
    * accounts elsewhere. A non-numeric id here means the two were crossed, which
    * is worth an explicit error rather than a NaN flowing into a fetch.
    */
+  /**
+   * Encodage de transfert (`base64`, `quoted-printable`…) de la partie MIME
+   * `part` d'un BODYSTRUCTURE imapflow, en minuscules ; undefined si inconnu.
+   */
+  private static partEncoding(bodyStructure: unknown, part: string): string | undefined {
+    const walk = (node: unknown, depth: number): string | undefined => {
+      if (depth > MAX_MIME_DEPTH || !node || typeof node !== 'object') return undefined;
+      const n = node as Record<string, unknown>;
+      if (n.part === part) {
+        return typeof n.encoding === 'string' ? n.encoding.toLowerCase() : undefined;
+      }
+      if (!Array.isArray(n.childNodes)) return undefined;
+      return n.childNodes.reduce<string | undefined>(
+        (found, child) => found ?? walk(child, depth + 1),
+        undefined,
+      );
+    };
+    // Message à partie unique : la racine n'a pas de numéro, sa section est « 1 ».
+    const root = bodyStructure as Record<string, unknown> | undefined;
+    if (
+      part === '1' &&
+      root &&
+      !Array.isArray(root.childNodes) &&
+      typeof root.encoding === 'string'
+    ) {
+      return root.encoding.toLowerCase();
+    }
+    return walk(bodyStructure, 0);
+  }
+
   private static toUid(value: number | string, what: string): number {
     const uid = typeof value === 'number' ? value : Number.parseInt(value, 10);
     if (!Number.isFinite(uid)) {
@@ -2930,16 +2974,24 @@ export default class ImapService {
         );
       }
 
-      if (attachment.size > maxSizeBytes) {
-        throw new Error(
-          `Attachment "${filename}" is ${Math.round(attachment.size / 1024 / 1024)}MB, exceeds ${Math.round(maxSizeBytes / 1024 / 1024)}MB limit`,
-        );
-      }
-
       // Find the MIME part number
       const partNumber = findMimePartByFilename(msg.bodyStructure, filename);
       if (!partNumber) {
         throw new Error(`Could not locate MIME part for "${filename}"`);
+      }
+
+      // Contrôle préalable sur la taille DÉCODÉE estimée. BODYSTRUCTURE donne la
+      // taille de la partie telle que stockée, donc ENCODÉE : en base64, ~1,37
+      // fois la taille réelle (76 caractères + CRLF pour 57 octets). Comparer
+      // cette valeur brute au plafond refusait à tort une pièce de 20 Mo
+      // (≈ 27,5 Mo encodés) face à un plafond de 25 Mo.
+      const encoding = ImapService.partEncoding(msg.bodyStructure, partNumber);
+      const estimatedSize =
+        encoding === 'base64' ? Math.floor((attachment.size * 57) / 78) : attachment.size;
+      if (estimatedSize > maxSizeBytes) {
+        throw new Error(
+          `Attachment "${filename}" is about ${Math.round(estimatedSize / 1024 / 1024)}MB, exceeds ${Math.round(maxSizeBytes / 1024 / 1024)}MB limit`,
+        );
       }
 
       // Download the part
@@ -2951,10 +3003,30 @@ export default class ImapService {
         throw new Error(`Failed to download attachment "${filename}"`);
       }
 
+      // Contrôle de la taille RÉELLE pendant le téléchargement (idée de la PR
+      // codefuturist #108) : la taille annoncée par BODYSTRUCTURE n'est qu'une
+      // déclaration du serveur. imapflow décode le transfert (base64, QP) : les
+      // octets comptés ici sont les octets réels. Au-delà du plafond, le flux
+      // est vidé SANS être conservé — interrompre un téléchargement imapflow en
+      // cours de commande peut désynchroniser la connexion IMAP partagée.
       const chunks: Buffer[] = [];
+      let received = 0;
+      let exceeded = false;
       // eslint-disable-next-line no-restricted-syntax
       for await (const chunk of downloadResult.content) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        received += buffer.length;
+        if (received > maxSizeBytes) {
+          exceeded = true;
+          chunks.length = 0;
+        } else if (!exceeded) {
+          chunks.push(buffer);
+        }
+      }
+      if (exceeded) {
+        throw new Error(
+          `Attachment "${filename}" is ${Math.round(received / 1024 / 1024)}MB once downloaded, exceeds ${Math.round(maxSizeBytes / 1024 / 1024)}MB limit`,
+        );
       }
       const content = Buffer.concat(chunks);
       // imapflow 2 redemande une section rendue vide, puis termine le flux

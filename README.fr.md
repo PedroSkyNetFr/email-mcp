@@ -218,6 +218,7 @@ tls = true
 | `gmail_auto_save` | `true` | Gmail classe lui-même les messages envoyés, donc l'ajout est omis sur Gmail ; `false` l'ajoute quand même. |
 | `signature_path` | — | Signature Outlook `.htm` ajoutée à la demande ([signatures](#signature-outlook)). |
 | `signature_default` | `false` | Ajoute la signature à chaque message rédigé, sauf si l'appel dit le contraire. |
+| `max_message_mb` | `25` (SMTP), `35` (Graph) | Taille maximale d'un message sortant, pièces jointes encodées comprises ; au-delà, le message est refusé avant tout envoi ([limite de taille](#limite-de-taille)). |
 | `imap.host` / `smtp.host` | *obligatoire* | Noms des serveurs — exigés par le schéma même pour un compte Graph, qui ne s'en sert pas. |
 | `imap.port` | `993` | |
 | `smtp.port` | `465` | |
@@ -567,8 +568,8 @@ enregistré quand le serveur est en [lecture seule](#mode-lecture-seule).
 | Outil | Ce qu'il fait | Backend | Lecture seule |
 |-------|---------------|---------|---------------|
 | `send_email` | Nouveau message : texte ou HTML, cc/cci, pièces jointes, images intégrées, signature. | both | — |
-| `reply_email` | Réponse dans le fil (`replyAll`, `includeAttachments`, `appendSignature`). | both | — |
-| `forward_email` | Transfert avec l'original cité. | both | — |
+| `reply_email` | Réponse dans le fil, original cité (`replyAll`, `quoteOriginal`, `includeAttachments`, `appendSignature`). | both | — |
+| `forward_email` | Transfert de l'original et de ses pièces jointes (`cc`, `includeAttachments`, `html`, `appendSignature`). | both | — |
 | `save_draft` | Enregistre un brouillon (pièces jointes, `in_reply_to`, signature). | both | — |
 | `update_draft` | Réécrit un brouillon en gardant ou modifiant ses pièces jointes. | both | — |
 | `send_draft` | Envoie un brouillon et le retire des Brouillons. | both | — |
@@ -879,8 +880,46 @@ trois formes :
 
 La troisième forme recopie une pièce jointe d'un message existant sans que les
 octets transitent par la conversation. `reply_email` peut rejoindre les fichiers
-de l'original avec `includeAttachments: true`. Sur les comptes Graph, les pièces
-jointes de plus de 3 Mo passent par une session de téléversement.
+de l'original avec `includeAttachments: true` ; `forward_email` les reprend par
+défaut (`includeAttachments: false` transfère le corps seul). Les deux sont
+stricts : si une pièce ne peut pas être récupérée ou dépasse 25 Mo, rien n'est
+envoyé et l'erreur la nomme. Les pièces sont désignées par leur nom de fichier :
+quand l'original en porte deux de même nom, seule la première est reprise, avec
+un avertissement. Sur les comptes Graph, les pièces jointes de plus de 3 Mo
+passent par une session de téléversement.
+
+### Limite de taille
+
+Chaque pièce jointe est plafonnée à 25 Mo, et le message entier — pièces
+encodées en base64, ce qui ajoute environ 37 % — doit tenir dans la limite du
+compte : 25 Mo en SMTP, 35 Mo sur Graph (limite d'envoi par défaut d'Exchange
+Online), ou `max_message_mb` s'il est renseigné. Un message plus gros est refusé
+avant tout envoi, avec la taille de chaque pièce, au lieu d'être rejeté plus tard
+par un `552` SMTP opaque.
+
+### Réponses, transferts et suites de l'envoi
+
+- `reply_email` cite l'original sous la réponse par défaut (`On DATE, NAME
+  wrote:` puis des lignes préfixées par `>` ; dans une réponse HTML, un
+  `<blockquote type="cite">` contenant l'original en texte échappé, jamais son
+  HTML brut). `quoteOriginal: false` envoie le corps seul ; sur Graph, cela passe
+  par un brouillon de réponse dont le corps est remplacé.
+- `forward_email` reprend l'original en texte lisible (un original HTML est
+  converti, pas collé en balises) ; `html: true` ajoute une partie HTML portant
+  le HTML d'origine. Sur Graph, le serveur construit le transfert et l'original
+  garde son propre format. Les destinataires en copie (`cc`) sont pris en compte
+  sur les deux backends.
+- Les objets n'empilent plus les préfixes : `RE:`, `AW:`, `SV:`, `Antw:`, `Rif:`,
+  `Re[2]:`… sont reconnus (sans tenir compte de la casse), comme `FW:`, `TR:`,
+  `WG:`, `Enc:`… pour les transferts.
+- Les messages HTML portent une alternative en texte brut générée.
+- Après un envoi SMTP, le résultat indique ce qu'il est advenu de la copie dans
+  Envoyés : classée, omise volontairement (réglage désactivé, Gmail) ou **en
+  échec** — le message est quand même parti, il ne faut pas le renvoyer.
+- Une réponse planifiée (`schedule_email` avec `in_reply_to`) reste dans son fil :
+  en SMTP, `In-Reply-To` et `References` sont posés ; Graph, qui ne permet pas de
+  poser ces en-têtes, l'envoie comme réponse au message d'origine, ou avertit
+  s'il ne le trouve pas.
 
 ### Images intégrées (`cid`)
 
@@ -918,8 +957,14 @@ avertissement.
 
 ### Brouillons
 
-- `save_draft` enregistre dans le dossier Brouillons ; `send_draft` l'envoie et
-  le retire, en conservant ses pièces jointes.
+- `save_draft` enregistre dans le dossier Brouillons, destinataires en copie
+  cachée (Bcc) compris (ils passent dans l'enveloppe SMTP à l'envoi et
+  n'apparaissent jamais dans le message remis) ; `send_draft` l'envoie et le
+  retire, en conservant ses pièces jointes. Une fois le message parti,
+  `send_draft` ne signale jamais d'échec : si la copie dans Envoyés a échoué, le
+  brouillon est **conservé** (c'est la seule copie locale restante) ; si la
+  suppression du brouillon a échoué, le résultat le dit. Dans les deux cas le
+  message est parti — il ne faut pas le renvoyer.
 - `update_draft` réécrit un brouillon. Les champs omis (sujet, corps,
   destinataires) gardent leur valeur ; `attachments_keep` (toutes par défaut, `[]`
   les retire), `attachments_add` et `attachments_remove` gèrent les fichiers. En

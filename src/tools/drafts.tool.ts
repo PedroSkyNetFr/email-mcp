@@ -9,6 +9,7 @@ import audit from '../safety/audit.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import type { ISendService } from '../services/send-service.types.js';
 import { adaptAttachmentInput, attachmentInputSchema } from './attachment-input.js';
+import describeSendOutcome from './send-outcome.js';
 
 // ---------------------------------------------------------------------------
 // Tool registration
@@ -124,7 +125,10 @@ export default function registerDraftTools(
   // ---------------------------------------------------------------------------
   server.tool(
     'send_draft',
-    'Send an existing draft email and remove it from Drafts. The draft is fetched, sent via SMTP, then deleted. Use list_emails with the Drafts mailbox to find draft IDs.',
+    'Send an existing draft email and remove it from Drafts. The draft is fetched, sent via SMTP, then deleted. ' +
+      'Once the message is sent, the result never reports a failure: if filing the Sent copy failed the draft ' +
+      'is kept, and if deleting the draft failed a warning says so — in both cases the message WAS sent, do not ' +
+      'resend it. Use list_emails with the Drafts mailbox to find draft IDs.',
     {
       account: z.string().describe('Account name from list_accounts'),
       id: z
@@ -146,7 +150,10 @@ export default function registerDraftTools(
           content: [
             {
               type: 'text' as const,
-              text: `✅ Draft sent (Message-ID: ${result.messageId}). Draft removed from folder.`,
+              text: `✅ Draft sent (Message-ID: ${result.messageId}).${
+                // Graph ne détaille pas l'issue : son envoi déplace lui-même le brouillon dans Envoyés.
+                result.draftCleanup === undefined ? ' Draft removed from folder.' : ''
+              }${describeSendOutcome(result)}`,
             },
           ],
         };
