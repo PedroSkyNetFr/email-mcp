@@ -11,6 +11,18 @@ import { normalizeDate } from '../utils/date.js';
 
 export interface SearchParams {
   query?: string;
+  /**
+   * Portée de la requête libre `query` (wgs4 0c2c2b4).
+   *
+   * `undefined` / `true` (défaut) : sujet + expéditeur + CORPS.
+   * `false` : en-têtes seulement — sujet + expéditeur + destinataires, aucun
+   * terme BODY envoyé au serveur. Sur un gros dossier sans index plein texte,
+   * la recherche reste un balayage d'en-têtes, bien moins coûteux.
+   *
+   * N'affecte que `query` : les filtres explicites `body:` / `text:` lisent
+   * toujours le corps.
+   */
+  deep?: boolean;
   to?: string;
   from?: string;
   subject?: string;
@@ -130,10 +142,17 @@ export function buildSearchCriteria(params: SearchParams, opts: { isGmail: boole
   // (R5), warned about, and run on a bounded ephemeral connection (R3) so it
   // fails loudly/cleanly instead of silently. `bodyScan` (below) flags this
   // path for that gate.
+  //
+  // `deep: false` : variante en-têtes seulement — SUBJECT / FROM / TO, sans
+  // terme BODY. TO n'y figure que là : c'est le troisième champ d'enveloppe peu
+  // coûteux, alors que dans la variante profonde le corps domine le coût.
+  const deepQuery = params.deep !== false;
   if (params.query && params.query.length > 0) {
     const q = sanitizeSearchQuery(params.query);
     andConditions.push({
-      or: [{ subject: q }, { from: q }, { body: q }],
+      or: deepQuery
+        ? [{ subject: q }, { from: q }, { body: q }]
+        : [{ subject: q }, { from: q }, { to: q }],
     });
   }
 
@@ -211,7 +230,10 @@ export function buildSearchCriteria(params: SearchParams, opts: { isGmail: boole
   // (Boolean sub-expressions: an empty string is "no value", and `||` here is
   // a true logical-OR of booleans — not a nullish-default, hence not `??`.)
   const nonEmpty = (v: string | undefined): boolean => v !== undefined && v.length > 0;
-  const bodyScan = nonEmpty(params.query) || nonEmpty(params.body) || nonEmpty(params.text);
+  // Une requête `deep: false` n'émet aucun terme BODY : elle ne lève pas ce
+  // drapeau et ne passe jamais par la connexion éphémère bornée.
+  const bodyScan =
+    (deepQuery && nonEmpty(params.query)) || nonEmpty(params.body) || nonEmpty(params.text);
 
   // A `*Contains` filter narrows nothing server-side. On its own it therefore
   // asks the server for the whole mailbox and sifts the result here — correct,
@@ -292,6 +314,47 @@ export function applyLiteralFilters<T extends MatchableMessage>(
   }
 
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Repli sur une fenêtre récente (wgs4 0c2c2b4, « R6 »)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fenêtre de la relance automatique après une recherche qui n'a pas abouti.
+ *
+ * 90 jours couvrent la recherche réaliste « où est passé ce message ? », et
+ * `SEARCH SINCE <date>` élague fortement les candidats sur les dossiers qui
+ * provoquent l'échec : le serveur évalue la date interne avant d'ouvrir un
+ * corps.
+ */
+export const RECENCY_WINDOW_DAYS = 90;
+
+/**
+ * Vrai si l'appelant a déjà borné la recherche par date. Le repli ne doit pas
+ * se déclencher alors : la requête n'est pas « trop large », et ajouter notre
+ * `since` réduirait en silence une plage choisie par l'appelant — un second
+ * faux négatif, plus discret. C'est aussi ce qui rend la reprise par `before`
+ * cohérente : un appel relancé avec `before` (fenêtre élargie, continuation
+ * d'un parcours partiel) n'est jamais refenêtré.
+ */
+export function hasDateNarrowing(params: SearchParams): boolean {
+  const dated = [params.since, params.before, params.on, params.sentSince, params.sentBefore];
+  return dated.some((v) => typeof v === 'string' && v.length > 0);
+}
+
+/**
+ * Copie de `criteria` à laquelle s'ajoute `SINCE <il y a N jours>`.
+ *
+ * imapflow combine en ET les clés de premier niveau : ajouter `since` à côté
+ * d'un `or:[…]` existant restreint toute l'expression au lieu de la remplacer —
+ * la relance cherche la même chose, sur moins de courrier.
+ */
+export function withRecencyWindow(
+  criteria: Record<string, unknown>,
+  days: number,
+): Record<string, unknown> {
+  return { ...criteria, since: normalizeDate(`${days}d`) };
 }
 
 /** Splits a UID list into fixed-size chunks — handy for bounded FETCH ranges. */

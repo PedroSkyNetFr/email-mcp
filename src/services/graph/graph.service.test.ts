@@ -459,3 +459,209 @@ describe('GraphService — export', () => {
     }
   });
 });
+
+describe('GraphService — save_draft with in_reply_to (6)', () => {
+  /** Faux client dont les réponses dépendent de « MÉTHODE chemin ». */
+  function routed(found: boolean) {
+    const { client, service } = build();
+    client.request.mockImplementation(async (method: string, path: string) => {
+      if (method === 'GET' && path.startsWith('/me/messages?$filter=')) {
+        return { value: found ? [{ id: 'ORIG' }] : [] };
+      }
+      if (method === 'POST' && path === '/me/messages/ORIG/createReply') return { id: 'R1' };
+      if (method === 'POST' && path === '/me/messages') return { id: 'N1' };
+      return undefined;
+    });
+    const calls = () => client.request.mock.calls.map((c) => `${c[0]} ${c[1]}`);
+    return { client, service, calls };
+  }
+
+  const draft = {
+    to: ['a@example.com'],
+    subject: 'Re: devis',
+    body: 'Bonjour',
+    inReplyTo: '<orig@example.com>',
+  };
+
+  it('threads the draft: createReply on the original, then PATCH of the whole content', async () => {
+    // Avant : POST /me/messages, in_reply_to ignoré — brouillon hors du fil.
+    const { client, service, calls } = routed(true);
+
+    const result = await service.saveDraft('graph', draft);
+
+    expect(result).toEqual({ id: 'R1', mailbox: 'Drafts' });
+    expect(calls().slice(1)).toEqual([
+      'POST /me/messages/ORIG/createReply',
+      'PATCH /me/messages/R1',
+    ]);
+    expect(decodeURIComponent(calls()[0])).toContain("internetMessageId eq '<orig@example.com>'");
+    expect(client.request.mock.calls[2][2]).toMatchObject({
+      subject: 'Re: devis',
+      body: { contentType: 'Text', content: 'Bonjour' },
+      toRecipients: [{ emailAddress: { address: 'a@example.com' } }],
+    });
+  });
+
+  it('original not found: a normal draft, with a visible warning', async () => {
+    const { service, calls } = routed(false);
+
+    const result = await service.saveDraft('graph', draft);
+
+    expect(result.id).toBe('N1');
+    expect(result.warning).toMatch(/not found.*without threading/);
+    expect(calls().at(-1)).toBe('POST /me/messages');
+  });
+
+  it('without in_reply_to, nothing is looked up', async () => {
+    const { service, calls } = routed(true);
+    await service.saveDraft('graph', { ...draft, inReplyTo: undefined });
+    expect(calls()).toEqual(['POST /me/messages']);
+  });
+});
+
+describe('GraphService.getEmail — Reply-To', () => {
+  it('demande replyTo et l’expose quand l’expéditeur en a posé un', async () => {
+    const { client, service } = build();
+    client.request.mockResolvedValueOnce({
+      id: 'AAMk1',
+      subject: 'S',
+      from: { emailAddress: { address: 'alice@example.com' } },
+      toRecipients: [],
+      replyTo: [{ emailAddress: { name: 'Support', address: 'support@example.com' } }],
+      body: { contentType: 'text', content: 'corps' },
+    });
+
+    const email = await service.getEmail('graph', 'AAMk1');
+
+    expect(client.request.mock.calls[0][1]).toContain('replyTo');
+    expect(email.replyTo).toEqual([{ name: 'Support', address: 'support@example.com' }]);
+  });
+
+  it('laisse replyTo absent quand Graph rend un tableau vide', async () => {
+    const { client, service } = build();
+    client.request.mockResolvedValueOnce({
+      id: 'AAMk2',
+      from: { emailAddress: { address: 'alice@example.com' } },
+      toRecipients: [],
+      replyTo: [],
+      body: { contentType: 'text', content: '' },
+    });
+
+    const email = await service.getEmail('graph', 'AAMk2');
+
+    expect(email.replyTo).toBeUndefined();
+  });
+});
+
+describe('GraphService — pièces jointes adressées par id (partId)', () => {
+  const listed = [
+    { id: 'att-1', name: 'image001.png', contentType: 'image/png', size: 100 },
+    { id: 'att-2', name: 'image001.png', contentType: 'image/png', size: 200 },
+    {
+      id: 'att-3',
+      name: 'logo.png',
+      contentType: 'image/png',
+      size: 50,
+      isInline: true,
+      contentId: '<logo@x>',
+    },
+  ];
+
+  it('getEmail exposes the attachment id as partId and marks inline cid images', async () => {
+    const { client, service } = build();
+    client.request.mockResolvedValueOnce({
+      id: 'M1',
+      from: { emailAddress: { address: 'a@example.com' } },
+      toRecipients: [],
+      hasAttachments: true,
+      body: { contentType: 'html', content: '<img src="cid:logo@x">' },
+    });
+    client.collect.mockResolvedValueOnce(listed);
+
+    const email = await service.getEmail('graph', 'M1');
+
+    expect(client.collect.mock.calls[0][0]).toContain('isInline');
+    expect(email.attachments).toEqual([
+      { filename: 'image001.png', mimeType: 'image/png', size: 100, partId: 'att-1' },
+      { filename: 'image001.png', mimeType: 'image/png', size: 200, partId: 'att-2' },
+      {
+        filename: 'logo.png',
+        mimeType: 'image/png',
+        size: 50,
+        partId: 'att-3',
+        contentId: 'logo@x',
+        inline: true,
+      },
+    ]);
+  });
+
+  it('getEmail lists inline images even when Graph says hasAttachments=false', async () => {
+    const { client, service } = build();
+    client.request.mockResolvedValueOnce({
+      id: 'M2',
+      from: { emailAddress: { address: 'a@example.com' } },
+      toRecipients: [],
+      hasAttachments: false,
+      body: { contentType: 'html', content: '<p>Hi</p><img src="cid:logo@x">' },
+    });
+    client.collect.mockResolvedValueOnce([listed[2]]);
+
+    const email = await service.getEmail('graph', 'M2');
+
+    expect(email.hasAttachments).toBe(false);
+    expect(email.attachments).toMatchObject([{ partId: 'att-3', inline: true }]);
+  });
+
+  it('downloadAttachment fetches the second same-named attachment by its id', async () => {
+    const { client, service } = build();
+    client.collect.mockResolvedValueOnce(listed);
+    client.request.mockResolvedValueOnce({
+      name: 'image001.png',
+      contentType: 'image/png',
+      contentBytes: 'QkJC',
+      size: 3,
+    });
+
+    const result = await service.downloadAttachment('graph', 'M1', 'INBOX', { partId: 'att-2' });
+
+    expect(client.request.mock.calls[0][1]).toBe('/me/messages/M1/attachments/att-2');
+    expect(result.contentBase64).toBe('QkJC');
+  });
+
+  it('downloadAttachment refuses an ambiguous name, listing both ids, and downloads nothing', async () => {
+    const { client, service } = build();
+    client.collect.mockResolvedValueOnce(listed);
+
+    await expect(
+      service.downloadAttachment('graph', 'M1', 'INBOX', 'image001.png'),
+    ).rejects.toThrow(/Ambiguous attachment name "image001\.png".*partId att-1.*partId att-2/s);
+    expect(client.request).not.toHaveBeenCalled();
+  });
+
+  it('saveEmailAttachments skips inline images and renames the duplicate', async () => {
+    const { mkdtemp, readdir, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const tmp = await mkdtemp(join(tmpdir(), 'graph-dup-'));
+    try {
+      const { client, service } = build();
+      client.collect.mockResolvedValueOnce(listed);
+      client.request.mockImplementation(async (_m: string, path: string) => ({
+        name: 'image001.png',
+        contentType: 'image/png',
+        contentBytes: Buffer.from(path).toString('base64'),
+      }));
+
+      const saved = await service.saveEmailAttachments('graph', 'M1', 'INBOX', tmp);
+
+      expect(saved.map((s) => s.filename)).toEqual(['image001.png', 'image001 (2).png']);
+      expect((await readdir(tmp)).sort()).toEqual(['image001 (2).png', 'image001.png']);
+      expect(client.request.mock.calls.map((c) => c[1])).toEqual([
+        '/me/messages/M1/attachments/att-1',
+        '/me/messages/M1/attachments/att-2',
+      ]);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});

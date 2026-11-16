@@ -11,7 +11,7 @@ compose, send, schedule and organise mail across several accounts. Mailboxes are
 reached over **IMAP + SMTP**, or over **Microsoft Graph** for Exchange Online and
 Outlook.com accounts, whose IMAP endpoint hides part of the mailbox.
 
-The server exposes **64 tools** (35 when it runs read-only), **7 prompts** and
+The server exposes **67 tools** (35 when it runs read-only), **7 prompts** and
 **6 resources**.
 
 > **About this fork.** This repository is a fork maintained by
@@ -213,11 +213,13 @@ tls = true
 | `gmail_auto_save` | `true` | Gmail files sent mail itself, so the append is skipped on Gmail; `false` appends anyway. |
 | `signature_path` | — | Outlook `.htm` signature appended on request ([signatures](#outlook-signature)). |
 | `signature_default` | `false` | Append the signature to every composed message unless a call says otherwise. |
+| `max_message_mb` | none (SMTP), `35` (Graph) | Largest outgoing message, attachments encoded included; a larger one is refused before anything is sent ([size limit](#size-limit)). On SMTP, unset means the server's own announced limit applies. |
+| `reply_language` | `[settings]` value | `"fr"` or `"en"`: language of the quote line and forward header for this account ([replies and forwards](#replies-forwards-and-what-happens-after-sending)). |
 | `imap.host` / `smtp.host` | *required* | Server host names — required by the schema even for a Graph account, where they are unused. |
 | `imap.port` | `993` | |
 | `smtp.port` | `465` | |
 | `imap.tls` / `smtp.tls` | `true` | Implicit TLS. |
-| `imap.starttls` / `smtp.starttls` | `false` | STARTTLS (for SMTP on port 587: `tls = false`, `starttls = true`). |
+| `imap.starttls` / `smtp.starttls` | `false` | STARTTLS (for SMTP on port 587: `tls = false`, `starttls = true`). On IMAP towards a remote host, STARTTLS is required: the connection fails if the server does not offer it, never falls back to plaintext. On a loopback host (`localhost`, `127.0.0.0/8`, `::1`) it stays opportunistic, for local plaintext gateways (DavMail, Proton Bridge). |
 | `imap.verify_ssl` / `smtp.verify_ssl` | `true` | Verify the server certificate. |
 | `smtp.pool.enabled` | `true` | Reuse SMTP connections. |
 | `smtp.pool.max_connections` | `1` | |
@@ -348,6 +350,9 @@ against code running as the same user, which can run the same command.
 |-----|---------|---------|
 | `rate_limit` | `10` | Max messages sent per minute and per account (SMTP sends). |
 | `read_only` | `false` | Read-only mode: write tools are not registered and the scheduled queue is not processed ([details](#read-only-mode)). |
+| `reply_language` | `"fr"` | Language of the line introducing a quoted original and of the forward header: `"fr"` or `"en"`; overridable per account. |
+| `duplicate_send_window_minutes` | `10` | An identical message sent again within this many minutes is refused as a probable retried call; `0` turns the protection off ([duplicate sends](#duplicate-sends-and-retried-calls)). |
+| `scheduler.sent_retention_days` | `30` | Days of sent scheduled-email history kept in `scheduled/sent/`; `0` keeps everything ([scheduled sending](#scheduled-sending)). |
 | `watcher.enabled` | `false` | IMAP IDLE watcher. |
 | `watcher.folders` | `["INBOX"]` | Folders watched in each account. |
 | `watcher.idle_timeout` | `1740` | IDLE renewal, in seconds (60–1740). |
@@ -389,7 +394,7 @@ server builds one account from the environment and **does not read
 |----------|--------|
 | `MCP_EMAIL_ACCOUNTS` | Comma-separated account names this instance exposes ([below](#several-connectors-on-one-configuration)). |
 | `MCP_EMAIL_READ_ONLY` | `true` makes the instance read-only. It can only tighten: it never lifts a `read_only = true` set in the file. |
-| `EMAIL_MCP_DATABASE_URL` | Postgres URL for `cross_account_move`; wins over `[database].url`. |
+| `EMAIL_MCP_DATABASE_URL` | Postgres URL for `cross_account_move` (and the optional `cross_account_copy` log); wins over `[database].url`. |
 | `MAIL_ALLOWED_SAVE_DIRS` | Extra directories (`;`-separated) where files may be written ([details](#where-files-may-be-written)). |
 | `MAIL_ALLOW_ANY_SAVE_DIR` | `true` disables the save-directory allow-list. |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | Move the directories listed [above](#where-the-configuration-lives). |
@@ -495,6 +500,7 @@ Any other MCP client works the same way: a stdio server whose command is
 | `config edit` | Edit global settings (rate limit, read-only). |
 | `config path` | Print the configuration file path. |
 | `config init` | Write a commented template. |
+| `config validate` | Check `config.toml` without connecting: TOML syntax (line/column), schema errors (field path, account), unknown keys with a did-you-mean suggestion, and consistency (duplicate account names, `backend = "graph"` without `oauth2`, `tls` and `starttls` both on, a port that contradicts `tls`, `signature_default` without `signature_path`, `MCP_EMAIL_ACCOUNTS` naming an absent account…). Never prints a secret value. Exit code 1 on errors, 0 otherwise (warnings allowed). `config check` is an alias. |
 | `scheduler check` | Send the scheduled emails that are due. |
 | `scheduler list` | Show pending, sent and failed scheduled emails. |
 | `scheduler install` / `uninstall` / `status` | Manage the OS-level periodic check. |
@@ -507,7 +513,7 @@ built server the way a client does), `db:migrate`.
 
 ## Tools reference
 
-**64 tools.** *Backend* says which accounts a tool serves: **both** (IMAP and
+**67 tools.** *Backend* says which accounts a tool serves: **both** (IMAP and
 Graph), **IMAP** only (a Graph account gets an explicit "not supported yet"
 error), **Graph** only (the tool refuses an IMAP account), or **local** (no
 mailbox involved). *Read-only* says whether the tool is still registered when the
@@ -519,16 +525,45 @@ server is [read-only](#read-only-mode).
 |------|--------------|---------|-----------|
 | `list_accounts` | Configured accounts — call it first to learn the names. | local | ✅ |
 | `list_mailboxes` | Folders with unread counts and special-use flags. | both | ✅ |
-| `list_emails` | Paginated listing with filters. | both | ✅ |
-| `get_email` | One message (`format`: `full`, `text`, `stripped`; `maxLength`); does not mark it read unless `markRead`. | both | ✅ |
-| `get_emails` | Up to 20 messages in one call (text by default). | both | ✅ |
+| `list_emails` | Paginated listing with filters, newest-received first; optional body `preview`. | both | ✅ |
+| `get_email` | One message (`format`: `text` by default, `stripped`, `full`, `html`; `maxLength`, `offset`) ([details](#reading-message-bodies)); does not mark it read unless `markRead`. | both | ✅ |
+| `get_emails` | Up to 20 messages in one call (text by default, 5 000 characters per body). | both | ✅ |
 | `get_email_status` | Read / flag / label state without the body. | both | ✅ |
-| `get_thread` | Conversation rebuilt from `References` / `In-Reply-To`. | both | ✅ |
+| `get_thread` | Conversation rebuilt from `References` / `In-Reply-To` (text by default, 5 000 characters per body). | both | ✅ |
 | `get_email_headers` | Complete Internet headers and their analysis ([details](#internet-headers)). | both | ✅ |
 | `find_email_folder` | Real folder(s) of a message seen in a virtual folder (Gmail "All Mail"). | IMAP | ✅ |
 | `extract_contacts` | Frequent correspondents from recent headers. | IMAP | ✅ |
 | `get_email_stats` | Volume, top senders, daily trend over a day / week / month. | IMAP | ✅ |
 | `check_health` | Running build, connection, latency, quota and capabilities per account. | both | ✅ |
+
+### Reading message bodies
+
+`get_email`, `get_emails` and `get_thread` share one `format` parameter:
+
+| `format` | Returns |
+|----------|---------|
+| `text` (default) | Readable plain text: the text part, or the HTML part converted — links kept as `label [url]`, tables as aligned columns, every HTML entity decoded. |
+| `stripped` | `text` without quoted replies and signatures. |
+| `full` | The decoded body part as-is (text part, else raw HTML); on extraction failure a visible marker plus the capped raw source. |
+| `html` | The raw HTML part, unmodified (else the text part) — to store the original HTML. |
+
+When a `multipart/alternative` message carries a stub text part ("View this
+email in your browser") or one markedly poorer than its HTML part, the HTML part
+is used instead: the HTML wins when it holds at least 3 times as many words as
+the text part **and** at least 25 more (words counted without URLs).
+
+Bodies are capped by default — 10 000 characters for `get_email`, 5 000 per
+message for `get_emails` and `get_thread`; `format: "html"` is not capped unless
+`maxLength` is given. `maxLength: 0` removes the cap. A cut body ends with a
+`✂️ … truncated` line that says how many characters remain and how to read on:
+`get_email` takes an `offset` to fetch the next part.
+
+List and message views flag likely **mailing-list** (📰 — `List-Id`,
+`List-Unsubscribe`, `Precedence: list`) and **automated** mail (🤖 —
+`Auto-Submitted`, `Precedence: bulk`, `X-Auto-Response-Suppress`). These headers
+are set by the sender, so the flag is a hint, never a guarantee. `get_email`
+shows it on both backends; in listings it is shown for IMAP accounts only, since
+Microsoft Graph does not serve message headers in a listing.
 
 ### Searching
 
@@ -546,8 +581,8 @@ server is [read-only](#read-only-mode).
 | `export_search` | Search results to a CSV or NDJSON file. | both (mixable) | ✅ |
 | `save_email` | One message as an `.eml` file (exact source). | both | ✅ |
 | `save_emails_from_search` | Every message of a search as `.eml` files. | both (one backend per call) | ✅ |
-| `download_attachment` | One attachment, returned base64 (≤ 5 MB). | both | ✅ |
-| `save_attachment` | One attachment written to disk, no size cap. | both | ✅ |
+| `download_attachment` | One attachment by `partId` (or unambiguous filename), returned base64 (≤ 5 MB). | both | ✅ |
+| `save_attachment` | One attachment by `partId` (or unambiguous filename) written to disk, no size cap. | both | ✅ |
 | `save_all_attachments_from_search` | Every attachment of a search to a folder. | IMAP | ✅ |
 
 ### Composing and sending
@@ -555,8 +590,9 @@ server is [read-only](#read-only-mode).
 | Tool | What it does | Backend | Read-only |
 |------|--------------|---------|-----------|
 | `send_email` | New message: text or HTML, cc/bcc, attachments, inline images, signature. | both | — |
-| `reply_email` | Threaded reply (`replyAll`, `includeAttachments`, `appendSignature`). | both | — |
-| `forward_email` | Forward with the original quoted. | both | — |
+| `reply_email` | Threaded reply quoting the original (`replyAll`, `quoteOriginal`, `includeAttachments`, `appendSignature`). | both | — |
+| `reply_draft` | Same threaded reply, saved to Drafts **without sending** — returns the draft id for `send_draft` / `update_draft` ([details](#drafts)). | both | — |
+| `forward_email` | Forward with the original and its attachments (`cc`, `includeAttachments`, `html`, `appendSignature`). | both | — |
 | `save_draft` | Save a draft (attachments, `in_reply_to`, signature). | both | — |
 | `update_draft` | Rewrite a draft, keeping or changing its attachments. | both | — |
 | `send_draft` | Send a draft and remove it from Drafts. | both | — |
@@ -571,6 +607,7 @@ server is [read-only](#read-only-mode).
 | Tool | What it does | Backend | Read-only |
 |------|--------------|---------|-----------|
 | `move_email` | Move to another folder of the same account. | both | — |
+| `copy_email` | Copy to another folder of the same account; the original stays in place. | both | — |
 | `delete_email` | To Trash, or permanently with `permanent: true`. | both | — |
 | `mark_email` | Read / unread / flag / unflag. | both | — |
 | `bulk_action` | Same action on up to 100 messages. | both | — |
@@ -578,7 +615,8 @@ server is [read-only](#read-only-mode).
 | `add_label` / `remove_label` | Label a message / remove the label. | both | — |
 | `create_label` / `delete_label` | Create / delete a label. | both | — |
 | `create_mailbox` / `rename_mailbox` / `delete_mailbox` | Folder management (`delete_mailbox` deletes the content too). | both | — |
-| `cross_account_move` | Move messages to another account, keeping headers, flags and date. Needs Postgres. | IMAP | — |
+| `cross_account_move` | Move messages to another account, keeping headers, flags and date. Postgres log optional. | source: both · destination: IMAP | — |
+| `cross_account_copy` | Copy messages to another account, keeping headers, flags and date; the source is never touched. No database needed. | source: both · destination: IMAP | — |
 | `list_mail_rules` | Server-side inbox rules. | Graph | — |
 | `create_mail_rule` / `delete_mail_rule` | Create / delete a server-side rule. | Graph | — |
 | `get_auto_reply` / `set_auto_reply` | Read / set the automatic reply (out of office). | Graph | — |
@@ -617,7 +655,8 @@ server is [read-only](#read-only-mode).
 | Labels | Gmail labels, ProtonMail label folders, IMAP keywords | Outlook categories |
 | `save_all_attachments_from_search`, `extract_contacts`, `get_email_stats`, `find_email_folder` | ✅ | — |
 | Calendar extraction (`extract_calendar`, `analyze_email_for_scheduling`, `add_to_calendar`) | ✅ | — |
-| `cross_account_move` | ✅ | — |
+| `cross_account_move` | ✅ | as source only — a Graph destination is refused |
+| `cross_account_copy` | ✅ | as source only — a Graph destination is refused |
 | Watcher (IMAP IDLE) and per-account resources (`mailboxes`, `unread`, `stats`) | ✅ | — (they go through IMAP) |
 | Server-side rules, automatic reply | — | ✅ |
 
@@ -661,6 +700,7 @@ to 100, default 20).
 | Parameter | Matches |
 |-----------|---------|
 | `query` | Free text across subject, sender and body (`search_emails` and the multi-account / export tools). |
+| `deep` | `false` makes `query` header-only — subject, sender and recipients, never the body (`search_emails`, `search_all_accounts`; default `true`). |
 | `from`, `to`, `cc`, `bcc`, `subject` | Header, **matched by the mail server** (see below). |
 | `from_contains`, `to_contains`, `subject_contains` | Literal, case-insensitive substring of the decoded header, checked by email-mcp. |
 | `body`, `text` | Body / headers + body. |
@@ -680,6 +720,27 @@ to 100, default 20).
 **Dates** accept ISO 8601, `YYYY-MM-DD`, relative tokens `Nd`, `Nw`, `Nm`
 (days, weeks, months ago) and `today` / `yesterday`, evaluated in UTC — on every
 search tool and both backends.
+
+**Order.** Results come newest-received first, across the whole match set —
+not only within the page. On IMAP this reads the arrival date (INTERNALDATE) of
+every match before serving page 1 (≈ 1.3 MB and 0.2 s of parsing for 20 000
+matches); above 20 000 matches without a client-side filter, the order falls
+back to folder order (UID) and a warning says so. Graph sorts by
+`receivedDateTime` on the server.
+
+**Preview.** `list_emails`, `search_emails` and `search_all_accounts` take `preview: true` to add a
+~200-character body preview per message. On IMAP it reads the first 1.5 KB of
+each message's text part (one extra FETCH per page), so it is off by default;
+Graph serves it at no cost but shows it only on request too, so both backends
+answer the same.
+
+**Numbers as strings.** Numeric parameters (`page`, `pageSize`, `maxLength`,
+`limit`…) also accept a numeric string (`"20"`); an empty string, `null` or a
+boolean is refused rather than read as 0.
+
+`search_emails` refuses a call with no criterion at all (no `query`, no filter):
+it would list the whole folder, which usually means a filter name was mistyped.
+Use `list_emails` to browse a folder.
 
 ```jsonc
 // search_emails
@@ -732,6 +793,19 @@ A search the server rejects or times out is reported as a failure
 (`searchFailed` and a warning), never as zero results. On a very large folder
 without a full-text index, a body search runs on a bounded connection and comes
 with a cost warning.
+
+**90-day fallback (IMAP).** When a search with **no date filter** fails that way
+(`search_failed` or `timeout`), it is retried once, on a bounded isolated
+connection, restricted to the last 90 days. If that window has matches, they are
+returned as **partial results**: `searchStatus.windowed = { applied, sinceDays:
+90, since }`, `totalApprox: true`, and a `PARTIAL RESULTS` warning naming the
+first day covered. To search further back, re-run with an explicit range — for
+example `before: "<since>"` plus a bounded `since` — since a dated search is
+never re-windowed (the same rule keeps `before` continuations intact). If the
+window is empty, or the retry fails too, the **original failure** is returned,
+marked as windowed: an empty 90-day slice says nothing about older mail. No
+retry for a connection error, a UID search or a Gmail `gmail_raw` search. Graph
+accounts do not need it: their search runs on Microsoft's server-side index.
 
 ### On Microsoft Graph accounts
 
@@ -802,7 +876,11 @@ while the data stays on disk, so large exports do not fill the conversation.
   default, 50 000 at most. Default CSV columns: `id`, `account`, `date`, `from`,
   `subject`, `labels`, `attachments`, `has_attachments`, `seen`, `flagged`;
   `columns` picks among `id`, `account`, `date`, `from`, `to`, `subject`, `flags`,
-  `labels`, `attachments`, `preview`, `size`. NDJSON writes the full record. Default
+  `labels`, `attachments`, `preview`, `size` (the `attachments` column lists
+  `name#partId`, e.g. `quote.pdf#2`; on IMAP, `preview` reads the first
+  1.5 KB of each message's text part). NDJSON writes the full record, body
+  preview included on both backends (on IMAP, that same partial read for every
+  exported message). Default
   file: `~/Downloads/email-export-<timestamp>.csv`.
 - **`save_email`** — the exact RFC 822 source, so attachments, formatting, DKIM
   signatures and the Received chain survive, and the file reopens in any mail
@@ -813,12 +891,15 @@ while the data stays on disk, so large exports do not fill the conversation.
   answer gives `matched` (what the search returned) next to `files_saved`: a low
   `matched` points at the query, a gap between the two points at the writes.
 - **`save_attachment`** — streams the file to disk with no size cap (unlike
-  `download_attachment`, base64 and 5 MB). `open: true` opens it afterwards
+  `download_attachment`, base64 and 5 MB). Both take the attachment's `partId`
+  ([details](#addressing-an-attachment-partid)). `open: true` opens it afterwards
   (macOS). An existing file gets a `-1`, `-2` suffix unless `overwrite: true`.
 - **`save_all_attachments_from_search`** — every attachment of the matches,
   optionally narrowed by `attachment_filename` / `attachment_mimetype`, into
   `~/Downloads/email-attachments-<timestamp>/`, with the same `organize_by`
-  values; `max_emails` 1000 by default.
+  values; `max_emails` 1000 by default. Each attachment is fetched by its
+  `partId`, so two attachments with the same name are both saved; inline images
+  (signature logos) are skipped.
 
 ### Where files may be written
 
@@ -846,14 +927,131 @@ not be able to steer a write into a startup folder.
 "attachments": [
   { "path": "C:\\Docs\\quote.pdf" },                                     // local file
   { "content_base64": "JVBERi0…", "filename": "note.pdf" },             // bytes
-  { "source_email_id": "4711", "source_mailbox": "INBOX", "filename": "plan.pdf" } // from a message, server side
+  { "source_email_id": "4711", "source_mailbox": "INBOX", "part_id": "2" } // from a message, server side
 ]
 ```
 
 The third form copies an attachment from an existing message without the bytes
 travelling through the conversation. `reply_email` can re-attach the original's
-files with `includeAttachments: true`. On Graph accounts, attachments over 3 MB
-go through an upload session.
+files with `includeAttachments: true`; `forward_email` carries them by default
+(`includeAttachments: false` forwards the body alone). Both are strict: if one
+attachment cannot be fetched or exceeds 25 MB, nothing is sent and the error
+names it. Every attachment of the original is fetched by its `partId`, so two
+attachments with the same name (the `image001.png` pair of an Outlook signature)
+are both carried, and the second is renamed `image001 (2).png` so the recipient
+can tell them apart (on Graph, `forward_email` lets Exchange copy the originals,
+names unchanged). Inline images of the original stay behind, as before. On
+Graph accounts, attachments over 3 MB go through an upload session.
+
+### Addressing an attachment (`partId`)
+
+`get_email` lists each attachment with a stable `partId` — the MIME part number
+on IMAP (`2`, `1.2`), the attachment id on Graph:
+
+```text
+📎 Attachments: image001.png (image/png, 4.1KB, partId 2), image001.png (image/png, 6.0KB, partId 3),
+   logo.png (image/png, 2.3KB, partId 1.2, inline cid:logo.png@01D9)
+```
+
+- `download_attachment` and `save_attachment` take `partId` (preferred) or
+  `filename`; the `source_email_id` attachment form takes `part_id` or
+  `filename`. A filename carried by several attachments is **refused**, with
+  the name, type, size and `partId` of each candidate — never "the first one".
+- Inline images referenced by the HTML body (`cid:`, typically signature logos)
+  are listed, marked `inline` with their cid, so they can be downloaded. They
+  still do not count as attachments: `has_attachment`, `attachment_filename`,
+  `attachment_mimetype`, the 📎 marker, list views, exports and bulk saves see
+  exactly the attachments they saw before.
+
+### Size limit
+
+Each attachment is capped at 25 MB, and the whole message — attachments
+base64-encoded, which adds about 37 % — must fit the size limit:
+
+- **SMTP**: no local limit by default. The server announces its own (the `SIZE`
+  extension) and the message is refused before its content is transmitted if it
+  exceeds it; the error says the message is too large and that nothing was sent.
+  Set `max_message_mb` to check the size locally, with the size of each
+  attachment in the error.
+- **Graph**: 35 MB (Exchange Online's default send limit, which Graph does not
+  announce), or `max_message_mb` when set. A larger message is refused before
+  anything is sent, with the size of each attachment.
+
+### Replies, forwards and what happens after sending
+
+- Recipients of `reply_email` and `reply_draft` follow mail clients
+  (RFC 5322 §3.6.2): the reply goes to **all the `Reply-To` addresses** when the
+  original carries that header (a mailing list, a `noreply@` sender pointing to
+  a support address), otherwise to `From`. With `replyAll`, the original To and
+  Cc are added (To stays To, Cc stays Cc), minus the account's own address,
+  duplicates merged regardless of case. Graph `/reply`, `/replyAll`,
+  `createReply` and `createReplyAll` apply the same rule server-side, so both
+  backends address a reply the same way. `get_email` shows a `Reply-To:` line
+  when the header is present.
+- `reply_email` quotes the original below the reply by default (an attribution
+  line and `>`-prefixed lines; in an HTML reply, a `<blockquote type="cite">`
+  holding the original as escaped text, never its raw HTML). `quoteOriginal:
+  false` sends the bare body; on Graph this goes through a reply draft whose body
+  is replaced.
+- Language (`reply_language`, `[settings]` or per account, French by default):
+  `"fr"` gives `Le 15 nov. 2026 à 14:32, Jean Dupont <jean@x.fr> a écrit :` and a
+  `---------- Message transféré ----------` header with `De :`, `Date :`,
+  `Objet :`, `À :`, `Cc :`; `"en"` gives `On Nov 15, 2026, 2:32 PM, … wrote:` and
+  `---------- Forwarded message ----------` with `From:`, `Date:`, `Subject:`,
+  `To:`, `Cc:`. The date is shown in the server's local time zone. This applies
+  to messages composed locally (IMAP/SMTP accounts). On Graph accounts, the
+  native `/reply` and `/forward` let Exchange write its own quote header, in the
+  mailbox's language: email-mcp does not control it.
+- `forward_email` includes the original as readable text (an HTML original is
+  converted, not pasted as markup); `html: true` adds an HTML part carrying the
+  original HTML. On Graph the server builds the forward and the original keeps
+  its own format. Cc recipients are honoured on both backends.
+- Subjects do not stack prefixes: `RE:`, `AW:`, `SV:`, `Antw:`, `Rif:`,
+  `Re[2]:`… are recognised (case-insensitive), as are `FW:`, `TR:`, `WG:`,
+  `Enc:`… for forwards.
+- HTML messages carry a generated plain-text alternative.
+- After an SMTP send, the result reports the copy to the Sent folder: filed,
+  skipped on purpose (setting off, Gmail) or **failed** — the message was sent
+  anyway, do not resend it.
+- A scheduled reply (`schedule_email` with `in_reply_to`) keeps its thread: SMTP
+  sets `In-Reply-To` and `References`; Graph, which cannot set those headers,
+  sends it as a reply to the original message, or warns when it cannot find it.
+  `save_draft` with `in_reply_to` works the same way: on Graph the draft is
+  created as a reply to the original (so it stays in the thread), or saved as a
+  plain draft with a warning when the original is not found.
+- On Graph, when `/send` fails without a clear answer (network cut, 5xx, 429),
+  the message may have gone out: the draft is kept and the error says to check
+  Sent Items before sending again (a scheduled send is then marked failed, not
+  retried). A clear refusal (4xx) deletes the draft — Graph moves it to Deleted
+  Items.
+
+### Duplicate sends and retried calls
+
+An MCP client that retries a call — a timeout, a reconnection, Claude Desktop
+restarting the server — looks exactly like a new request, and the recipient
+would get the message twice. `send_email`, `reply_email`, `forward_email`,
+`send_draft`, `apply_template` (`send`) and `schedule_email` are therefore
+guarded, the same way on IMAP/SMTP and Graph accounts:
+
+- **Automatic** (Claude Desktop sends no key): a fingerprint (SHA-256) of the
+  account, the recipients (sorted, lower-cased), subject, body and attachment
+  bytes — plus the original message for a reply or forward, the draft id for
+  `send_draft` — is kept after each send. The same fingerprint within
+  `duplicate_send_window_minutes` (10 by default) is refused: *identical to an
+  email already sent at 14:32, Message-ID …; pass `allow_duplicate: true` if
+  this is intended*.
+- **`idempotency_key`** (optional): a retry with the same key within the window
+  returns the result of the first send without sending again; the same key for a
+  different message is refused.
+- A fingerprint is recorded only **after** a successful send — or after a Graph
+  send whose outcome is uncertain, so that a blind resend is blocked too. A clean
+  failure records nothing and never blocks the retry.
+- Scheduled sends are not affected: creating a schedule is guarded on its own,
+  and the scheduler sends through its own lock.
+- State lives in `~/.local/state/email-mcp/send-guard.json` (survives restarts,
+  shared by every instance), written atomically, entries purged after 24 h. It
+  holds fingerprints and message ids only — never recipients, subjects or bodies.
+  `duplicate_send_window_minutes = 0` turns the whole protection off.
 
 ### Inline images (`cid`)
 
@@ -891,14 +1089,28 @@ ignored with a warning.
 
 ### Drafts
 
-- `save_draft` saves to the Drafts folder; `send_draft` sends it and removes it,
-  keeping its attachments.
+- `save_draft` saves to the Drafts folder, Bcc recipients included (they ride
+  in the SMTP envelope at send time and never reach the delivered message);
+  `send_draft` sends it and removes it, keeping its attachments. Once the message
+  is sent, `send_draft` never reports a failure: if the copy to the Sent folder
+  failed, the draft is **kept** (it is the only local copy left); if deleting the
+  draft failed, the result says so. In both cases the message went out — do not
+  resend it.
 - `update_draft` rewrites a draft. Omitted fields (subject, body, recipients)
   keep their value; `attachments_keep` (all by default, `[]` drops them),
   `attachments_add` and `attachments_remove` handle files. On IMAP, which has no
   in-place edit, the new copy is appended first and the old one deleted only
   afterwards; the tool returns the **new** id. Inline images referenced by the
   body are kept; a `cid:` with no matching image produces a warning.
+- `reply_draft` builds a reply exactly as `reply_email` does — `Re:` subject,
+  recipients (`Reply-To`, else the sender; `replyAll` adds the original To/Cc minus yourself),
+  `In-Reply-To` / `References`, the quoted original (`quoteOriginal`, in the
+  `reply_language` of the account), the signature, the original attachments with
+  `includeAttachments`, extra `attachments` and `bcc` — and saves it to Drafts
+  instead of sending it. It returns the draft id: review it in your mail client,
+  then `send_draft` or `update_draft`. On a Graph account the draft comes from
+  Exchange's own `createReply` / `createReplyAll`, which threads the reply and
+  writes the quote header in the mailbox language.
 
 ### Templates
 
@@ -1025,7 +1237,18 @@ webhook_events = ["urgent", "high"]
 
 When new mail is processed, the server pushes `notifications/resources/updated`
 for the account's `unread` and `mailboxes` resources to subscribed clients. The
-watcher works over IMAP only.
+watcher works over IMAP only: Graph-backed accounts are skipped (logged at
+start-up) — there is no IDLE session on Microsoft Graph.
+
+**Resuming after a stop.** The last UID reported per account and folder is
+saved, with the folder's UIDVALIDITY, in
+`$XDG_STATE_HOME/email-mcp/watcher/` (one small JSON file per account/folder,
+written atomically). On the next connection — restart or reconnect — mail that
+arrived meanwhile is reported, capped to the **50 most recent** messages (a log
+line says how many older ones were skipped). If the UIDVALIDITY changed (the
+server renumbered the folder), the saved position is meaningless: the watcher
+restarts from the current end of the folder and logs it. The first time a
+folder is watched, existing mail is not replayed.
 
 ## Scheduled sending
 
@@ -1061,6 +1284,13 @@ out"); check the Sent folder before scheduling it again. An instance only sends
 the emails of the accounts it serves. `cancel_scheduled` removes the entry and its
 draft.
 
+History: once sent, an entry moves to `scheduled/sent/`. Entries older than
+`[settings.scheduler] sent_retention_days` (**30** days by default; `0` keeps
+everything) are deleted by the running server (every 6 hours) and by
+`scheduler check`. Only entries whose own status is `sent` are ever deleted —
+pending, failed or unreadable ones stay — and nothing is deleted in read-only
+mode.
+
 ## Mailbox management
 
 ### Labels
@@ -1083,12 +1313,32 @@ content.
 
 ### Cross-account move
 
-`cross_account_move` moves messages between two configured IMAP accounts: it
+`cross_account_move` moves messages between two configured accounts: it
 fetches the raw message, appends it to the destination with its flags and
 original date (it looks natively delivered), records the move, then moves the
 source copy to the source account's Trash. A message already present at the
-destination is skipped. The move log lives in **PostgreSQL**; without a database,
-this tool refuses and every other tool works normally.
+destination (same `Message-ID`) is not appended twice. The move log lives in
+**PostgreSQL** and is optional. With `[database]` set, every move is logged and
+a move that cannot be logged does not happen (its destination copy is removed
+again, the source is untouched). Without a database, moves still run, unlogged
+(warning `audit_log_skipped`): the `Message-ID` check still prevents
+duplicates; only two *simultaneous* moves of the same message are no longer
+guarded.
+
+- **IMAP source**: `UID MOVE` into the `\Trash` folder (SPECIAL-USE), only if
+  the server advertises `MOVE` and the folder's UIDVALIDITY has not changed —
+  otherwise the source is left in place (never an `EXPUNGE`).
+- **Graph source** (Exchange / Outlook.com): `email_id` is the opaque Graph id;
+  the raw message is read through `GET /messages/{id}/$value` (read and flagged
+  become `\Seen` / `\Flagged`), and once the append is confirmed the source is
+  moved to **Deleted Items** (`POST /messages/{id}/move`), never permanently
+  deleted. `sourceMailbox` is informative there: a Graph id is mailbox-wide.
+  The log stores `source_uid = 0` for such a move; the `Message-ID` identifies it.
+- **Graph destination**: refused (`dest_backend_unsupported`) before the source
+  is read, for the same reason as `cross_account_copy` below.
+- When the source cannot be removed (no Trash, no `MOVE`, Graph error…), the
+  result says so — `source_cleanup_error` and a `source_not_removed` warning:
+  the message is at the destination and the source is still there.
 
 ```toml
 [database]
@@ -1105,6 +1355,25 @@ Migrations are forward-only and recorded in `schema_migrations`. Use a dedicated
 role that can only reach the `email_mcp` database; on PostgreSQL 15+ also run
 `ALTER SCHEMA public OWNER TO email_mcp;` in that database, or the first migration
 fails with "permission denied for schema public".
+
+### Copies
+
+`copy_email` copies a message into another folder of the **same** account and
+leaves the original where it is: a server-side IMAP `COPY` (the new UID is
+reported when the server supports UIDPLUS), or `POST /messages/{id}/copy` on a
+Graph account. Not idempotent — a second call makes a second copy.
+
+`cross_account_copy` puts a copy into **another** account, the first three steps
+of `cross_account_move` and nothing more: it reads the raw message, skips it if
+its `Message-ID` is already at the destination, and appends it with its flags and
+original date. The source is never written to — opened read-only, no Trash, no
+`\Deleted`, no `$Routed` keyword. The source may be an IMAP or a Graph account
+(read through `GET /messages/{id}/$value`); the destination must be IMAP. A Graph
+destination is refused: Graph only imports a raw message as a **draft** (received
+date = import time), which would not look delivered. No database is required:
+when `[database]` is set, each copy is logged in `email_move_log` with
+`operation = 'copy'` (migration `002`); otherwise the copy succeeds with an
+`audit_log_skipped` warning.
 
 ### Exchange rules and automatic reply
 
@@ -1127,7 +1396,8 @@ instance:
 - the 29 write tools are **not registered** — the model cannot even see them
   (sending, drafts, moves, deletions, flags, labels, folders, templates,
   scheduling, rules, automatic reply, `configure_alerts`);
-- the scheduled queue is not processed (the server logs `Scheduler disabled`);
+- the scheduled queue is not processed (the server logs `Scheduler disabled` on
+  stderr, which the MCP client keeps in its server log);
 - tools that write only locally remain: the `save_*` / `export_*` tools (files),
   `add_to_calendar` and `create_reminder` (local calendar), `test_notification`.
 
@@ -1146,6 +1416,8 @@ setting.
   before acting; `delete_email` goes to Trash unless `permanent: true`; calendar
   and reminder writes on macOS show a native confirmation dialog.
 - **Rate limit** — `rate_limit` messages per minute and per account on SMTP sends.
+- **Duplicate sends** — an identical message sent again within
+  `duplicate_send_window_minutes` is refused ([details](#duplicate-sends-and-retried-calls)).
 - **Disk writes** — the [allow-list](#where-files-may-be-written) above.
 - **Audit log** — write operations are appended to
   `~/.local/share/email-mcp/audit.log`, sensitive fields redacted.
@@ -1189,7 +1461,7 @@ src/
 │   ├── watcher, hooks, notifier, presets     IDLE watcher, triage, alerts
 │   └── scheduler, calendar, reminders, templates, signature-loader, …
 ├── routing/           cross-account move and its Postgres log
-├── tools/ prompts/ resources/   MCP surface (64 tools, 7 prompts, 6 resources)
+├── tools/ prompts/ resources/   MCP surface (67 tools, 7 prompts, 6 resources)
 ├── safety/            validation, rate limiter, audit log
 └── utils/             dates, headers, body formatting, build info
 ```

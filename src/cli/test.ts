@@ -71,6 +71,8 @@ async function testImapAccount(
     );
   } else {
     spinner.stop(`IMAP  ✗ ${account.imap.host}:${account.imap.port} — ${imapResult.error}`);
+    // Identifiants refusés : dire quoi faire (mot de passe d'application…).
+    if (imapResult.hint) log.warn(imapResult.hint);
     ok = false;
   }
 
@@ -81,13 +83,21 @@ async function testImapAccount(
     spinner.stop(`SMTP  ✓ ${account.smtp.host}:${account.smtp.port} — authenticated`);
   } else {
     spinner.stop(`SMTP  ✗ ${account.smtp.host}:${account.smtp.port} — ${smtpResult.error}`);
+    if (smtpResult.hint) log.warn(smtpResult.hint);
     ok = false;
   }
 
   return ok;
 }
 
-async function testAccount(account: AccountConfig, oauthService: OAuthService): Promise<boolean> {
+/**
+ * Teste un compte par son transport réel. Exportée pour `account add/edit`, qui
+ * doit tester un compte Graph ou OAuth2 comme le serveur s'y connecte.
+ */
+export async function testAccount(
+  account: AccountConfig,
+  oauthService: OAuthService,
+): Promise<boolean> {
   const transport = account.backend === 'graph' ? 'Graph' : 'IMAP/SMTP';
   const auth = account.oauth2 ? 'OAuth2' : 'password';
   log.step(`Testing account: ${account.name} (${account.email}) — ${transport}, ${auth}`);

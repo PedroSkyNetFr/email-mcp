@@ -24,6 +24,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AccountConfig } from '../types/index.js';
+import { textToHtml } from '../utils/html-text.js';
 import type { ResolvedAttachment } from './attachment-resolver.js';
 
 export interface LoadedSignature {
@@ -238,8 +239,14 @@ export async function applyAccountSignature(
     return { body: message.body, html: message.html ?? false, attachments };
   }
   const signature = await loadAccountSignature(account);
+  // Un corps TEXTE passe en HTML avec la signature : il doit être échappé et
+  // ses sauts de ligne convertis, sinon ses `<` deviennent des balises et ses
+  // paragraphes se fondent en une seule ligne. Seul un `html: false` EXPLICITE
+  // vaut « texte » : un `html` absent garde l'ancien comportement (corps repris
+  // tel quel), sur lequel comptent des appelants qui passent déjà du HTML.
+  const bodyHtml = message.html === false ? textToHtml(message.body) : message.body;
   return {
-    body: `${message.body}<br>${signature.html}`,
+    body: `${bodyHtml}<br>${signature.html}`,
     html: true, // An HTML signature forces HTML mode.
     attachments: [...attachments, ...signature.attachments],
   };

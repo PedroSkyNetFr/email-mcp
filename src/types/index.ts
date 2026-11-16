@@ -3,6 +3,7 @@
  */
 
 import type { HeaderAnalysis, HeaderEntry } from '../utils/headers.js';
+import type { MailClassification } from '../utils/mail-classification.js';
 
 // ---------------------------------------------------------------------------
 // Address
@@ -48,6 +49,12 @@ export interface SmtpConfig {
 // Authentication
 // ---------------------------------------------------------------------------
 
+/**
+ * Langue de la ligne qui introduit une citation (« Le …, X a écrit : ») et de
+ * l'en-tête d'un transfert. Défaut : français.
+ */
+export type ReplyLanguage = 'fr' | 'en';
+
 export interface OAuth2Config {
   provider: 'google' | 'microsoft' | 'custom';
   clientId: string;
@@ -79,6 +86,19 @@ export interface AccountConfig {
   backend?: 'imap' | 'graph';
   /** Append the signature by default on every composed message (unless overridden per call). */
   signatureDefault?: boolean;
+  /**
+   * Taille maximale d'un message sortant, encodé (Mo). Défaut : aucune limite
+   * locale en SMTP (le serveur décide, extension SIZE), 35 sur Graph (limite
+   * d'envoi par défaut d'Exchange Online). Voir send-limit.ts.
+   */
+  maxMessageMb?: number;
+  /**
+   * Langue des citations et en-têtes de transfert composés localement (IMAP /
+   * SMTP) : `reply_language` du compte, sinon celle de `[settings]`, sinon
+   * « fr ». Sans effet sur Graph `/reply` et `/forward`, dont Exchange écrit
+   * lui-même l'en-tête dans la langue de la boîte.
+   */
+  replyLanguage?: ReplyLanguage;
 }
 
 export interface WatcherConfig {
@@ -154,6 +174,15 @@ export interface AppConfig {
     readOnly: boolean;
     watcher: WatcherConfig;
     hooks: HooksConfig;
+    /** Langue par défaut des citations et en-têtes de transfert (défaut « fr »). */
+    replyLanguage?: ReplyLanguage;
+    /** Jours d'historique d'envois programmés conservés (défaut 30 ; 0 = tout garder). */
+    sentRetentionDays?: number;
+    /**
+     * Fenêtre anti-doublon des envois, en minutes (défaut 10 ; 0 = désactivée) :
+     * un envoi identique dans la fenêtre est refusé (voir services/send-guard.ts).
+     */
+    duplicateSendWindowMinutes?: number;
   };
   accounts: AccountConfig[];
   /** Saved-search presets from `[[searches]]` in config.toml. Empty when none. */
@@ -226,6 +255,19 @@ export interface Mailbox {
   unseenMessages: number;
 }
 
+/** Compteurs bon marché d'un dossier, pour la ressource `email://{compte}/stats`. */
+export interface MailboxSnapshot {
+  /** Messages dans le dossier. */
+  total: number;
+  /** Messages non lus. */
+  unread: number;
+  /**
+   * Messages reçus depuis minuit (heure locale). Absent quand le serveur ne
+   * fournit pas le compte (Graph sans `@odata.count`) : inconnu, pas zéro.
+   */
+  receivedToday?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Email
 // ---------------------------------------------------------------------------
@@ -241,7 +283,19 @@ export interface EmailMeta {
   answered: boolean;
   hasAttachments: boolean;
   labels: string[];
+  /**
+   * Début du corps en texte (≈ 200 caractères). Sur IMAP, rempli seulement
+   * quand l'appelant le demande (`preview: true`, une lecture partielle de la
+   * partie texte par message) ; sur Graph, `bodyPreview` est servi d'office.
+   */
   preview?: string;
+  /**
+   * Indice « liste de diffusion / message automatique » tiré d'en-têtes posés
+   * par l'expéditeur (List-Id, Precedence, Auto-Submitted…) — jamais une
+   * garantie. Rempli par les listes IMAP et par la lecture d'un message sur
+   * les deux backends ; absent des listes Graph (en-têtes non servis en liste).
+   */
+  classification?: MailClassification;
   /**
    * Attachment metadata, populated when bodyStructure is fetched. Undefined
    * means "unknown" (e.g. envelope-only fetches); an empty array means the
@@ -259,12 +313,34 @@ export interface EmailMeta {
 export interface AttachmentMeta {
   filename: string;
   mimeType: string;
+  /** IMAP : taille déclarée par BODYSTRUCTURE, donc ENCODÉE (~1,37× en base64). */
   size: number;
+  /**
+   * Identifiant stable de la pièce, seul désignateur sans ambiguïté (deux
+   * `image001.png` dans une signature Outlook) : numéro de partie MIME sur IMAP
+   * (« 2 », « 1.2 »), identifiant de pièce jointe sur Graph.
+   */
+  partId?: string;
+  /** Content-ID sans chevrons : ce que vise un `<img src="cid:…">` du corps. */
+  contentId?: string;
+  /**
+   * Image inline à Content-ID (logo de signature, image du corps HTML).
+   * Listée pour être téléchargeable, mais pas comptée comme pièce jointe
+   * « réelle » (hasAttachments, filtres de recherche, transfert).
+   */
+  inline?: boolean;
 }
 
 export interface Email extends EmailMeta {
   cc?: EmailAddress[];
   bcc?: EmailAddress[];
+  /**
+   * Adresses de l'en-tête Reply-To (RFC 5322 §3.6.2), seulement quand
+   * l'expéditeur l'a posé : une réponse leur est adressée à la place de From.
+   * Absent (ou vide) : on répond à From. IMAP : lu par mailparser ; Graph :
+   * propriété `replyTo` du message.
+   */
+  replyTo?: EmailAddress[];
   bodyText?: string;
   bodyHtml?: string;
   /**
@@ -291,9 +367,52 @@ export interface Email extends EmailMeta {
 // Results
 // ---------------------------------------------------------------------------
 
+/**
+ * Sort de la copie d'un message envoyé dans le dossier Envoyés (IMAP APPEND).
+ *
+ * Un échec ne fait jamais échouer l'envoi — le message est déjà parti, et
+ * annoncer un échec pousserait à le renvoyer en double. Il est donc rapporté,
+ * pas levé. `skipped` : copie volontairement omise (save_to_sent désactivé, ou
+ * Gmail qui la classe lui-même).
+ */
+export type SentCopyResult =
+  | { kind: 'filed' }
+  | { kind: 'skipped'; reason: string }
+  | { kind: 'failed'; error: string };
+
+/**
+ * Sort du brouillon après send_draft. `kept` : volontairement conservé (la
+ * copie dans Envoyés a échoué : le supprimer ferait disparaître la seule trace
+ * du message). `failed` : la suppression a échoué APRÈS un envoi réussi.
+ */
+export type DraftCleanupResult =
+  | { kind: 'removed' }
+  | { kind: 'kept'; reason: string }
+  | { kind: 'failed'; error: string };
+
 export interface SendResult {
   messageId: string;
   status: 'sent' | 'failed';
+  /** Copie dans Envoyés (IMAP uniquement ; Graph classe la copie lui-même). */
+  sentCopy?: SentCopyResult;
+  /** send_draft uniquement : ce qu'il est advenu du brouillon. */
+  draftCleanup?: DraftCleanupResult;
+  /** Écarts non bloquants à signaler à l'appelant (jamais un échec masqué). */
+  warnings?: string[];
+}
+
+/**
+ * Résultat de `reply_draft`, sur les deux backends. L'objet et les
+ * destinataires sont rendus pour que l'appelant vérifie le brouillon sans
+ * devoir le relire (le destinataire dépend du Reply-To et de replyAll).
+ */
+export interface ReplyDraftResult {
+  id: number | string;
+  mailbox: string;
+  subject?: string;
+  to?: string[];
+  cc?: string[];
+  warnings: string[];
 }
 
 /**
@@ -325,10 +444,14 @@ export interface SearchStatus {
   /** Human-readable explanation of what failed (never implies "zero matches"). */
   message: string;
   /**
-   * Set by the R6 windowed fallback (PR-3) when a narrowed retry was applied.
-   * Reserved here so the contract is stable across the PR sequence.
+   * Posé par le repli fenêtré (wgs4 0c2c2b4, R6) quand une relance restreinte
+   * aux `sinceDays` derniers jours a été tentée après l'échec d'une recherche
+   * IMAP sans date. Présent AVEC `searchFailed` si la relance n'a rien donné,
+   * SANS `searchFailed` (résultats partiels, `totalApprox`) si elle a trouvé.
+   * `since` : premier jour couvert (AAAA-MM-JJ) — l'appelant élargit avec un
+   * `before` antérieur ou égal. Jamais posé par le backend Graph.
    */
-  windowed?: { applied: true; sinceDays: number };
+  windowed?: { applied: true; sinceDays: number; since?: string };
   /** Actionable next step for the caller (narrow the query, retry, etc.). */
   suggestion: string;
 }
@@ -390,7 +513,11 @@ export interface PaginatedResult<T> {
    * authoritative. Always accompanied by `searchStatus` + `warning`.
    */
   searchFailed?: true;
-  /** Structured failure detail when `searchFailed` is set. */
+  /**
+   * Structured failure detail when `searchFailed` is set. Also present WITHOUT
+   * `searchFailed` when the windowed fallback served partial results
+   * (`searchStatus.windowed`): then it describes the original failure.
+   */
   searchStatus?: SearchStatus;
   /**
    * Message count of the opened mailbox (R8). Free under the search lock —

@@ -1,5 +1,44 @@
 /** Input validation and sanitization utilities. */
 
+import { BlockList, isIP } from 'node:net';
+
+import { nat64EmbeddedIpv4, normalizeHost } from '../utils/host.js';
+
+/**
+ * Plages vers lesquelles un webhook ne doit jamais partir (SSRF).
+ *
+ * Une liste écrite à la main (regex, comparaison d'octets) est exactement le
+ * genre de contrôle qui dérive en silence : l'ancienne oubliait 169.254.0.0/16
+ * — dont 169.254.169.254, l'adresse de métadonnées des clouds qui distribue
+ * des identifiants à tout processus qui la joint —, la plage CGNAT, tout
+ * 0.0.0.0/8 (seul « 0.0.0.0 » littéral était refusé), « :: » et les plages
+ * privées IPv6. `net.BlockList` est le comparateur CIDR de Node ; il confronte
+ * aussi une adresse IPv4 encapsulée en IPv6 (`::ffff:a.b.c.d`) aux plages IPv4,
+ * forme que l'analyseur d'URL réécrit d'ailleurs en hexadécimal.
+ */
+const PRIVATE_WEBHOOK_RANGES = new BlockList();
+// 0.0.0.0/8 : « ce réseau » — non routable, même esprit que « :: ».
+PRIVATE_WEBHOOK_RANGES.addSubnet('0.0.0.0', 8, 'ipv4');
+PRIVATE_WEBHOOK_RANGES.addSubnet('10.0.0.0', 8, 'ipv4');
+// 100.64.0.0/10 : espace partagé du NAT des opérateurs (CGNAT).
+PRIVATE_WEBHOOK_RANGES.addSubnet('100.64.0.0', 10, 'ipv4');
+PRIVATE_WEBHOOK_RANGES.addSubnet('127.0.0.0', 8, 'ipv4');
+// 169.254.0.0/16 : lien local, dont le point de métadonnées cloud.
+PRIVATE_WEBHOOK_RANGES.addSubnet('169.254.0.0', 16, 'ipv4');
+PRIVATE_WEBHOOK_RANGES.addSubnet('172.16.0.0', 12, 'ipv4');
+PRIVATE_WEBHOOK_RANGES.addSubnet('192.168.0.0', 16, 'ipv4');
+// 198.18.0.0/15 : bancs d'essai réseau (RFC 2544), souvent routés en interne.
+PRIVATE_WEBHOOK_RANGES.addSubnet('198.18.0.0', 15, 'ipv4');
+// 224.0.0.0/4 : multicast — jamais la destination d'une requête HTTP.
+PRIVATE_WEBHOOK_RANGES.addSubnet('224.0.0.0', 4, 'ipv4');
+// 240.0.0.0/4 : réservé (classe E), dont 255.255.255.255 (diffusion limitée).
+PRIVATE_WEBHOOK_RANGES.addSubnet('240.0.0.0', 4, 'ipv4');
+PRIVATE_WEBHOOK_RANGES.addAddress('255.255.255.255', 'ipv4');
+PRIVATE_WEBHOOK_RANGES.addSubnet('::', 128, 'ipv6'); // adresse non spécifiée
+PRIVATE_WEBHOOK_RANGES.addSubnet('::1', 128, 'ipv6'); // boucle locale
+PRIVATE_WEBHOOK_RANGES.addSubnet('fe80::', 10, 'ipv6'); // lien local
+PRIVATE_WEBHOOK_RANGES.addSubnet('fc00::', 7, 'ipv6'); // adresses uniques locales (fc00::/fd00::)
+
 /**
  * Validate and sanitize an IMAP mailbox name.
  * Rejects names containing IMAP wildcard characters (`*`, `%`) or empty strings.
@@ -49,21 +88,32 @@ export function validateWebhookUrl(url: string): void {
     throw new Error(`Webhook URL must use http or https protocol, got ${parsed.protocol}`);
   }
 
-  const hostname = parsed.hostname.toLowerCase();
-
-  // new URL('https://[::1]') stores hostname as '[::1]'
-  const bare = hostname.replace(/^\[|\]$/g, '');
-  if (bare === 'localhost' || bare === '::1' || bare === '0.0.0.0') {
+  // new URL('https://[::1]') garde les crochets ('[::1]') ; `localhost.` (point
+  // final, nom pleinement qualifié) désigne le même hôte que `localhost` :
+  // normalizeHost retire les deux.
+  const bare = normalizeHost(parsed.hostname);
+  if (bare === 'localhost' || bare.endsWith('.localhost')) {
     throw new Error(`Webhook URL must not point to a loopback or private address: ${bare}`);
   }
 
-  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(bare);
-  if (ipv4Match) {
-    const [, a, b] = ipv4Match.map(Number);
-    if (a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) {
-      throw new Error(`Webhook URL must not point to a loopback or private address: ${bare}`);
-    }
+  // L'analyseur WHATWG a déjà normalisé les écritures exotiques d'une IPv4
+  // (`0x7f.1`, `2130706433` → `127.0.0.1`) : seule la forme canonique arrive ici.
+  const family = isIP(bare);
+  if (family !== 0 && PRIVATE_WEBHOOK_RANGES.check(bare, family === 4 ? 'ipv4' : 'ipv6')) {
+    throw new Error(`Webhook URL must not point to a loopback or private address: ${bare}`);
   }
+  // NAT64 (64:ff9b::/96) : l'IPv4 encapsulée est jointe à travers la
+  // passerelle — `64:ff9b::7f00:1` atteint 127.0.0.1. On évalue donc l'IPv4.
+  const embedded = family === 6 ? nat64EmbeddedIpv4(bare) : undefined;
+  if (embedded && PRIVATE_WEBHOOK_RANGES.check(embedded, 'ipv4')) {
+    throw new Error(
+      `Webhook URL must not point to a loopback or private address: ${bare} (NAT64 for ${embedded})`,
+    );
+  }
+  // Un nom d'hôte (et non une IP littérale) se résout au moment de la requête,
+  // hors de portée de ce contrôle : le contournement par DNS est un angle mort
+  // assumé. `webhook_url` vient de la configuration locale de l'utilisateur,
+  // pas d'une entrée réseau contrôlée par un attaquant.
 }
 
 /**

@@ -6,7 +6,6 @@
 
 import type { ImapFlow, ImapFlowErrorCode } from 'imapflow';
 import { simpleParser } from 'mailparser';
-import MailComposer from 'nodemailer/lib/mail-composer';
 import type { IConnectionManager } from '../connections/types.js';
 import { sanitizeMailboxName } from '../safety/validation.js';
 import type {
@@ -26,6 +25,7 @@ import type {
   FacetResult,
   LabelInfo,
   Mailbox,
+  MailboxSnapshot,
   PaginatedResult,
   QuotaInfo,
   SearchCoverage,
@@ -34,14 +34,33 @@ import type {
 } from '../types/index.js';
 import { nonEmpty, RAW_CAP } from '../utils/body-format.js';
 import {
+  buildPreview,
+  decodeCharset,
+  findPreviewPart,
+  PREVIEW_PART_BYTES,
+} from '../utils/body-preview.js';
+import {
   analyzeHeaders,
   flattenHeaders,
   groupHeaders,
   parseHeaderBlock,
   splitHeaderBlock,
 } from '../utils/headers.js';
+import { htmlToPlainText } from '../utils/html-text.js';
+import { imapCommand } from '../utils/imap-error.js';
+import { CLASSIFICATION_HEADERS, classifyFromHeaders } from '../utils/mail-classification.js';
+import { buildReferences, composeMessage } from '../utils/mime-headers.js';
+import type { ArrivalCacheRef } from './arrival-order-cache.js';
+import { ArrivalOrderCache } from './arrival-order-cache.js';
 import type { AttachmentInput, ResolvedAttachment } from './attachment-resolver.js';
 import { resolveAttachments } from './attachment-resolver.js';
+import type { AttachmentRef } from './attachment-select.js';
+import {
+  realAttachments,
+  selectAttachment,
+  selectorLabel,
+  uniqueAttachmentNames,
+} from './attachment-select.js';
 import {
   assertSafeDestination,
   defaultEmlFilename,
@@ -55,7 +74,14 @@ import type { MailboxRef } from './mailbox-resolver.js';
 import { resolveMailboxForAccount } from './mailbox-resolver.js';
 import { buildCoverage, MAX_SCANNED_MESSAGES, SEARCH_SCAN_BUDGET_MS } from './search-coverage.js';
 import type { BuildResult, SearchParams } from './search-criteria.js';
-import { applyLiteralFilters, buildSearchCriteria, chunkUids } from './search-criteria.js';
+import {
+  applyLiteralFilters,
+  buildSearchCriteria,
+  chunkUids,
+  hasDateNarrowing,
+  RECENCY_WINDOW_DAYS,
+  withRecencyWindow,
+} from './search-criteria.js';
 import {
   connectionErrorStatus,
   SearchFailedError,
@@ -88,8 +114,9 @@ const MAX_FACET_UIDS = 10000;
 /**
  * R5: folders larger than this are "big enough that a non-FTS BODY scan is a
  * resource risk". Chosen at the MAX_SCANNED_MESSAGES cap — below it the result set
- * is fully servable anyway; above it (osTicket ~18k, Archive ~79k) a body
- * scan on a server without a full-text index is the abortable/expensive case.
+ * is fully servable anyway; above it (high-volume folders: tens of thousands of
+ * messages in an archive or a ticketing inbox) a body scan on a server without
+ * a full-text index is the abortable/expensive case.
  */
 const LARGE_FOLDER_THRESHOLD = 5000;
 
@@ -101,6 +128,28 @@ const LARGE_FOLDER_THRESHOLD = 5000;
  * zero). Tunable later from R7 telemetry (PR-3).
  */
 const EPHEMERAL_SEARCH_TIMEOUT_MS = 20_000;
+
+/**
+ * Noms courants d'un dossier des envoyés, candidats en plus de celui marqué
+ * `\Sent` (voir resolveSentFolder). imapflow décode les noms UTF-7 modifié :
+ * « Éléments envoyés » arrive tel quel.
+ */
+const SENT_FOLDER_NAMES = [
+  'Sent',
+  'INBOX.Sent',
+  'Sent Items',
+  'INBOX.Sent Items',
+  'Sent Messages',
+  'INBOX.Sent Messages',
+  'Sent Mail',
+  '[Gmail]/Sent Mail',
+  'Éléments envoyés',
+  'INBOX.Éléments envoyés',
+  'Envoyés',
+  'INBOX.Envoyés',
+  'Messages envoyés',
+  'INBOX.Messages envoyés',
+];
 
 /**
  * Per-account fetch cap for `searchAcrossAccounts`. Each account is queried
@@ -117,6 +166,8 @@ export interface SearchOptions {
   mailbox?: string;
   page?: number;
   pageSize?: number;
+  /** false : requête libre sur sujet / expéditeur / destinataires seulement (voir SearchParams.deep). */
+  deep?: boolean;
   to?: string;
   from?: string;
   subject?: string;
@@ -145,6 +196,8 @@ export interface SearchOptions {
   attachmentMimetype?: string;
   facets?: ('sender' | 'year' | 'mailbox')[];
   gmailRaw?: string;
+  /** Aperçu du corps dans les résultats (lecture partielle de la partie texte). */
+  preview?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,13 +216,46 @@ function parseAddresses(addrs: { name?: string; address?: string }[] | undefined
   return addrs.map(parseAddress);
 }
 
+/** Forme minimale d'un `AddressObject` de mailparser (adresses et groupes). */
+interface ParsedAddressNode {
+  name?: string;
+  address?: string;
+  group?: ParsedAddressNode[];
+}
+
+/**
+ * Aplatit un en-tête d'adresses tel que mailparser le rend (`AddressObject`
+ * ou tableau d'`AddressObject`, groupes RFC 5322 compris) en liste
+ * d'adresses. Les entrées sans adresse (groupe vide, nom seul) sont écartées.
+ */
+export function flattenParsedAddresses(
+  value: { value?: ParsedAddressNode[] } | { value?: ParsedAddressNode[] }[] | undefined,
+): EmailAddress[] {
+  if (!value) return [];
+  const objects = Array.isArray(value) ? value : [value];
+  const out: EmailAddress[] = [];
+  const walk = (nodes: ParsedAddressNode[] | undefined) => {
+    (nodes ?? []).forEach((node) => {
+      if (node.group) walk(node.group);
+      else if (node.address) out.push({ name: nonEmpty(node.name), address: node.address });
+    });
+  };
+  objects.forEach((obj) => {
+    walk(obj.value);
+  });
+  return out;
+}
+
 /**
  * Walk a bodyStructure tree and collect attachment metadata.
  *
  * Rules (all case-insensitive; imapflow emits lowercase type/subtype strings):
  * - A part with `disposition === 'attachment'` is always an attachment.
- * - A part with `disposition === 'inline'` AND a Content-ID (`id` field) is
- *   treated as an embedded inline resource (e.g. HTML image) and skipped.
+ * - A non-text part with `disposition === 'inline'` AND a Content-ID (`id`
+ *   field) is an embedded inline resource (HTML image, signature logo): it is
+ *   LISTED with `inline: true` and its `contentId`, so that it can be
+ *   downloaded by partId, but it does not count as a "real" attachment
+ *   (`hasAttachments`, search filters, forwards — see `realAttachments`).
  * - A non-multipart, non-text/plain part that carries a filename/name
  *   parameter but no disposition is also treated as an attachment (some mailers
  *   omit Content-Disposition for PDFs etc).
@@ -180,14 +266,32 @@ function parseAddresses(addrs: { name?: string; address?: string }[] | undefined
  */
 /**
  * Lenient classification of a SINGLE bodyStructure node. Returns the
- * attachment metadata for a leaf that should be treated as an attachment,
- * or `null` otherwise (multipart container, inline HTML resource, plain
- * body part, non-attachment). This is the single source of truth shared by
- * `extractAttachmentMeta`, `findMimePartByFilename`, and the watcher's
- * has-attachment heuristic. Keeping all detection on one predicate is what
- * prevents the metadata/download divergence that this routine was written
- * to fix — do not reintroduce a second, stricter check elsewhere.
+ * attachment metadata for a leaf that should be listed as an attachment
+ * (inline cid images included, marked `inline`), or `null` otherwise
+ * (multipart container, plain body part, non-attachment). This is the single
+ * source of truth shared by `extractAttachmentMeta`, `findMimePartByFilename`,
+ * and the watcher's has-attachment heuristic. Keeping all detection on one
+ * predicate is what prevents the metadata/download divergence that this
+ * routine was written to fix — do not reintroduce a second, stricter check
+ * elsewhere. Le numéro de partie (`partId`) est ajouté par le parcours de
+ * l'arbre, seul à connaître la position du nœud.
  */
+/**
+ * Taille RÉELLE estimée d'une partie MIME, en octets.
+ *
+ * BODYSTRUCTURE donne la taille de la partie telle que stockée, donc encodée :
+ * en base64, 76 caractères + CRLF par 57 octets, soit ~1,37 fois la taille du
+ * fichier. L'afficher telle quelle annonçait 7,8 Ko pour une image de 5,7 Ko,
+ * et ne correspondait pas à Graph, qui donne la taille réelle. Estimation à
+ * quelques octets près (fin de ligne finale, remplissage `=`). Les autres
+ * encodages (7bit, 8bit, binary, quoted-printable) sont laissés tels quels.
+ */
+export function decodedPartSize(node: Record<string, unknown>): number {
+  const size = typeof node.size === 'number' ? node.size : 0;
+  const encoding = typeof node.encoding === 'string' ? node.encoding.toLowerCase() : '';
+  return encoding === 'base64' ? Math.floor((size * 57) / 78) : size;
+}
+
 export function classifyAttachmentNode(node: unknown): AttachmentMeta | null {
   if (!node || typeof node !== 'object') return null;
   const n = node as Record<string, unknown>;
@@ -200,13 +304,19 @@ export function classifyAttachmentNode(node: unknown): AttachmentMeta | null {
   const dispParams = (n.dispositionParameters ?? {}) as Record<string, string>;
   const typeParams = (n.parameters ?? {}) as Record<string, string>;
   const filename = dispParams.filename ?? dispParams.name ?? typeParams.name ?? undefined;
-  const contentId = typeof n.id === 'string' ? n.id : undefined;
+  const contentId =
+    typeof n.id === 'string' && n.id.trim() !== ''
+      ? n.id.trim().replace(/^</, '').replace(/>$/, '')
+      : undefined;
 
-  // Skip inline resources that have a Content-ID (embedded HTML images).
-  if (disposition === 'inline' && contentId) return null;
+  // Ressource inline à Content-ID (image du corps HTML, logo de signature).
+  // Autrefois ignorée, donc ni visible ni téléchargeable ; désormais listée,
+  // marquée `inline`. Une partie texte inline reste le corps du message.
+  const inlineResource = disposition === 'inline' && !!contentId;
+  if (inlineResource && lowerType.startsWith('text/')) return null;
 
   let isAttachment = false;
-  if (disposition === 'attachment') {
+  if (disposition === 'attachment' || inlineResource) {
     isAttachment = true;
   } else if (filename) {
     // No explicit disposition but a filename is present — treat as attachment
@@ -226,10 +336,17 @@ export function classifyAttachmentNode(node: unknown): AttachmentMeta | null {
     mimeType = sub ? `application/${sub}` : 'application/octet-stream';
   }
 
+  // Une image inline sans nom prend la partie locale de son cid
+  // (« image001.png@01D9… » → « image001.png ») : idée de la PR codefuturist
+  // #97, plus parlante que « unnamed » pour l'enregistrer sur disque.
+  const cidName = inlineResource && contentId ? contentId.split('@')[0] || undefined : undefined;
+
   return {
-    filename: filename ?? 'unnamed',
+    filename: filename ?? cidName ?? 'unnamed',
     mimeType,
-    size: typeof n.size === 'number' ? n.size : 0,
+    size: decodedPartSize(n),
+    ...(contentId ? { contentId } : {}),
+    ...(inlineResource ? { inline: true } : {}),
   };
 }
 
@@ -241,33 +358,55 @@ export function classifyAttachmentNode(node: unknown): AttachmentMeta | null {
  */
 const MAX_MIME_DEPTH = 100;
 
+/**
+ * Numéro de partie IMAP du i-ième enfant d'un nœud, selon la règle de
+ * `findMimePartByFilename` : une enveloppe `message/rfc822` n'ajoute pas de
+ * niveau, son message embarqué hérite du numéro de l'enveloppe.
+ */
+function childPartPath(parentPath: string, parentIsRfc822: boolean, index: number): string {
+  const indexed = parentPath ? `${parentPath}.${index + 1}` : String(index + 1);
+  return parentIsRfc822 ? parentPath || String(index + 1) : indexed;
+}
+
+/**
+ * Pièces jointes d'un BODYSTRUCTURE, chacune avec son `partId` (numéro de
+ * partie MIME, ex. « 2 », « 1.2 ») : le seul désignateur sans ambiguïté quand
+ * deux pièces portent le même nom. `node.part` d'imapflow est préféré ; à
+ * défaut, le numéro est synthétisé. Les images inline à cid y figurent,
+ * marquées `inline` (voir `realAttachments` pour les écarter).
+ */
 export function extractAttachmentMeta(bodyStructure: unknown): AttachmentMeta[] {
   const out: AttachmentMeta[] = [];
 
-  const walk = (node: unknown, depth: number): void => {
+  const walk = (node: unknown, path: string, depth: number): void => {
     if (depth > MAX_MIME_DEPTH || !node || typeof node !== 'object') return;
     const n = node as Record<string, unknown>;
+    const effectivePath = typeof n.part === 'string' ? n.part : path;
 
-    // Recurse first so we cover every branch.
+    // Recurse first so we cover every branch (ordre de sortie inchangé).
     if (Array.isArray(n.childNodes)) {
-      n.childNodes.forEach((child) => {
-        walk(child, depth + 1);
+      const isRfc822 =
+        (typeof n.type === 'string' ? n.type : '').toLowerCase() === 'message/rfc822';
+      n.childNodes.forEach((child, i) => {
+        walk(child, childPartPath(effectivePath, isRfc822, i), depth + 1);
       });
     }
 
     const classified = classifyAttachmentNode(n);
-    if (classified) out.push(classified);
+    // Message à partie unique : la racine n'a pas de numéro, sa section est « 1 ».
+    if (classified) out.push({ ...classified, partId: effectivePath || '1' });
   };
 
-  walk(bodyStructure, 0);
+  walk(bodyStructure, '', 0);
   return out;
 }
 
 export function hasAttachments(bodyStructure: unknown): boolean {
   // Delegate to the richer helper so legacy callers (e.g. getEmailStats,
   // WatcherService) use the same semantics as extractAttachmentMeta /
-  // EmailMeta.hasAttachments.
-  return extractAttachmentMeta(bodyStructure).length > 0;
+  // EmailMeta.hasAttachments. Les images inline à cid, listées mais pas
+  // « réelles », ne comptent pas : le résultat est celui d'avant leur listage.
+  return realAttachments(extractAttachmentMeta(bodyStructure)).length > 0;
 }
 
 /**
@@ -356,8 +495,7 @@ export function findMimePartByFilename(
     for (let i = 0; i < bs.childNodes.length; i++) {
       // A message/rfc822 wrapper does not add a numbering level: its single
       // embedded-message child inherits the wrapper's section number.
-      const indexed = effectivePath ? `${effectivePath}.${i + 1}` : String(i + 1);
-      const childPart = isRfc822 ? effectivePath || String(i + 1) : indexed;
+      const childPart = childPartPath(effectivePath, isRfc822, i);
       const found = findMimePartByFilename(bs.childNodes[i], targetFilename, childPart, depth + 1);
       if (found) return found;
     }
@@ -419,19 +557,14 @@ function messageToEmailMeta(msg: Record<string, unknown>): EmailMeta {
   // Extract non-system flags as labels (IMAP keywords)
   const labels = [...flags].filter((f) => !f.startsWith('\\'));
 
-  // Extract preview from source buffer
-  let preview: string | undefined;
-  if (msg.source && Buffer.isBuffer(msg.source)) {
-    const rawText = msg.source.toString('utf-8');
-    // Try to extract body text after the header blank line
-    const bodyStart = rawText.indexOf('\r\n\r\n');
-    if (bodyStart >= 0) {
-      preview = rawText
-        .slice(bodyStart + 4, bodyStart + 204)
-        .replace(/\s+/g, ' ')
-        .trim();
-    }
-  }
+  // Pas d'aperçu ici : `fillPreviews` le renseigne après coup, à la demande
+  // seulement (`preview: true`). L'ancien aperçu, tiré des 256 premiers octets
+  // de la source, ne voyait que les en-têtes : rien, ou du MIME brut.
+
+  // Indice liste / automatique, quand les champs d'en-tête ont été demandés.
+  const classification = Buffer.isBuffer(msg.headers)
+    ? classifyFromHeaders(flattenHeaders(parseHeaderBlock(msg.headers)))
+    : undefined;
 
   // Only populate attachments when bodyStructure was actually fetched. An
   // undefined value signals "unknown" to downstream callers (e.g. post-filters
@@ -448,9 +581,10 @@ function messageToEmailMeta(msg: Record<string, unknown>): EmailMeta {
     seen: flags.has('\\Seen'),
     flagged: flags.has('\\Flagged'),
     answered: flags.has('\\Answered'),
-    hasAttachments: (attachments?.length ?? 0) > 0,
+    // Les images inline à cid sont listées mais ne comptent pas (voir realAttachments).
+    hasAttachments: realAttachments(attachments ?? []).length > 0,
     labels,
-    preview,
+    ...(classification ? { classification } : {}),
     ...(attachments !== undefined ? { attachments } : {}),
   };
 }
@@ -506,11 +640,13 @@ function applyClientSideFilters(items: EmailMeta[], postFilters: PostFilters): E
   if (postFilters.attachmentFilename) {
     const needle = postFilters.attachmentFilename.toLowerCase();
     out = out.filter((m) =>
-      (m.attachments ?? []).some((a) => a.filename.toLowerCase().includes(needle)),
+      realAttachments(m.attachments ?? []).some((a) => a.filename.toLowerCase().includes(needle)),
     );
   }
   if (mimeRe) {
-    out = out.filter((m) => (m.attachments ?? []).some((a) => mimeRe.test(a.mimeType)));
+    out = out.filter((m) =>
+      realAttachments(m.attachments ?? []).some((a) => mimeRe.test(a.mimeType)),
+    );
   }
   return applyLiteralFilters(out, postFilters);
 }
@@ -584,6 +720,235 @@ async function orderByArrival(client: ImapFlow, uids: number[]): Promise<Candida
     .sort((a, b) => b.arrival - a.arrival || b.uid - a.uid);
 }
 
+/**
+ * Au-delà de ce nombre de candidats, une liste SANS filtre côté client n'est
+ * plus triée par date de réception sur l'ensemble : elle retombe sur l'ordre
+ * des UID (ordre d'arrivée DANS LE DOSSIER), et un avertissement le dit.
+ *
+ * Pourquoi une borne : trier par INTERNALDATE oblige à lire la date de CHAQUE
+ * candidat avant de servir la page 1, là où l'ordre des UID ne coûte rien.
+ * Coût côté client mesuré (analyseur d'imapflow 2.11 sur des réponses
+ * `* n FETCH (UID n INTERNALDATE "…")` synthétiques, Node 24) : ~65 octets et
+ * ~11 µs par message, soit pour 20 000 candidats ≈ 1,3 Mo reçus et ≈ 0,2 s
+ * d'analyse (5 000 : 0,3 Mo / 0,08 s ; 80 000 : 5,2 Mo / 0,8 s). Côté serveur,
+ * INTERNALDATE est une donnée d'index (pas de lecture du message), non
+ * mesurée ici faute de serveur de test. 20 000 couvre une boîte de réception
+ * et la plupart des dossiers ; au-delà (grosses archives), on garde l'ordre
+ * des UID et on le dit. Avec des filtres côté client, le tri par date est de
+ * toute façon fait sur tous les candidats (voir scanClientSide).
+ *
+ * Alternative écartée : la commande SORT (RFC 5256), qui ferait le tri sur le
+ * serveur, n'est pas exposée par imapflow et n'est pas annoncée par Gmail ni
+ * par Exchange — il faudrait l'émettre à la main et garder ce repli de toute
+ * façon.
+ */
+export const ARRIVAL_SORT_MAX = 20_000;
+
+/**
+ * Comment l'ordre des candidats a été obtenu :
+ * - `global` : INTERNALDATE lue pour tous les candidats, ordre exact ;
+ * - `page` : tous les candidats tiennent dans la page 1 — la page les lit tous
+ *   et les trie elle-même sur INTERNALDATE (aucune lecture supplémentaire) ;
+ * - `uid` : repli au-delà de ARRIVAL_SORT_MAX, ordre des UID + avertissement.
+ */
+type OrderMode = 'global' | 'page' | 'uid';
+
+/** Ordre des candidats retenu pour paginer, et comment il a été obtenu. */
+interface PagingOrder {
+  /** Candidats du plus récemment reçu au plus ancien (ou par UID décroissant). */
+  ordered: Candidate[];
+  mode: OrderMode;
+  /** Avertissement à remonter quand le repli par UID a été pris. */
+  warning?: string;
+}
+
+/** Candidats par UID décroissant, sans date connue. */
+function byUidDesc(uids: number[]): Candidate[] {
+  return [...uids].sort((a, b) => b - a).map((uid) => ({ uid, arrival: 0 }));
+}
+
+/**
+ * Ordonne les candidats d'une liste ou d'une recherche AVANT la pagination
+ * (codefuturist #59) : la page 1 doit être les messages reçus le plus
+ * récemment, pas les derniers entrés dans le dossier. Un dossier Archive
+ * rempli par déplacements donne sinon, en page 1, les derniers ARCHIVÉS —
+ * parfois vieux de plusieurs années — et repousse le courrier récent plus
+ * loin. Trier seulement la page lue, comme avant, ne corrige rien : la page
+ * est déjà mal choisie.
+ *
+ * `force` : tri par date obligatoire quelle que soit la taille (filtres côté
+ * client, qui lisent de toute façon chaque candidat). `pageSize` : si tous
+ * les candidats tiennent dans une page, la page elle-même les ordonne — la
+ * lecture préalable des dates serait un aller-retour pour rien.
+ */
+async function orderForPaging(
+  client: ImapFlow,
+  uids: number[],
+  opts: {
+    force: boolean;
+    pageSize: number;
+    /** Cache de l'ordre déjà calculé (voir arrival-order-cache.ts) et sa clé. */
+    cache?: { store: ArrivalOrderCache; ref: ArrivalCacheRef | undefined };
+  },
+): Promise<PagingOrder> {
+  // Lecture des INTERNALDATE, servie par le cache quand le dossier et la
+  // recherche n'ont pas changé depuis la page précédente.
+  const byArrival = async (): Promise<Candidate[]> => {
+    const ref = opts.cache?.ref;
+    const hit = ref ? opts.cache?.store.get(ref, uids) : undefined;
+    if (hit) return hit;
+    const ordered = await orderByArrival(client, uids);
+    if (ref) opts.cache?.store.set(ref, ordered);
+    return ordered;
+  };
+  if (opts.force) {
+    return { ordered: await byArrival(), mode: 'global' };
+  }
+  if (uids.length <= opts.pageSize) {
+    return { ordered: byUidDesc(uids), mode: 'page' };
+  }
+  if (uids.length <= ARRIVAL_SORT_MAX) {
+    return { ordered: await byArrival(), mode: 'global' };
+  }
+  return {
+    ordered: byUidDesc(uids),
+    mode: 'uid',
+    warning:
+      `${uids.length} matches: ordered by folder arrival (UID), not by received date — ` +
+      `exact date order is limited to ${ARRIVAL_SORT_MAX} matches. ` +
+      'Add a date filter (since/before/on) for strict newest-first order.',
+  };
+}
+
+/**
+ * Ordonne les messages d'une page lue selon le mode d'ordre :
+ * - `global` : ordre des UID demandés (déjà triés par date de réception) —
+ *   le FETCH IMAP rend les messages dans l'ordre du dossier, pas dans celui
+ *   de la requête ;
+ * - `page` : INTERNALDATE décroissante lue avec la page, UID en départage ;
+ * - `uid` : date d'en-tête décroissante (comportement historique du repli).
+ */
+function sortPage(
+  items: EmailMeta[],
+  pageUids: number[],
+  arrivals: Map<number, number>,
+  mode: OrderMode,
+): void {
+  if (mode === 'global') {
+    const rank = new Map(pageUids.map((uid, i) => [uid, i]));
+    items.sort((a, b) => (rank.get(Number(a.id)) ?? 0) - (rank.get(Number(b.id)) ?? 0));
+  } else if (mode === 'page') {
+    const at = (m: EmailMeta) => arrivals.get(Number(m.id)) ?? 0;
+    items.sort((a, b) => at(b) - at(a) || Number(b.id) - Number(a.id));
+  } else {
+    items.sort(
+      (a, b) => safeDate(b.date, new Date(0)).getTime() - safeDate(a.date, new Date(0)).getTime(),
+    );
+  }
+}
+
+/** INTERNALDATE d'un message lu, en ms (0 si absente ou illisible). */
+function arrivalOf(raw: Record<string, unknown>): number {
+  const value = raw.internalDate;
+  const time = value instanceof Date ? value.getTime() : Date.parse(String(value));
+  return Number.isNaN(time) ? 0 : time;
+}
+
+/**
+ * Renseigne l'aperçu (`preview`) des messages d'une page, à partir d'une
+ * lecture PARTIELLE (PREVIEW_PART_BYTES octets) de leur partie texte.
+ *
+ * La section à lire varie d'un message à l'autre (« 1 », « 1.1 »…) : on
+ * regroupe les messages par section et on émet un FETCH par groupe —
+ * d'ordinaire un ou deux. Demander une section qu'un message n'a pas fait
+ * échouer tout le lot chez Gmail, d'où ce regroupement plutôt qu'une liste de
+ * sections commune.
+ *
+ * Coût : un FETCH par groupe, ≤ 1,5 Ko par message. Toute erreur est avalée :
+ * un aperçu est un confort, il ne doit jamais faire échouer la liste.
+ */
+async function fillPreviews(
+  client: ImapFlow,
+  items: EmailMeta[],
+  structures: Map<number, unknown>,
+): Promise<void> {
+  const groups = new Map<string, Map<number, ReturnType<typeof findPreviewPart>>>();
+  items.forEach((item) => {
+    const uid = Number(item.id);
+    const part = findPreviewPart(structures.get(uid));
+    if (!part) return;
+    const group = groups.get(part.key) ?? new Map();
+    group.set(uid, part);
+    groups.set(part.key, group);
+  });
+  const previews = new Map<number, string>();
+  /* eslint-disable no-restricted-syntax, no-await-in-loop -- lots séquentiels sur la connexion partagée */
+  for (const [key, group] of groups) {
+    try {
+      for await (const msg of client.fetch(
+        compactUidSet([...group.keys()]),
+        { uid: true, bodyParts: [{ key, start: 0, maxLength: PREVIEW_PART_BYTES }] },
+        { uid: true },
+      )) {
+        const uid = Number(msg.uid);
+        const part = group.get(uid);
+        const raw = msg.bodyParts?.get(key);
+        if (part && raw) {
+          const preview = buildPreview(raw, part, msg.binaryParts?.has(key) ?? false);
+          if (preview) previews.set(uid, preview);
+        }
+      }
+    } catch {
+      // Aperçu best-effort : le groupe reste sans aperçu.
+    }
+  }
+  /* eslint-enable no-restricted-syntax, no-await-in-loop */
+  items.forEach((item) => {
+    const preview = previews.get(Number(item.id));
+    if (preview) Object.assign(item, { preview });
+  });
+}
+
+/**
+ * Requête FETCH d'une page de liste : enveloppe, drapeaux, structure (pièces
+ * jointes, choix de la partie d'aperçu) et les seuls champs d'en-tête qui
+ * servent à l'indice liste / automatique — quelques centaines d'octets par
+ * message, dans la même commande.
+ */
+const PAGE_FETCH_QUERY = {
+  uid: true,
+  envelope: true,
+  flags: true,
+  bodyStructure: true,
+  internalDate: true,
+  headers: [...CLASSIFICATION_HEADERS],
+};
+
+/**
+ * Lit une page de messages dans l'ordre de `pageUids`, avec aperçu si demandé.
+ * Point unique partagé par `listEmails` et `searchEmails`.
+ */
+async function fetchPage(
+  client: ImapFlow,
+  pageUids: number[],
+  opts: { preview?: boolean; mode: OrderMode },
+): Promise<EmailMeta[]> {
+  const items: EmailMeta[] = [];
+  const structures = new Map<number, unknown>();
+  const arrivals = new Map<number, number>();
+  // eslint-disable-next-line no-restricted-syntax
+  for await (const msg of client.fetch(pageUids.join(','), PAGE_FETCH_QUERY, { uid: true })) {
+    const raw = msg as unknown as Record<string, unknown>;
+    const uid = Number(raw.uid);
+    structures.set(uid, raw.bodyStructure);
+    arrivals.set(uid, arrivalOf(raw));
+    items.push(messageToEmailMeta(raw));
+  }
+  sortPage(items, pageUids, arrivals, opts.mode);
+  if (opts.preview) await fillPreviews(client, items, structures);
+  return items;
+}
+
 interface ClientScanOutcome {
   /** UID retenus, du plus récemment reçu au plus ancien. */
   uids: number[];
@@ -607,16 +972,18 @@ interface ClientScanOutcome {
  * OVH : plus d'une minute pour ~2 200 messages au premier appel, 1 à 3 s une
  * fois le cache chaud). Quand une borne l'interrompt, le bilan `coverage` dit
  * combien de messages ont été examinés et avec quel `before` reprendre.
+ *
+ * `ordered` : candidats déjà triés par date de réception (`orderForPaging`
+ * avec `force`), pour que la date du plus ancien examiné soit une reprise
+ * sans trou. La regex `attachment_mimetype` est validée par l'appelant avant
+ * tout FETCH.
  */
 async function scanClientSide(
   client: ImapFlow,
-  uids: number[],
+  ordered: Candidate[],
   postFilters: PostFilters,
   opts: { deadline: number; before?: string },
 ): Promise<ClientScanOutcome> {
-  // Valide la regex avant le premier FETCH.
-  compileMimetypeFilter(postFilters.attachmentMimetype);
-  const ordered = await orderByArrival(client, uids);
   const examinable = ordered.slice(0, MAX_SCANNED_MESSAGES);
   const kept = new Set<number>();
   let scanned = 0;
@@ -678,6 +1045,12 @@ function isRfc822Attachment(a: { contentType?: string; content?: unknown }): boo
   );
 }
 
+/** `{ classification }` quand les en-têtes portent un indice, sinon `{}`. */
+function withClassification(headers: Record<string, string>): Pick<Email, 'classification'> {
+  const classification = classifyFromHeaders(headers);
+  return classification ? { classification } : {};
+}
+
 /**
  * Build the full `Email` (incl. body) from a fetched message.
  *
@@ -717,6 +1090,7 @@ async function messageToEmail(msg: Record<string, unknown>): Promise<Email> {
   let raw: string | undefined;
   let bodyWarning: string | undefined;
   let parsedReferences: string[] | undefined;
+  let replyTo: EmailAddress[] | undefined;
   const headers: Record<string, string> = {};
 
   const { source } = msg;
@@ -745,6 +1119,10 @@ async function messageToEmail(msg: Record<string, unknown>): Promise<Email> {
         const parsed = await simpleParser(source);
         bodyText = nonEmpty(parsed.text);
         bodyHtml = nonEmpty(typeof parsed.html === 'string' ? parsed.html : undefined);
+        // Reply-To tel que posé par l'expéditeur : mailparser ne le remplit que
+        // si l'en-tête existe (contrairement à l'ENVELOPE IMAP, où le serveur
+        // recopie From quand Reply-To manque — RFC 3501 §7.4.2).
+        replyTo = flattenParsedAddresses(parsed.replyTo);
         // mailparser's reference extraction handles header folding and
         // LF-only line endings that the lightweight CRLF header scan above
         // does not — prefer it for the threading-critical references list.
@@ -779,10 +1157,20 @@ async function messageToEmail(msg: Record<string, unknown>): Promise<Email> {
     }
   }
 
+  // Source non analysée (trop grosse, ou erreur MIME) : l'ENVELOPE du serveur
+  // porte encore Reply-To, mais n'est fiable que si l'en-tête existe vraiment
+  // (sinon le serveur y a recopié From).
+  if (replyTo === undefined && headers['reply-to'] !== undefined) {
+    replyTo = parseAddresses(envelope.replyTo as Record<string, string>[]).filter(
+      (a) => a.address !== 'unknown',
+    );
+  }
+
   return {
     ...meta,
     cc: parseAddresses(envelope.cc as Record<string, string>[]),
     bcc: parseAddresses(envelope.bcc as Record<string, string>[]),
+    ...(replyTo && replyTo.length > 0 ? { replyTo } : {}),
     bodyText,
     bodyHtml,
     ...(raw !== undefined ? { raw } : {}),
@@ -792,6 +1180,8 @@ async function messageToEmail(msg: Record<string, unknown>): Promise<Email> {
     references: parsedReferences ?? headers.references?.split(/\s+/).filter(Boolean),
     attachments: extractAttachmentMeta(msg.bodyStructure),
     headers,
+    // Indice liste / automatique tiré de l'en-tête complet déjà lu.
+    ...withClassification(headers),
   };
 }
 
@@ -819,6 +1209,33 @@ export default class ImapService {
    * cross-account call. TTL'd at `MAILBOX_CACHE_TTL_MS`.
    */
   private mailboxListCache = new Map<string, { list: MailboxRef[]; expiresAt: number }>();
+
+  /** Dossier des envoyés retenu par compte (voir resolveSentFolder), pour le processus. */
+  private sentFolderCache = new Map<string, string>();
+
+  /**
+   * Ordre par date de réception déjà calculé pour une liste ou une recherche
+   * (orderForPaging), pour ne pas relire l'INTERNALDATE de tous les candidats
+   * à chaque page. Borné et invalidé par l'état du dossier.
+   */
+  private arrivalOrderCache = new ArrivalOrderCache();
+
+  /** Cache d'ordre et clé pour le dossier actuellement sélectionné sur `client`. */
+  private arrivalCacheFor(
+    client: ImapFlow,
+    accountName: string,
+    mailbox: string,
+    criteria: unknown,
+  ): { store: ArrivalOrderCache; ref: ArrivalCacheRef | undefined } {
+    const state = (client as unknown as { mailbox?: unknown }).mailbox as
+      | { uidValidity?: bigint; uidNext?: number; exists?: number }
+      | false
+      | undefined;
+    return {
+      store: this.arrivalOrderCache,
+      ref: ArrivalOrderCache.keyFor(accountName, mailbox, state, criteria),
+    };
+  }
 
   private static readonly MAILBOX_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -892,6 +1309,22 @@ export default class ImapService {
   }
 
   /**
+   * Cet échec mérite-t-il une relance automatique fenêtrée ?
+   *
+   * `search_failed` (le `false` avalé par imapflow : NO du serveur sur une
+   * requête coûteuse, ou délai de socket) et `timeout` (notre propre attente
+   * bornée) signifient tous deux « trop de travail pour ce dossier » — ce
+   * qu'une fenêtre de dates corrige.
+   *
+   * `connection_error` n'est PAS relancé : la socket est déjà cassée, une
+   * relance brûlerait une connexion pour réapprendre la même chose ; il faut
+   * se reconnecter, pas chercher moins de courrier.
+   */
+  private static isWindowRetryable(status: SearchStatus): boolean {
+    return status.kind === 'search_failed' || status.kind === 'timeout';
+  }
+
+  /**
    * R5/R8: the opened mailbox's message count. FREE under the search lock —
    * imapflow sets `client.mailbox` to the selected folder (with `.exists`)
    * after `getMailboxLock`; no STATUS round-trip, no cache.
@@ -919,8 +1352,8 @@ export default class ImapService {
       return false;
     }
     // [P2] Detection is deliberately narrow: `SEARCH=FUZZY` (RFC 6203) is the
-    // standard advertisement for a real server-side text index, and the WGS
-    // target (Dovecot, no FTS plugin) is precisely why this feature exists.
+    // standard advertisement for a real server-side text index, and a Dovecot
+    // without FTS plugin is precisely the case this feature exists for.
     // A server that does efficient body search via a non-standard capability
     // just gets the bounded ephemeral path — slower, but SAFE: the only cost
     // is an unnecessary bounded search, never a false-negative. Broaden or
@@ -1080,11 +1513,18 @@ export default class ImapService {
     if (pending) return pending;
 
     const promise = (async () => {
-      const client = await this.connections.getImapClient(accountName);
-      const strategy = await detectLabelStrategy(client);
-      this.labelStrategies.set(accountName, strategy);
-      this.labelStrategyPending.delete(accountName);
-      return strategy;
+      try {
+        const client = await this.connections.getImapClient(accountName);
+        const strategy = await detectLabelStrategy(client);
+        this.labelStrategies.set(accountName, strategy);
+        return strategy;
+      } finally {
+        // Retirée à l'issue, succès OU échec. Retirée sur succès seulement, une
+        // promesse rejetée restait dans la table et était resservie à chaque
+        // appel : un seul échec IMAP passager pendant la détection cassait
+        // toutes les opérations de libellés du compte jusqu'au redémarrage.
+        this.labelStrategyPending.delete(accountName);
+      }
     })();
 
     this.labelStrategyPending.set(accountName, promise);
@@ -1175,6 +1615,8 @@ export default class ImapService {
       // PR 2 phase E additions:
       attachmentFilename?: string;
       attachmentMimetype?: string;
+      /** Aperçu du corps (lecture partielle de la partie texte) ; défaut : non. */
+      preview?: boolean;
     } = {},
   ): Promise<PaginatedResult<EmailMeta>> {
     const client = await this.connections.getImapClient(accountName);
@@ -1236,12 +1678,22 @@ export default class ImapService {
         };
       }
 
-      // Du plus récent au plus ancien, puis filtres côté client AVANT la
-      // pagination (voir scanClientSide) : la page et le total portent sur les
-      // messages qui satisfont réellement les filtres.
-      uids.sort((a, b) => b - a);
-      if (hasClientSideFilters(postFilters)) {
-        const scan = await scanClientSide(client, uids, postFilters, {
+      // Du plus récemment REÇU au plus ancien sur l'ensemble (orderForPaging),
+      // puis filtres côté client AVANT la pagination (voir scanClientSide) : la
+      // page et le total portent sur les messages qui satisfont réellement les
+      // filtres.
+      const clientSide = hasClientSideFilters(postFilters);
+      // Valide la regex attachment_mimetype avant le premier FETCH.
+      if (clientSide) compileMimetypeFilter(postFilters.attachmentMimetype);
+      const order = await orderForPaging(client, uids, {
+        force: clientSide,
+        pageSize,
+        cache: this.arrivalCacheFor(client, accountName, mailbox, criteria),
+      });
+      if (order.warning) warnings.push(order.warning);
+      uids = order.ordered.map((c) => c.uid);
+      if (clientSide) {
+        const scan = await scanClientSide(client, order.ordered, postFilters, {
           deadline,
           before: options.before,
         });
@@ -1270,29 +1722,10 @@ export default class ImapService {
         };
       }
 
-      const items: EmailMeta[] = [];
-      const range = pageUids.join(',');
-
-      // eslint-disable-next-line no-restricted-syntax
-      for await (const msg of client.fetch(
-        range,
-        {
-          uid: true,
-          envelope: true,
-          flags: true,
-          bodyStructure: true,
-          internalDate: true,
-          source: { start: 0, maxLength: 256 },
-        },
-        { uid: true },
-      )) {
-        items.push(messageToEmailMeta(msg as unknown as Record<string, unknown>));
-      }
-
-      // Sort by date descending
-      items.sort(
-        (a, b) => safeDate(b.date, new Date(0)).getTime() - safeDate(a.date, new Date(0)).getTime(),
-      );
+      const items = await fetchPage(client, pageUids, {
+        preview: options.preview,
+        mode: order.mode,
+      });
 
       const warning = warnings.length > 0 ? warnings.join('; ') : undefined;
       return {
@@ -1412,6 +1845,8 @@ export default class ImapService {
       mailbox?: string;
       page?: number;
       pageSize?: number;
+      /** false : requête libre sur sujet / expéditeur / destinataires seulement. */
+      deep?: boolean;
       // Legacy (unchanged) filters — camelCase:
       to?: string;
       hasAttachment?: boolean;
@@ -1444,6 +1879,8 @@ export default class ImapService {
       attachmentMimetype?: string;
       // PR 2 phase G additions:
       facets?: ('sender' | 'year' | 'mailbox')[];
+      /** Aperçu du corps (lecture partielle de la partie texte) ; défaut : non. */
+      preview?: boolean;
     } = {},
   ): Promise<PaginatedResult<EmailMeta>> {
     const client = await this.connections.getImapClient(accountName);
@@ -1465,9 +1902,10 @@ export default class ImapService {
     };
     try {
       const params: SearchParams = { ...(options as SearchParams), query };
-      const { criteria, postFilters, warnings, bodyScan } = buildSearchCriteria(params, {
-        isGmail,
-      });
+      const { criteria, postFilters, warnings, bodyScan, gmailRawUsed } = buildSearchCriteria(
+        params,
+        { isGmail },
+      );
 
       // R5/R8: folder size is FREE under the lock (no STATUS round-trip). A
       // body scan over a large folder on a server with no full-text index is
@@ -1501,6 +1939,76 @@ export default class ImapService {
         searchOutcome = await ImapService.runSearch(client, criteria);
       }
 
+      // -----------------------------------------------------------------
+      // Repli sur les RECENCY_WINDOW_DAYS derniers jours (wgs4 0c2c2b4, R6)
+      // -----------------------------------------------------------------
+      // Une recherche qui n'a pas abouti signale « trop de courrier », ce
+      // n'est pas une réponse. Plutôt que de rendre un échec nu, relancer UNE
+      // fois restreinte aux 90 derniers jours, et le dire. Chaque condition
+      // compte :
+      //   - échec de volume seulement (`isWindowRetryable`) ;
+      //   - aucune date fournie par l'appelant (`hasDateNarrowing`) — sinon
+      //     on réduirait en silence SA plage (et une reprise par `before`
+      //     n'est jamais refenêtrée) ;
+      //   - pas de recherche par UID (déjà minimale ; un ET de date ferait
+      //     disparaître des UID nommés) ;
+      //   - pas le raccourci Gmail `X-GM-RAW` (syntaxe native, déjà rapide).
+      // La relance passe toujours par une connexion éphémère bornée : cette
+      // recherche vient de mal se comporter, la connexion partagée ne doit
+      // pas y être remise.
+      let windowedStatus: SearchStatus | undefined;
+      if (
+        !searchOutcome.ok &&
+        !gmailRawUsed &&
+        ImapService.isWindowRetryable(searchOutcome.status) &&
+        !hasDateNarrowing(params) &&
+        params.uids === undefined
+      ) {
+        const originalStatus = searchOutcome.status;
+        const windowCriteria = withRecencyWindow(criteria, RECENCY_WINDOW_DAYS);
+        const windowStart = (windowCriteria.since as Date).toISOString().slice(0, 10);
+        const windowed = {
+          applied: true,
+          sinceDays: RECENCY_WINDOW_DAYS,
+          since: windowStart,
+        } as const;
+        // Ne jamais garder le verrou partagé pendant la relance.
+        releaseLock();
+        const retry = await ImapService.runSearchEphemeral(
+          this.connections,
+          accountName,
+          mailbox,
+          windowCriteria,
+          EPHEMERAL_SEARCH_TIMEOUT_MS,
+        );
+        if (retry.ok && retry.uids.length > 0) {
+          // Succès partiel : bruyant, explicite, impossible à prendre pour une
+          // réponse complète — l'appelant apprend la plage RÉELLEMENT couverte
+          // et comment aller plus loin.
+          warnings.push(
+            `PARTIAL RESULTS — the full-range search did not complete (${originalStatus.kind}); ` +
+              `it was retried automatically on the last ${RECENCY_WINDOW_DAYS} days only ` +
+              `(since ${windowStart}). Matches received before ${windowStart} are NOT included. ` +
+              `To search further back, re-run with an explicit date range, e.g. ` +
+              `before: "${windowStart}" with since: a bounded earlier date ` +
+              '(an explicitly dated search is never re-windowed), or narrow with subject:/from:.',
+          );
+          searchOutcome = retry;
+          windowedStatus = { ...originalStatus, windowed };
+        } else {
+          // La relance n'a rien donné d'exploitable : rendre l'échec D'ORIGINE.
+          // Zéro résultat sur 90 jours ne dit rien du reste du dossier ;
+          // l'afficher comme `total: 0` recréerait le zéro silencieux que ce
+          // mécanisme supprime.
+          warnings.push(
+            `A ${RECENCY_WINDOW_DAYS}-day windowed retry (since ${windowStart}) was attempted ` +
+              `automatically and ${retry.ok ? 'found no match in that window' : `did not complete either (${retry.status.kind})`} — ` +
+              'treat this as "search did not complete", NOT as "no such mail".',
+          );
+          searchOutcome = { ok: false, status: { ...originalStatus, windowed } };
+        }
+      }
+
       if (!searchOutcome.ok) {
         // R1/R4: a failed SEARCH must never read as a clean zero. Surface the
         // structured status AND fold it into `warning` so it always reaches
@@ -1523,15 +2031,20 @@ export default class ImapService {
         };
       }
 
-      // The at-risk path released the shared lock for the slow SEARCH;
-      // re-acquire it for the cheap page FETCH / facet scan below (identical
-      // to the non-at-risk path from here on).
+      // The at-risk path — and the windowed retry — released the shared lock
+      // for the slow SEARCH; re-acquire it for the cheap page FETCH / facet
+      // scan below (identical to the non-at-risk path from here on).
       if (!activeLock) {
         activeLock = await client.getMailboxLock(mailbox);
       }
 
       let uids: number[] = searchOutcome.uids;
-      let totalApprox = false;
+      // Un résultat fenêtré ne couvre qu'une tranche du dossier : `total`
+      // compte cette tranche — approximatif par construction.
+      let totalApprox = windowedStatus !== undefined;
+      // Porté par chaque retour réussi ci-dessous : l'étiquette « fenêtré »
+      // voyage avec les résultats, pas seulement avec les échecs.
+      const windowedFields = windowedStatus ? { searchStatus: windowedStatus } : {};
 
       // Aucun plafond ici : sans filtre côté client, seule la page demandée est
       // lue, quel que soit le nombre de correspondances — total exact, toutes
@@ -1550,15 +2063,25 @@ export default class ImapService {
           ...(warning ? { warning } : {}),
           ...(totalApprox ? { totalApprox } : {}),
           ...(folderSize !== undefined ? { folderSize } : {}),
+          ...windowedFields,
         };
       }
 
-      uids.sort((a, b) => b - a);
-      // Filtres côté client AVANT la pagination et les facettes : page, total
-      // et facettes portent sur les messages qui satisfont réellement les
+      // Du plus récemment REÇU au plus ancien sur l'ensemble (orderForPaging),
+      // puis filtres côté client AVANT la pagination et les facettes : page,
+      // total et facettes portent sur les messages qui satisfont réellement les
       // filtres (voir scanClientSide).
-      if (hasClientSideFilters(postFilters)) {
-        const scan = await scanClientSide(client, uids, postFilters, {
+      const clientSide = hasClientSideFilters(postFilters);
+      if (clientSide) compileMimetypeFilter(postFilters.attachmentMimetype);
+      const order = await orderForPaging(client, uids, {
+        force: clientSide,
+        pageSize,
+        cache: this.arrivalCacheFor(client, accountName, mailbox, criteria),
+      });
+      if (order.warning) warnings.push(order.warning);
+      uids = order.ordered.map((c) => c.uid);
+      if (clientSide) {
+        const scan = await scanClientSide(client, order.ordered, postFilters, {
           deadline,
           before: options.before,
         });
@@ -1601,31 +2124,14 @@ export default class ImapService {
           ...(coverage ? { coverage } : {}),
           ...(facets ? { facets } : {}),
           ...(folderSize !== undefined ? { folderSize } : {}),
+          ...windowedFields,
         };
       }
 
-      const items: EmailMeta[] = [];
-      const range = pageUids.join(',');
-
-      // eslint-disable-next-line no-restricted-syntax
-      for await (const msg of client.fetch(
-        range,
-        {
-          uid: true,
-          envelope: true,
-          flags: true,
-          bodyStructure: true,
-          internalDate: true,
-          source: { start: 0, maxLength: 256 },
-        },
-        { uid: true },
-      )) {
-        items.push(messageToEmailMeta(msg as unknown as Record<string, unknown>));
-      }
-
-      items.sort(
-        (a, b) => safeDate(b.date, new Date(0)).getTime() - safeDate(a.date, new Date(0)).getTime(),
-      );
+      const items = await fetchPage(client, pageUids, {
+        preview: options.preview,
+        mode: order.mode,
+      });
 
       const warning = warnings.length > 0 ? warnings.join('; ') : undefined;
       return {
@@ -1639,6 +2145,7 @@ export default class ImapService {
         ...(coverage ? { coverage } : {}),
         ...(facets ? { facets } : {}),
         ...(folderSize !== undefined ? { folderSize } : {}),
+        ...windowedFields,
       };
     } finally {
       releaseLock();
@@ -2054,9 +2561,18 @@ export default class ImapService {
       return true;
     });
 
-    // 3. Search each real mailbox for the Message-ID (sequential — each needs its own lock)
+    // 3. Chercher le Message-ID dossier par dossier, en s'ARRÊTANT au premier
+    // trouvé. Chaque dossier coûte un SELECT et un SEARCH sur en-tête —
+    // généralement un balayage non indexé côté serveur : continuer après une
+    // trouvaille faisait payer ce prix sur tous les dossiers restants (des
+    // dizaines de secondes sur une grosse boîte) pour bâtir une liste dont
+    // l'appelant ne devait de toute façon utiliser que la première entrée.
+    // Les dossiers probables passent en tête, pour que l'unique résultat soit
+    // aussi le plus utile.
+    const searchOrder = ImapService.orderByLikelihood(realMailboxes);
+
     const folders: string[] = [];
-    const searchMailbox = async (mbPath: string): Promise<void> => {
+    const findInMailbox = async (mbPath: string): Promise<boolean> => {
       try {
         const lock = await client.getMailboxLock(mbPath);
         try {
@@ -2064,23 +2580,46 @@ export default class ImapService {
             { header: { 'message-id': messageId } },
             { uid: true },
           );
-          if (results && Array.isArray(results) && results.length > 0) {
-            folders.push(mbPath);
-          }
+          return Array.isArray(results) && results.length > 0;
         } finally {
           lock.release();
         }
       } catch {
         // Skip folders that can't be selected or searched (e.g. \Noselect, INBOX on some providers)
+        return false;
       }
     };
     // eslint-disable-next-line no-restricted-syntax
-    for (const mb of realMailboxes) {
+    for (const mb of searchOrder) {
       // eslint-disable-next-line no-await-in-loop
-      await searchMailbox(mb.path);
+      if (await findInMailbox(mb.path)) {
+        folders.push(mb.path);
+        break;
+      }
     }
 
     return { folders, messageId };
+  }
+
+  /** Dossiers où un message a le plus de chances d'être, dans l'ordre où les chercher. */
+  private static readonly LIKELY_SPECIAL_USE = ['\\Sent', '\\Drafts', '\\Archive'];
+
+  /**
+   * Ordonne les dossiers pour que le premier trouvé soit celui sur lequel
+   * l'appelant voudra agir : INBOX, puis Envoyés / Brouillons / Archives, puis
+   * le reste dans l'ordre du serveur (tri stable).
+   */
+  private static orderByLikelihood<T extends { path: string; specialUse?: string }>(
+    mailboxes: T[],
+  ): T[] {
+    const rank = (mailbox: T): number => {
+      if (mailbox.path.toUpperCase() === 'INBOX') return 0;
+      const specialIndex = mailbox.specialUse
+        ? ImapService.LIKELY_SPECIAL_USE.indexOf(mailbox.specialUse)
+        : -1;
+      return specialIndex === -1 ? ImapService.LIKELY_SPECIAL_USE.length + 1 : specialIndex + 1;
+    };
+    return [...mailboxes].sort((a, b) => rank(a) - rank(b));
   }
 
   // -------------------------------------------------------------------------
@@ -2099,10 +2638,48 @@ export default class ImapService {
     await ImapService.assertRealMailbox(client, safeSource);
     const lock = await client.getMailboxLock(safeSource);
     try {
-      const ok = await client.messageMove(emailId, safeDest, { uid: true });
+      const ok = await imapCommand(`Moving message to "${safeDest}"`, async () =>
+        client.messageMove(emailId, safeDest, { uid: true }),
+      );
       if (!ok) {
         throw new Error(`IMAP server rejected the move from "${safeSource}" to "${safeDest}".`);
       }
+    } finally {
+      lock.release();
+    }
+  }
+
+  /**
+   * Copie un message dans un autre dossier du MÊME compte, sans toucher
+   * l'original (outil `copy_email`, wgs4 3a1444d).
+   *
+   * COPY côté serveur (imapflow `messageCopy`) : le message ne quitte pas le
+   * serveur, aucun FETCH / APPEND, et la copie garde à l'identique expéditeur,
+   * date, structure MIME, pièces jointes et drapeaux. Le nouvel UID n'est
+   * connu que si le serveur annonce UIDPLUS (réponse COPYUID) ; sinon
+   * `newId` est absent. Une copie vers un AUTRE compte passe par
+   * `cross_account_copy`.
+   */
+  async copyEmail(
+    accountName: string,
+    emailId: string,
+    sourceMailbox: string,
+    destinationMailbox: string,
+  ): Promise<{ newId?: string }> {
+    const client = await this.connections.getImapClient(accountName);
+    const safeSource = sanitizeMailboxName(sourceMailbox);
+    const safeDest = sanitizeMailboxName(destinationMailbox);
+    await ImapService.assertRealMailbox(client, safeSource);
+    const lock = await client.getMailboxLock(safeSource);
+    try {
+      const result = await imapCommand(`Copying message to "${safeDest}"`, async () =>
+        client.messageCopy(emailId, safeDest, { uid: true }),
+      );
+      if (!result) {
+        throw new Error(`IMAP server rejected the copy from "${safeSource}" to "${safeDest}".`);
+      }
+      const newUid = result.uidMap?.get(Number(emailId));
+      return newUid === undefined ? {} : { newId: String(newUid) };
     } finally {
       lock.release();
     }
@@ -2135,7 +2712,9 @@ export default class ImapService {
 
       const lock = await client.getMailboxLock(safeMailbox);
       try {
-        const ok = await client.messageMove(emailId, trashPath, { uid: true });
+        const ok = await imapCommand(`Moving message to "${trashPath}"`, async () =>
+          client.messageMove(emailId, trashPath, { uid: true }),
+        );
         if (!ok) {
           throw new Error('IMAP server rejected the move to Trash.');
         }
@@ -2248,7 +2827,9 @@ export default class ImapService {
     };
     try {
       const range = ids.join(',');
-      const ok = await client.messageMove(range, destination, { uid: true });
+      const ok = await imapCommand(`Moving messages to "${destination}"`, async () =>
+        client.messageMove(range, destination, { uid: true }),
+      );
       if (ok) {
         result.succeeded = ids.length;
       } else {
@@ -2305,7 +2886,9 @@ export default class ImapService {
       const lock = await client.getMailboxLock(mailbox);
       try {
         const range = ids.join(',');
-        const ok = await client.messageMove(range, trashPath, { uid: true });
+        const ok = await imapCommand(`Moving messages to "${trashPath}"`, async () =>
+          client.messageMove(range, trashPath, { uid: true }),
+        );
         if (ok) {
           result.succeeded = ids.length;
         } else {
@@ -2329,53 +2912,68 @@ export default class ImapService {
   // -------------------------------------------------------------------------
 
   /**
-   * Resolve the Sent folder path for an account.
-   * Uses account config override, then SPECIAL-USE attribute, then common names.
+   * Dossier où ranger la copie d'un envoi.
+   *
+   * 1. `sent_folder` du compte, s'il est réglé ;
+   * 2. sinon, parmi les candidats — le dossier marqué `\Sent` par le serveur
+   *    et ceux qui portent un nom courant (anglais, français…) —, celui qui
+   *    contient le PLUS de messages, c'est-à-dire celui où le logiciel de
+   *    messagerie de l'utilisateur range réellement ses envois. À égalité, le
+   *    dossier marqué `\Sent` l'emporte.
+   *
+   * Pourquoi le comptage : OVH marque `\Sent` un dossier « Sent » quasi vide,
+   * alors qu'Outlook range les envois dans « Éléments envoyés », non marqué
+   * (constaté le 2026-11-16 : 5 messages contre 560). Suivre le seul marquage
+   * classait les copies là où l'utilisateur ne les voit jamais.
    */
   async resolveSentFolder(accountName: string): Promise<string> {
     const account = this.connections.getAccount(accountName);
     if (account.sentFolder) return account.sentFolder;
+    const cached = this.sentFolderCache.get(accountName);
+    if (cached) return cached;
 
     const client = await this.connections.getImapClient(accountName);
     const mailboxesRaw = await client.list();
     const mailboxes = Array.isArray(mailboxesRaw) ? mailboxesRaw : [...mailboxesRaw];
 
-    // Try SPECIAL-USE attribute first
-    function isSent(mb: unknown): mb is { specialUse: string; path: string } {
-      if (typeof mb !== 'object' || mb === null) return false;
-      if (!('specialUse' in mb) || !('path' in mb)) return false;
-      return mb.specialUse === '\\Sent' && typeof mb.path === 'string';
-    }
-
-    const specialUse = mailboxes.find(isSent);
-    if (specialUse) return specialUse.path;
-
-    // Fall back to common names
-    const commonNames = [
-      'INBOX.Sent',
-      'Sent',
-      'Sent Items',
-      'Sent Mail',
-      '[Gmail]/Sent Mail',
-      'INBOX.Sent Items',
-      'INBOX.Sent Messages',
-    ];
-
-    function hasPath(mb: unknown): mb is { path: string } {
+    function hasPath(mb: unknown): mb is { path: string; specialUse?: unknown } {
       if (typeof mb !== 'object' || mb === null) return false;
       if (!('path' in mb)) return false;
       return typeof mb.path === 'string';
     }
+    const listed = mailboxes.filter(hasPath);
+    const paths = new Set(listed.map((mb) => mb.path));
 
-    const paths = new Set(mailboxes.filter(hasPath).map((mb) => mb.path));
-    const match = commonNames.find((name) => paths.has(name));
-    if (!match) {
+    // Marqués `\Sent` d'abord (prioritaires à égalité), puis noms courants.
+    const candidates = [
+      ...listed.filter((mb) => mb.specialUse === '\\Sent').map((mb) => mb.path),
+      ...SENT_FOLDER_NAMES.filter((name) => paths.has(name)),
+    ].filter((path, index, all) => all.indexOf(path) === index);
+
+    if (candidates.length === 0) {
       throw new Error(
         `Cannot resolve Sent folder for "${accountName}". ` +
-          `Available mailboxes: ${[...paths].join(', ')}`,
+          `Available mailboxes: ${[...paths].join(', ')} — set sent_folder for this account.`,
       );
     }
-    return match;
+
+    let chosen = candidates[0] ?? '';
+    if (candidates.length > 1) {
+      // Comptage séquentiel (une seule connexion partagée) ; un STATUS refusé
+      // compte -1. Strictement supérieur : à égalité, le premier (\Sent) reste.
+      const best = await candidates.reduce<Promise<{ path: string; count: number }>>(
+        async (accP, path) => {
+          const acc = await accP;
+          const status = await client.status(path, { messages: true }).catch(() => false as const);
+          const count = status === false ? -1 : (status.messages ?? 0);
+          return count > acc.count ? { path, count } : acc;
+        },
+        Promise.resolve({ path: chosen, count: -2 }),
+      );
+      chosen = best.path;
+    }
+    this.sentFolderCache.set(accountName, chosen);
+    return chosen;
   }
 
   /**
@@ -2426,6 +3024,8 @@ export default class ImapService {
       bcc?: string[];
       html?: boolean;
       inReplyTo?: string;
+      /** Chaîne References du fil ; défaut : `[inReplyTo]` quand il est fourni. */
+      references?: string[];
       attachments?: ResolvedAttachment[];
       appendSignature?: boolean;
     },
@@ -2455,17 +3055,22 @@ export default class ImapService {
       bcc: options.bcc?.length ? options.bcc.join(', ') : undefined,
       subject: options.subject,
       inReplyTo: options.inReplyTo,
+      // Sans References, un client qui ne regarde que cet en-tête (Gmail en
+      // tête) ne rattache pas le brouillon envoyé à son fil.
+      references: buildReferences(options.inReplyTo, options.references),
       date: new Date(),
-      ...(signed.html ? { html: signed.body } : { text: signed.body }),
+      // Un brouillon HTML reçoit son alternative text/plain dès l'écriture :
+      // send_draft transmet ces octets tels quels, sans recomposer.
+      ...(signed.html
+        ? { html: signed.body, text: htmlToPlainText(signed.body) }
+        : { text: signed.body }),
       ...(hasDraftAttachments ? { attachments: signed.attachments } : {}),
     };
 
-    const rawMessage = await new Promise<Buffer>((resolve, reject) => {
-      new MailComposer(mailOptions).compile().build((err: Error | null, buf: Buffer) => {
-        if (err) reject(err);
-        else resolve(buf);
-      });
-    });
+    // keepBcc : un brouillon n'a pas d'enveloppe SMTP, l'en-tête Bcc est le seul
+    // endroit où garder les destinataires cachés (voir composeMessage). Le
+    // pliage des noms de fichiers longs est corrigé au passage.
+    const rawMessage = await composeMessage(mailOptions, { keepBcc: true });
 
     const appendResult = await client.append(draftsPath, rawMessage, ['\\Draft', '\\Seen']);
 
@@ -2517,6 +3122,7 @@ export default class ImapService {
       bcc?: string[];
       html?: boolean;
       inReplyTo?: string;
+      references?: string[];
       attachments?: AttachmentInput[];
       appendSignature?: boolean;
     },
@@ -2540,6 +3146,7 @@ export default class ImapService {
       bcc: options.bcc,
       html: options.html,
       inReplyTo: options.inReplyTo,
+      references: options.references,
       attachments: resolved,
       appendSignature: options.appendSignature,
     });
@@ -2666,8 +3273,10 @@ export default class ImapService {
       options.mailbox,
     );
 
-    // Determine which existing attachments to carry forward.
-    const existingFilenames = existing.attachments.map((a) => a.filename);
+    // Determine which existing attachments to carry forward. Les images inline
+    // (cid) sont reportées à part, plus bas, selon que le corps les référence.
+    const existingReal = realAttachments(existing.attachments);
+    const existingFilenames = existingReal.map((a) => a.filename);
     const existingSet = new Set(existingFilenames);
 
     // Default keep set: ALL existing attachments. Explicit empty array drops everything.
@@ -2691,7 +3300,15 @@ export default class ImapService {
     });
 
     // Download the kept attachment bytes from the old draft (server-side, no MCP wire).
-    const kept = await this.fetchKeptAttachments(accountName, draftId, draftsPath, keepFilenames);
+    // Un nom gardé reprend TOUTES les pièces qui le portent (doublons
+    // compris), chacune par son numéro de partie.
+    const keepSet = new Set(keepFilenames);
+    const kept = await this.fetchKeptAttachments(
+      accountName,
+      draftId,
+      draftsPath,
+      existingReal.filter((a) => keepSet.has(a.filename)),
+    );
 
     // Resolve the add list (path | base64 | source-message-reference).
     let added: ResolvedAttachment[] = [];
@@ -2727,6 +3344,9 @@ export default class ImapService {
     const cc = options.cc ?? existing.cc?.map((a) => a.address);
     const bcc = options.bcc ?? existing.bcc?.map((a) => a.address);
     const inReplyTo = options.inReplyTo ?? existing.inReplyTo;
+    // Les References héritées ne valent que pour le fil d'origine : un nouvel
+    // in_reply_to les remplace (buildReferences repart alors de lui).
+    const references = options.inReplyTo === undefined ? existing.references : undefined;
 
     // Signature : uniquement sur demande explicite ET sous un nouveau corps.
     // Sous un corps hérité, elle ferait doublon avec celle qu'il contient déjà.
@@ -2798,6 +3418,7 @@ export default class ImapService {
       bcc,
       html,
       inReplyTo,
+      references,
       attachments: allAttachments,
       // Explicite : sans ce false, saveDraft appliquerait signature_default et
       // ajouterait la signature du compte à chaque mise à jour.
@@ -2826,7 +3447,7 @@ export default class ImapService {
   }
 
   /**
-   * Download a subset of an existing message's attachments by filename.
+   * Download a subset of an existing message's attachments, by part number.
    * Strict: any per-file failure aborts the whole operation so we never
    * silently produce a draft missing attachments the caller asked to keep.
    */
@@ -2834,13 +3455,14 @@ export default class ImapService {
     accountName: string,
     emailId: number,
     mailbox: string,
-    filenames: string[],
+    metas: AttachmentMeta[],
   ): Promise<ResolvedAttachment[]> {
-    if (filenames.length === 0) return [];
-    const inputs: AttachmentInput[] = filenames.map((filename) => ({
+    if (metas.length === 0) return [];
+    const inputs: AttachmentInput[] = metas.map((meta) => ({
       sourceEmailId: String(emailId),
       sourceMailbox: mailbox,
-      filename,
+      filename: meta.filename,
+      ...(meta.partId !== undefined ? { partId: meta.partId } : {}),
     }));
     const result = await resolveAttachments(this, accountName, inputs);
     if (result.failures.length > 0) {
@@ -2875,30 +3497,43 @@ export default class ImapService {
     return uid;
   }
 
+  // imapCommand : un refus du serveur (« NO [ALREADYEXISTS] … ») remonte avec
+  // ses propres mots au lieu du « Command failed » générique d'ImapFlow.
   async createMailbox(accountName: string, folderPath: string): Promise<void> {
     const client = await this.connections.getImapClient(accountName);
-    await client.mailboxCreate(folderPath);
+    await imapCommand(`Creating mailbox "${folderPath}"`, async () =>
+      client.mailboxCreate(folderPath),
+    );
   }
 
   async renameMailbox(accountName: string, folderPath: string, newPath: string): Promise<void> {
     const client = await this.connections.getImapClient(accountName);
-    await client.mailboxRename(folderPath, newPath);
+    await imapCommand(`Renaming mailbox "${folderPath}" to "${newPath}"`, async () =>
+      client.mailboxRename(folderPath, newPath),
+    );
   }
 
   async deleteMailbox(accountName: string, folderPath: string): Promise<void> {
     const client = await this.connections.getImapClient(accountName);
-    await client.mailboxDelete(folderPath);
+    await imapCommand(`Deleting mailbox "${folderPath}"`, async () =>
+      client.mailboxDelete(folderPath),
+    );
   }
 
   // -------------------------------------------------------------------------
   // Attachment download
   // -------------------------------------------------------------------------
 
+  /**
+   * Télécharge UNE pièce jointe, désignée par son `partId` (prioritaire) ou
+   * par son nom. Un nom porté par plusieurs pièces est refusé avec la liste
+   * des candidates (voir `selectAttachment`) : jamais « la première ».
+   */
   async downloadAttachment(
     accountName: string,
     emailId: string,
     mailbox: string,
-    filename: string,
+    ref: AttachmentRef,
     maxSizeBytes = 5 * 1024 * 1024,
   ): Promise<{
     filename: string;
@@ -2922,24 +3557,23 @@ export default class ImapService {
         throw new Error(`Email ${emailId} not found in ${mailbox}`);
       }
 
-      const attachments = extractAttachmentMeta(msg.bodyStructure);
-      const attachment = attachments.find((a) => a.filename === filename);
-      if (!attachment) {
-        throw new Error(
-          `Attachment "${filename}" not found. Available: ${attachments.map((a) => a.filename).join(', ') || 'none'}`,
-        );
-      }
-
-      if (attachment.size > maxSizeBytes) {
-        throw new Error(
-          `Attachment "${filename}" is ${Math.round(attachment.size / 1024 / 1024)}MB, exceeds ${Math.round(maxSizeBytes / 1024 / 1024)}MB limit`,
-        );
-      }
-
-      // Find the MIME part number
-      const partNumber = findMimePartByFilename(msg.bodyStructure, filename);
+      const attachment = selectAttachment(extractAttachmentMeta(msg.bodyStructure), ref);
+      const { filename } = attachment;
+      // Le numéro de partie vient du même parcours que la liste : la pièce
+      // listée est exactement celle téléchargée, doublons de noms compris.
+      const partNumber = attachment.partId;
       if (!partNumber) {
-        throw new Error(`Could not locate MIME part for "${filename}"`);
+        throw new Error(`Could not locate MIME part for ${selectorLabel(ref)}`);
+      }
+
+      // Contrôle préalable sur la taille DÉCODÉE estimée : `attachment.size` l'est
+      // déjà (voir decodedPartSize). Comparer la taille encodée au plafond
+      // refusait à tort une pièce de 20 Mo (≈ 27,5 Mo encodés) face à 25 Mo.
+      const estimatedSize = attachment.size;
+      if (estimatedSize > maxSizeBytes) {
+        throw new Error(
+          `Attachment "${filename}" is about ${Math.round(estimatedSize / 1024 / 1024)}MB, exceeds ${Math.round(maxSizeBytes / 1024 / 1024)}MB limit`,
+        );
       }
 
       // Download the part
@@ -2951,10 +3585,30 @@ export default class ImapService {
         throw new Error(`Failed to download attachment "${filename}"`);
       }
 
+      // Contrôle de la taille RÉELLE pendant le téléchargement (idée de la PR
+      // codefuturist #108) : la taille annoncée par BODYSTRUCTURE n'est qu'une
+      // déclaration du serveur. imapflow décode le transfert (base64, QP) : les
+      // octets comptés ici sont les octets réels. Au-delà du plafond, le flux
+      // est vidé SANS être conservé — interrompre un téléchargement imapflow en
+      // cours de commande peut désynchroniser la connexion IMAP partagée.
       const chunks: Buffer[] = [];
+      let received = 0;
+      let exceeded = false;
       // eslint-disable-next-line no-restricted-syntax
       for await (const chunk of downloadResult.content) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        received += buffer.length;
+        if (received > maxSizeBytes) {
+          exceeded = true;
+          chunks.length = 0;
+        } else if (!exceeded) {
+          chunks.push(buffer);
+        }
+      }
+      if (exceeded) {
+        throw new Error(
+          `Attachment "${filename}" is ${Math.round(received / 1024 / 1024)}MB once downloaded, exceeds ${Math.round(maxSizeBytes / 1024 / 1024)}MB limit`,
+        );
       }
       const content = Buffer.concat(chunks);
       // imapflow 2 redemande une section rendue vide, puis termine le flux
@@ -3015,8 +3669,11 @@ export default class ImapService {
         { uid: true },
       );
       if (!msg) return [];
+      // Pièces « réelles » seulement : les images inline (logos de signature)
+      // ne sont pas ce qu'on veut sur disque, et n'y figuraient pas avant
+      // d'être listées.
       // biome-ignore format: line too long; eslint implicit-arrow-linebreak prevents multi-line implicit return
-      attachmentMetas = extractAttachmentMeta(msg.bodyStructure).filter((a) => a.size <= maxSizeBytes && !a.mimeType.includes('calendar') && !a.filename.toLowerCase().endsWith('.ics'));
+      attachmentMetas = realAttachments(extractAttachmentMeta(msg.bodyStructure)).filter((a) => a.size <= maxSizeBytes && !a.mimeType.includes('calendar') && !a.filename.toLowerCase().endsWith('.ics'));
     } finally {
       lock.release();
     }
@@ -3026,13 +3683,17 @@ export default class ImapService {
     const { mkdir } = await import('node:fs/promises');
     await mkdir(destDir, { recursive: true });
 
+    // Deux pièces de même nom (image001.png ×2) s'écrasaient l'une l'autre sur
+    // disque : la seconde devient « image001 (2).png ». Chacune est
+    // téléchargée par son numéro de partie.
+    const named = uniqueAttachmentNames(attachmentMetas);
     const results = await Promise.allSettled(
-      attachmentMetas.map(async (meta) => {
+      named.map(async (meta) => {
         const downloaded = await this.downloadAttachment(
           accountName,
           emailId,
           mailbox,
-          meta.filename,
+          meta.partId !== undefined ? { partId: meta.partId } : meta.filename,
           maxSizeBytes,
         );
         const safe = meta.filename.replace(/[/\\?%*:|"<>]/g, '_');
@@ -3446,6 +4107,47 @@ export default class ImapService {
   // Quota
   // -------------------------------------------------------------------------
 
+  /**
+   * Compteurs d'un dossier pour la ressource `stats` : un STATUS pour le total
+   * et les non-lus (sans SELECT), puis un SEARCH réduit aux UID pour les
+   * messages du jour — jamais de FETCH.
+   *
+   * La ressource appelait `getEmailStats`, qui lance un SEARCH SINCE puis
+   * FETCH enveloppe, drapeaux et structure de CHAQUE message de la période,
+   * pour n'en garder que trois compteurs ; et elle publiait comme « total » le
+   * nombre de messages du jour.
+   */
+  async getMailboxSnapshot(accountName: string, mailbox = 'INBOX'): Promise<MailboxSnapshot> {
+    const client = await this.connections.getImapClient(accountName);
+    const path = sanitizeMailboxName(mailbox);
+
+    const status = await client.status(path, { messages: true, unseen: true });
+    // `false` : STATUS refusé sur un dossier existant ; compteurs à zéro.
+    const counts = status === false ? undefined : status;
+
+    // SINCE ne porte qu'une date (sans heure) : imapflow la formate via
+    // `toISOString()`, donc en UTC. Un minuit local (`setHours(0,0,0,0)`)
+    // devient la veille à Paris (23:00Z ou 22:00Z) et « reçus aujourd'hui »
+    // compterait deux jours. On construit donc minuit UTC de la date LOCALE,
+    // comme `normalizeDate` (src/utils/date.ts).
+    const now = new Date();
+    const today = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+    const lock = await client.getMailboxLock(path);
+    let receivedToday = 0;
+    try {
+      const uids = await client.search({ since: today }, { uid: true });
+      receivedToday = Array.isArray(uids) ? uids.length : 0;
+    } finally {
+      lock.release();
+    }
+
+    return {
+      total: counts?.messages ?? 0,
+      unread: counts?.unseen ?? 0,
+      receivedToday,
+    };
+  }
+
   async getQuota(accountName: string): Promise<QuotaInfo | null> {
     const client = await this.connections.getImapClient(accountName);
     try {
@@ -3517,7 +4219,16 @@ export default class ImapService {
           for await (const chunk of downloadResult.content) {
             chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
           }
-          if (chunks.length > 0) icsContents.push(Buffer.concat(chunks).toString('utf-8'));
+          // imapflow défait l'encodage de transfert de cette partie mais ne
+          // convertit pas son jeu de caractères (il ne le fait que pour
+          // text/plain et text/html) : une invitation en ISO-8859-1 ou
+          // Windows-1252 sortait en mojibake (« RÃ©union ») sous une lecture
+          // UTF-8 aveugle. Le charset déclaré arrive dans `meta`.
+          if (chunks.length > 0) {
+            icsContents.push(
+              decodeCharset(Buffer.concat(chunks), downloadResult.meta?.charset ?? undefined),
+            );
+          }
         }
       }
 
@@ -3677,14 +4388,24 @@ export default class ImapService {
         return { items: [], truncated: false };
       }
 
-      uids.sort((a, b) => b - a);
-
-      // Filtres côté client AVANT la coupe à maxRows : couper d'abord ne
-      // gardait que les maxRows plus récents, puis les filtrait — un export
+      // Même ordre que les listes (orderForPaging) : la coupe à maxRows garde
+      // les messages reçus le plus récemment, pas les derniers entrés dans le
+      // dossier. Filtres côté client AVANT la coupe à maxRows : couper d'abord
+      // ne gardait que les maxRows plus récents, puis les filtrait — un export
       // `from_contains` avec max_rows=100 ne voyait que 100 messages.
+      const clientSide = hasClientSideFilters(postFilters);
+      if (clientSide) compileMimetypeFilter(postFilters.attachmentMimetype);
+      // pageSize = maxRows : sous ce nombre, rien n'est coupé et l'ordre final
+      // est de toute façon refait plus bas sur la date.
+      const order = await orderForPaging(client, uids, {
+        force: clientSide,
+        pageSize: maxRows,
+        cache: this.arrivalCacheFor(client, accountName, mailbox, criteria),
+      });
+      uids = order.ordered.map((c) => c.uid);
       let coverage: SearchCoverage | undefined;
-      if (hasClientSideFilters(postFilters)) {
-        const scan = await scanClientSide(client, uids, postFilters, {
+      if (clientSide) {
+        const scan = await scanClientSide(client, order.ordered, postFilters, {
           deadline,
           before: searchOpts.before,
         });
@@ -3702,6 +4423,8 @@ export default class ImapService {
       /* eslint-disable no-restricted-syntax, no-await-in-loop */
       for (const chunk of chunks) {
         const range = chunk.join(',');
+        const chunkItems: EmailMeta[] = [];
+        const structures = new Map<number, unknown>();
         for await (const msg of client.fetch(
           range,
           {
@@ -3709,12 +4432,18 @@ export default class ImapService {
             envelope: true,
             flags: true,
             bodyStructure: true,
-            source: { start: 0, maxLength: 256 },
           },
           { uid: true },
         )) {
-          items.push(messageToEmailMeta(msg as unknown as Record<string, unknown>));
+          const raw = msg as unknown as Record<string, unknown>;
+          structures.set(Number(raw.uid), raw.bodyStructure);
+          chunkItems.push(messageToEmailMeta(raw));
         }
+        // Colonne `preview` demandée : lecture partielle de la partie texte,
+        // comme `list_emails preview=true` (l'ancienne lecture de 256 octets de
+        // source ne donnait que des en-têtes).
+        if (searchOpts.preview) await fillPreviews(client, chunkItems, structures);
+        items.push(...chunkItems);
       }
       /* eslint-enable no-restricted-syntax, no-await-in-loop */
 
@@ -3751,7 +4480,7 @@ export default class ImapService {
     accountName: string,
     emailId: string,
     mailbox: string,
-    filename: string,
+    ref: AttachmentRef,
     destination: string,
     overwrite = false,
   ): Promise<AttachmentSaveResult> {
@@ -3760,27 +4489,10 @@ export default class ImapService {
     const { dirname, join } = await import('node:path');
     const { pipeline } = await import('node:stream/promises');
 
-    // Resolve target — directory vs file path
+    // Contrôle de la destination AVANT toute connexion ; le chemin final se
+    // calcule une fois la pièce choisie (son nom n'est connu qu'alors quand
+    // elle est désignée par partId).
     assertSafeDestination(destination);
-    let targetPath: string;
-    try {
-      const info = await stat(destination);
-      if (info.isDirectory()) {
-        targetPath = join(destination, sanitizeFilename(filename));
-      } else {
-        targetPath = destination;
-      }
-    } catch {
-      // Destination doesn't exist yet — treat as a file path.
-      targetPath = destination;
-    }
-    // Re-check the final resolved path (defense in depth — the file component
-    // is user-supplied and could include `..` in theory).
-    assertSafeDestination(targetPath);
-
-    // Auto-collision suffix when overwrite=false.
-    const finalPath = await resolveUniquePath(targetPath, overwrite);
-    await mkdir(dirname(finalPath), { recursive: true });
 
     const client = await this.connections.getImapClient(accountName);
     const uid = parseInt(emailId, 10);
@@ -3797,20 +4509,31 @@ export default class ImapService {
         throw new Error(`Email ${emailId} not found in ${mailbox}`);
       }
 
-      const attachments = extractAttachmentMeta(msg.bodyStructure);
-      const attachment = attachments.find((a) => a.filename === filename);
-      if (!attachment) {
-        throw new Error(
-          `Attachment "${filename}" not found. Available: ${
-            attachments.map((a) => a.filename).join(', ') || 'none'
-          }`,
-        );
+      const attachment = selectAttachment(extractAttachmentMeta(msg.bodyStructure), ref);
+      const { filename } = attachment;
+      const partNumber = attachment.partId;
+      if (!partNumber) {
+        throw new Error(`Could not locate MIME part for ${selectorLabel(ref)}`);
       }
 
-      const partNumber = findMimePartByFilename(msg.bodyStructure, filename);
-      if (!partNumber) {
-        throw new Error(`Could not locate MIME part for "${filename}"`);
+      // Resolve target — directory vs file path
+      let targetPath: string;
+      try {
+        const info = await stat(destination);
+        targetPath = info.isDirectory()
+          ? join(destination, sanitizeFilename(filename))
+          : destination;
+      } catch {
+        // Destination doesn't exist yet — treat as a file path.
+        targetPath = destination;
       }
+      // Re-check the final resolved path (defense in depth — the file component
+      // is user-supplied and could include `..` in theory).
+      assertSafeDestination(targetPath);
+
+      // Auto-collision suffix when overwrite=false.
+      const finalPath = await resolveUniquePath(targetPath, overwrite);
+      await mkdir(dirname(finalPath), { recursive: true });
 
       const downloadResult = await client.download(String(uid), partNumber, { uid: true });
       if (!downloadResult?.content) {
@@ -3898,7 +4621,8 @@ export default class ImapService {
 
     /* eslint-disable no-restricted-syntax, no-await-in-loop */
     for (const email of items) {
-      const atts = email.attachments ?? [];
+      // Pièces « réelles » seulement (comme les filtres de recherche).
+      const atts = realAttachments(email.attachments ?? []);
       const qualifying = atts.filter((a) => {
         if (nameNeedle && !a.filename.toLowerCase().includes(nameNeedle)) return false;
         if (mimeRe && !mimeRe.test(a.mimeType)) return false;
@@ -3929,11 +4653,13 @@ export default class ImapService {
 
           for (const att of qualifying) {
             try {
+              // Par numéro de partie : deux pièces de même nom sont chacune
+              // enregistrées (suffixe -1 automatique), pas la première deux fois.
               const saved = await this.saveAttachmentToDisk(
                 accountForEmail,
                 email.id,
                 input.searchOptions.mailbox ?? 'INBOX',
-                att.filename,
+                att.partId !== undefined ? { partId: att.partId } : att.filename,
                 subfolder,
                 false,
               );

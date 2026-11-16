@@ -3,10 +3,11 @@
  * search_emails, search_all_accounts.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
+import { describeAttachments, realAttachments } from '../services/attachment-select.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import type {
   Email,
@@ -15,7 +16,14 @@ import type {
   PaginatedResult,
   SearchStatus,
 } from '../types/index.js';
-import { applyBodyFormat } from '../utils/body-format.js';
+import {
+  applyBodyFormat,
+  DEFAULT_MULTI_BODY_MAX,
+  DEFAULT_SINGLE_BODY_MAX,
+} from '../utils/body-format.js';
+import { classifyFromHeaders, formatClassification } from '../utils/mail-classification.js';
+import { bodyFormatParam, maxLengthParam, resolveMaxLength } from './body-params.js';
+import { numeric } from './numeric-param.js';
 import {
   COVERAGE_NOTE,
   FROM_DESCRIPTION,
@@ -30,13 +38,13 @@ import {
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-function formatEmailMeta(email: EmailMeta): string {
+/**
+ * Rendu d'une ligne de liste. `showPreview` : l'aperçu n'est affiché que si
+ * l'appelant l'a demandé (`preview: true`) — Graph le fournit d'office, IMAP
+ * seulement sur demande ; masquer par défaut garde la même sortie sur les
+ * deux backends.
+ */
+function formatEmailMeta(email: EmailMeta, showPreview = true): string {
   const flags = [
     email.seen ? '' : '🔵',
     email.flagged ? '⭐' : '',
@@ -50,15 +58,22 @@ function formatEmailMeta(email: EmailMeta): string {
   const labelStr = email.labels.length > 0 ? `\n  🏷️ ${email.labels.join(', ')}` : '';
 
   let attachLine = '';
-  if (email.attachments && email.attachments.length > 0) {
-    const names = email.attachments.map((a) => a.filename);
+  // Liste : pièces « réelles » seulement (celles que marque 📎), chacune avec
+  // son partId — ce que demandent download_attachment / save_attachment.
+  const listed = realAttachments(email.attachments ?? []);
+  if (listed.length > 0) {
+    const names = listed.map((a) =>
+      a.partId !== undefined ? `${a.filename} [partId ${a.partId}]` : a.filename,
+    );
     const shown = names.slice(0, 3).join(', ');
     const extra = names.length > 3 ? ` (+${names.length - 3} more)` : '';
     attachLine = `\n  📎 Attachments: ${shown}${extra}`;
   }
 
   const accountTag = email.account ? `[${email.account}] ` : '';
-  return `${accountTag}[${email.id}] ${flags} ${email.subject}\n  From: ${from} | ${email.date}${labelStr}${attachLine}${email.preview ? `\n  ${email.preview}` : ''}`;
+  const classLine = email.classification ? `\n  ${formatClassification(email.classification)}` : '';
+  const previewLine = showPreview && email.preview ? `\n  ${email.preview}` : '';
+  return `${accountTag}[${email.id}] ${flags} ${email.subject}\n  From: ${from} | ${email.date}${labelStr}${attachLine}${classLine}${previewLine}`;
 }
 
 /**
@@ -116,7 +131,12 @@ export function formatSearchFailure(result: {
   ];
   if (s?.suggestion) lines.push(`Suggestion: ${s.suggestion}`);
   if (s?.windowed?.applied) {
-    lines.push(`(A ${s.windowed.sinceDays}-day windowed retry was applied.)`);
+    // La relance fenêtrée a été tentée et n'a rien donné d'exploitable : le
+    // dire, sinon l'appelant la relancerait à la main pour rien.
+    const since = s.windowed.since ? ` (since ${s.windowed.since})` : '';
+    lines.push(
+      `(An automatic ${s.windowed.sinceDays}-day windowed retry${since} was also tried and gave no usable result.)`,
+    );
   }
   return lines.join('\n');
 }
@@ -127,6 +147,7 @@ export function formatSearchResult(
   },
   header: string,
   emptyMessage: string,
+  showPreview = false,
 ): string {
   // R4: a failed search must be flagged BEFORE the zero-items path — otherwise
   // it renders as the indistinguishable "No emails found" silent zero.
@@ -135,7 +156,7 @@ export function formatSearchResult(
 
   const warningPrefix = result.warning ? `⚠️ ${result.warning}\n` : '';
   // R8: surface the opened folder's size so callers can judge
-  // truncation/timeout risk on huge folders (osTicket/Archive).
+  // truncation/timeout risk on huge folders (archives, ticketing mailboxes).
   const folderNote =
     result.folderSize !== undefined ? `📂 folder holds ${result.folderSize} messages\n` : '';
 
@@ -143,7 +164,7 @@ export function formatSearchResult(
     return `${warningPrefix}${folderNote}${emptyMessage}`;
   }
 
-  const emails = result.items.map(formatEmailMeta).join('\n\n');
+  const emails = result.items.map((m) => formatEmailMeta(m, showPreview)).join('\n\n');
   const facetsBlock = formatFacetsBlock(result.facets);
 
   let accountWarningsBlock = '';
@@ -179,6 +200,36 @@ export function formatSearchResult(
   return `${warningPrefix}${folderNote}${header}\n${emails}${facetsBlock}${accountWarningsBlock}`;
 }
 
+/**
+ * Paramètres de `search_emails` qui ne sont PAS des critères : ils disent où
+ * chercher et comment présenter, pas quoi chercher.
+ */
+const NON_CRITERIA_PARAMS = new Set([
+  'account',
+  // `deep` règle la portée de `query`, il ne cherche rien à lui seul.
+  'deep',
+  'mailbox',
+  'page',
+  'pageSize',
+  'facets',
+  'preview',
+]);
+
+/**
+ * Vrai si l'appel porte au moins un critère de recherche : `query` non vide
+ * ou un filtre renseigné (chaîne non vide, booléen, nombre, tableau non vide,
+ * objet `header` non vide). Exporté pour les tests.
+ */
+export function hasSearchCriterion(params: Record<string, unknown>): boolean {
+  return Object.entries(params).some(([key, value]) => {
+    if (NON_CRITERIA_PARAMS.has(key) || value === undefined || value === null) return false;
+    if (typeof value === 'string') return value.trim() !== '';
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === 'object') return Object.keys(value).length > 0;
+    return true;
+  });
+}
+
 /** Renders the current read/flag/label state as a concise status line. */
 function formatEmailStatus(email: Pick<Email, 'seen' | 'flagged' | 'answered' | 'labels'>): string {
   const parts: string[] = [email.seen ? '✓ Read' : '🔵 Unread'];
@@ -198,92 +249,105 @@ export default function registerEmailsTools(
   // ---------------------------------------------------------------------------
   // list_emails
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'list_emails',
-    'List emails with optional server-side filters. Supports date ranges (since/before/on, ' +
-      'including relative tokens like "7d", "yesterday"), subject/from/to/cc/bcc/body/text search, ' +
-      'read/flag/answered state, keywords/labels, header matches, and UID ranges. ' +
-      'On Gmail accounts, pass gmail_raw for native Gmail search syntax (dramatically faster). ' +
-      'Returns paginated metadata (read/unread 🔵, flagged ⭐, replied ↩️, attachments 📎, labels 🏷️). ' +
-      'Use get_email to fetch full body content. ' +
-      'ProtonMail note: labels are represented as IMAP folders — use list_labels to discover them, ' +
-      'then list_emails with mailbox="Labels/X" to find labeled emails. ' +
-      `${COVERAGE_NOTE} ` +
-      "If a query of INBOX returns nothing relevant, consider re-running against the account's Archive " +
-      'mailbox (use list_mailboxes to find its name); always pair archive queries with a date filter, ' +
-      'because archives can hold tens of thousands of messages.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
-      page: z.number().int().min(1).default(1).describe('Page number'),
-      pageSize: z.number().int().min(1).max(100).default(20).describe('Results per page'),
-      since: z
-        .string()
-        .optional()
-        .describe(
-          'Date filter: received on/after. Accepts ISO 8601, YYYY-MM-DD, or relative like "7d" / "yesterday"',
+      description:
+        'List emails with optional server-side filters. Supports date ranges (since/before/on, ' +
+        'including relative tokens like "7d", "yesterday"), subject/from/to/cc/bcc/body/text search, ' +
+        'read/flag/answered state, keywords/labels, header matches, and UID ranges. ' +
+        'On Gmail accounts, pass gmail_raw for native Gmail search syntax (dramatically faster). ' +
+        'Returns paginated metadata (read/unread 🔵, flagged ⭐, replied ↩️, attachments 📎, labels 🏷️). ' +
+        'Use get_email to fetch full body content. ' +
+        'ProtonMail note: labels are represented as IMAP folders — use list_labels to discover them, ' +
+        'then list_emails with mailbox="Labels/X" to find labeled emails. ' +
+        `${COVERAGE_NOTE} ` +
+        "If a query of INBOX returns nothing relevant, consider re-running against the account's Archive " +
+        'mailbox (use list_mailboxes to find its name); always pair archive queries with a date filter, ' +
+        'because archives can hold tens of thousands of messages.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
+        page: numeric(z.number().int().min(1).default(1)).describe('Page number'),
+        pageSize: numeric(z.number().int().min(1).max(100).default(20)).describe(
+          'Results per page',
         ),
-      before: z.string().optional().describe('Date filter: received strictly before'),
-      on: z.string().optional().describe('Date filter: received on specific date'),
-      sent_since: z
-        .string()
-        .optional()
-        .describe(
-          'Date header: sent on/after (differs from since which uses internal delivery date)',
-        ),
-      sent_before: z.string().optional().describe('Date header: sent before'),
-      from: z.string().optional().describe(FROM_DESCRIPTION),
-      subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
-      to: z.string().optional().describe(TO_DESCRIPTION),
-      ...literalFilterParams,
-      cc: z.string().optional().describe(`Filter by Cc. ${SERVER_MATCH_CAVEAT}`),
-      bcc: z.string().optional().describe(`Filter by Bcc. ${SERVER_MATCH_CAVEAT}`),
-      text: z.string().optional().describe('Any text field (headers + body)'),
-      body: z.string().optional().describe('Body only'),
-      seen: z.boolean().optional().describe('true = read only; false = unread only'),
-      flagged: z.boolean().optional().describe('true = flagged; false = unflagged'),
-      has_attachment: z
-        .boolean()
-        .optional()
-        .describe('Filter: true=has attachments, false=no attachments'),
-      answered: z.boolean().optional().describe('Filter: true=replied, false=not yet replied'),
-      draft: z.boolean().optional(),
-      deleted: z.boolean().optional(),
-      keyword: z
-        .union([z.string(), z.array(z.string())])
-        .optional()
-        .describe('IMAP keyword/label (AND when array)'),
-      not_keyword: z.union([z.string(), z.array(z.string())]).optional(),
-      header: z
-        .record(z.string(), z.string())
-        .optional()
-        .describe('Arbitrary header name/value match, e.g. {"X-Custom": "value"}'),
-      uids: z
-        .union([z.array(z.number()), z.string()])
-        .optional()
-        .describe('Specific UID ranges (array of numbers or IMAP sequence string like "1:100")'),
-      larger_than: z.number().optional().describe('Minimum email size in KB'),
-      smaller_than: z.number().optional().describe('Maximum email size in KB'),
-      attachment_filename: z
-        .string()
-        .optional()
-        .describe(
-          'Filter by attachment filename substring (case-insensitive). Example: "lease" matches "signed_lease_v7.pdf".',
-        ),
-      attachment_mimetype: z
-        .string()
-        .optional()
-        .describe(
-          'Filter by MIME type regex (case-insensitive). Examples: "application/pdf", "image/.*".',
-        ),
-      gmail_raw: z
-        .string()
-        .optional()
-        .describe(
-          "Gmail accounts ONLY: pass Gmail search syntax (e.g. 'from:foo has:attachment') for dramatically faster server-side search. Other filters ignored when set.",
-        ),
+        since: z
+          .string()
+          .optional()
+          .describe(
+            'Date filter: received on/after. Accepts ISO 8601, YYYY-MM-DD, or relative like "7d" / "yesterday"',
+          ),
+        before: z.string().optional().describe('Date filter: received strictly before'),
+        on: z.string().optional().describe('Date filter: received on specific date'),
+        sent_since: z
+          .string()
+          .optional()
+          .describe(
+            'Date header: sent on/after (differs from since which uses internal delivery date)',
+          ),
+        sent_before: z.string().optional().describe('Date header: sent before'),
+        from: z.string().optional().describe(FROM_DESCRIPTION),
+        subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
+        to: z.string().optional().describe(TO_DESCRIPTION),
+        ...literalFilterParams,
+        cc: z.string().optional().describe(`Filter by Cc. ${SERVER_MATCH_CAVEAT}`),
+        bcc: z.string().optional().describe(`Filter by Bcc. ${SERVER_MATCH_CAVEAT}`),
+        text: z.string().optional().describe('Any text field (headers + body)'),
+        body: z.string().optional().describe('Body only'),
+        seen: z.boolean().optional().describe('true = read only; false = unread only'),
+        flagged: z.boolean().optional().describe('true = flagged; false = unflagged'),
+        has_attachment: z
+          .boolean()
+          .optional()
+          .describe('Filter: true=has attachments, false=no attachments'),
+        answered: z.boolean().optional().describe('Filter: true=replied, false=not yet replied'),
+        draft: z.boolean().optional(),
+        deleted: z.boolean().optional(),
+        keyword: z
+          .union([z.string(), z.array(z.string())])
+          .optional()
+          .describe('IMAP keyword/label (AND when array)'),
+        not_keyword: z.union([z.string(), z.array(z.string())]).optional(),
+        header: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe('Arbitrary header name/value match, e.g. {"X-Custom": "value"}'),
+        uids: z
+          .union([z.array(numeric(z.number())), z.string()])
+          .optional()
+          .describe('Specific UID ranges (array of numbers or IMAP sequence string like "1:100")'),
+        larger_than: numeric(z.number().optional()).describe('Minimum email size in KB'),
+        smaller_than: numeric(z.number().optional()).describe('Maximum email size in KB'),
+        attachment_filename: z
+          .string()
+          .optional()
+          .describe(
+            'Filter by attachment filename substring (case-insensitive). Example: "lease" matches "signed_lease_v7.pdf".',
+          ),
+        attachment_mimetype: z
+          .string()
+          .optional()
+          .describe(
+            'Filter by MIME type regex (case-insensitive). Examples: "application/pdf", "image/.*".',
+          ),
+        gmail_raw: z
+          .string()
+          .optional()
+          .describe(
+            "Gmail accounts ONLY: pass Gmail search syntax (e.g. 'from:foo has:attachment') for dramatically faster server-side search. Other filters ignored when set.",
+          ),
+        preview: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Include a ~200-character body preview per message (default: false). On IMAP this reads the ' +
+              'first 1.5 KB of each message text part (one extra FETCH per page); Microsoft Graph ' +
+              'serves it at no extra cost.',
+          ),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async (params) => {
       try {
         const result = await imapService.listEmails(params.account, {
@@ -317,6 +381,7 @@ export default function registerEmailsTools(
           attachmentFilename: params.attachment_filename,
           attachmentMimetype: params.attachment_mimetype,
           gmailRaw: params.gmail_raw,
+          preview: params.preview,
           ...literalFilterOptions(params),
         });
 
@@ -346,7 +411,7 @@ export default function registerEmailsTools(
           `📬 [${params.mailbox}] ${totalDisplay} emails ` +
           `(page ${result.page}/${Math.ceil(result.total / result.pageSize)})` +
           `${result.hasMore ? ' — more pages available' : ''}\n`;
-        const emails = result.items.map(formatEmailMeta).join('\n\n');
+        const emails = result.items.map((m) => formatEmailMeta(m, params.preview)).join('\n\n');
 
         return {
           content: [
@@ -373,40 +438,37 @@ export default function registerEmailsTools(
   // ---------------------------------------------------------------------------
   // get_email
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'get_email',
-    'Get the full content of a specific email by ID. ' +
-      'Does NOT mark the email as seen (uses IMAP BODY.PEEK — non-destructive). ' +
-      'Use format="text" to strip HTML, or format="stripped" to also remove quoted replies and signatures. ' +
-      'Use maxLength to cap the body size for large emails. ' +
-      'Set markRead=true only when you want to explicitly mark the email as read.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      emailId: z.string().describe('Email ID from list_emails or search_emails'),
-      mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
-      format: z
-        .enum(['full', 'text', 'stripped'])
-        .default('full')
-        .describe(
-          'Body format: full=full decoded body — text preferred, else HTML; falls back to a visible marker + capped raw RFC822 source if nothing is decodable (default). text=plain text (strips HTML). stripped=plain text without quoted replies or signatures.',
+      description:
+        'Get the content of a specific email by ID. ' +
+        'Does NOT mark the email as seen (uses IMAP BODY.PEEK — non-destructive). ' +
+        'format: text (default) = readable plain text (HTML converted, links kept); stripped = text minus ' +
+        'quoted replies and signatures; full = the decoded body part as-is; html = the raw HTML part. ' +
+        `The body is capped at ${DEFAULT_SINGLE_BODY_MAX} characters by default (html: uncapped): a cut ` +
+        'body ends with a ✂️ marker — call again with offset=<shown end> for the next part, or ' +
+        'maxLength=0 for the whole body. ' +
+        'Set markRead=true only when you want to explicitly mark the email as read.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        emailId: z.string().describe('Email ID from list_emails or search_emails'),
+        mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
+        format: bodyFormatParam(),
+        maxLength: maxLengthParam(DEFAULT_SINGLE_BODY_MAX, 'body'),
+        offset: numeric(z.number().int().min(0).default(0)).describe(
+          'Character offset to start the body at (default 0) — to read the rest of a truncated body.',
         ),
-      maxLength: z
-        .number()
-        .int()
-        .min(100)
-        .optional()
-        .describe(
-          'Truncate body at this many characters. A hint shows how many characters remain.',
-        ),
-      markRead: z
-        .boolean()
-        .default(false)
-        .describe(
-          'Explicitly mark the email as read after fetching (default: false — reading is non-destructive by default)',
-        ),
+        markRead: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Explicitly mark the email as read after fetching (default: false — reading is non-destructive by default)',
+          ),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
-    async ({ account, emailId, mailbox, format, maxLength, markRead }) => {
+    async ({ account, emailId, mailbox, format, maxLength, offset, markRead }) => {
       try {
         const email = await imapService.getEmail(account, emailId, mailbox);
 
@@ -421,6 +483,13 @@ export default function registerEmailsTools(
           parts.push(`CC:     ${email.cc.map((a) => a.address).join(', ')}`);
         }
 
+        // Reply-To posé par l'expéditeur : c'est là que reply_email répondra.
+        if (email.replyTo?.length) {
+          parts.push(
+            `Reply-To: ${email.replyTo.map((a) => (a.name ? `${a.name} <${a.address}>` : a.address)).join(', ')}`,
+          );
+        }
+
         parts.push(`Date:   ${email.date}`);
         parts.push(`ID:     ${email.messageId}`);
 
@@ -429,13 +498,25 @@ export default function registerEmailsTools(
         }
 
         if (email.attachments.length > 0) {
-          parts.push(
-            `📎 Attachments: ${email.attachments.map((a) => `${a.filename} (${a.mimeType}, ${formatSize(a.size)})`).join(', ')}`,
-          );
+          // Avec le partId de chaque pièce (seul désignateur sans ambiguïté) et
+          // les images inline marquées, pour qu'elles soient téléchargeables.
+          parts.push(`📎 Attachments: ${describeAttachments(email.attachments)}`);
         }
 
+        // Indice liste / automatique : depuis l'en-tête complet, sur les deux
+        // backends (Graph sert `internetMessageHeaders` sur un message seul).
+        const classification = email.classification ?? classifyFromHeaders(email.headers);
+        if (classification) parts.push(formatClassification(classification, true));
+
         parts.push('', '--- Body ---', '');
-        parts.push(applyBodyFormat(email, format, maxLength));
+        parts.push(
+          applyBodyFormat(email, format, {
+            maxLength: resolveMaxLength(format, maxLength, DEFAULT_SINGLE_BODY_MAX),
+            offset,
+            continuation: (next) =>
+              `call get_email again with offset=${next} for the next part, or maxLength=0 for the whole body`,
+          }),
+        );
 
         if (markRead) {
           await imapService.setFlags(account, emailId, mailbox, 'read');
@@ -461,34 +542,29 @@ export default function registerEmailsTools(
   // ---------------------------------------------------------------------------
   // get_emails  (batch content fetch)
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'get_emails',
-    'Fetch the full content of multiple emails in a single call (max 20). ' +
-      'More efficient than calling get_email repeatedly when triaging or summarising several emails. ' +
-      'Does NOT mark emails as seen. ' +
-      'Defaults to format="text" (HTML stripped) for compact, AI-friendly output.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      ids: z
-        .array(z.string())
-        .min(1)
-        .max(20)
-        .describe('Email IDs to fetch (max 20). Obtain IDs from list_emails or search_emails.'),
-      mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
-      format: z
-        .enum(['full', 'text', 'stripped'])
-        .default('text')
-        .describe(
-          'Body format (default: text — strips HTML for efficient AI reading). Use stripped to also remove quoted replies.',
-        ),
-      maxLength: z
-        .number()
-        .int()
-        .min(100)
-        .optional()
-        .describe('Truncate each email body at this many characters.'),
+      description:
+        'Fetch the full content of multiple emails in a single call (max 20). ' +
+        'More efficient than calling get_email repeatedly when triaging or summarising several emails. ' +
+        'Does NOT mark emails as seen. ' +
+        'Defaults to format="text" (HTML converted to readable text) for compact, AI-friendly output. ' +
+        `Each body is capped at ${DEFAULT_MULTI_BODY_MAX} characters by default (html: uncapped); ` +
+        'read a cut body in full with get_email.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        ids: z
+          .array(z.string())
+          .min(1)
+          .max(20)
+          .describe('Email IDs to fetch (max 20). Obtain IDs from list_emails or search_emails.'),
+        mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
+        format: bodyFormatParam(),
+        maxLength: maxLengthParam(DEFAULT_MULTI_BODY_MAX, 'each body'),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async ({ account, ids, mailbox, format, maxLength }) => {
       const results: string[] = [];
       const errors: string[] = [];
@@ -504,11 +580,13 @@ export default function registerEmailsTools(
           const from = email.from.name
             ? `${email.from.name} <${email.from.address}>`
             : email.from.address;
-          const body = applyBodyFormat(email, format, maxLength);
+          const body = applyBodyFormat(email, format, {
+            maxLength: resolveMaxLength(format, maxLength, DEFAULT_MULTI_BODY_MAX),
+            continuation: (next) =>
+              `use get_email with emailId=${emailId} and offset=${next} for the rest, or maxLength=0`,
+          });
           const attachLine =
-            email.attachments.length > 0
-              ? `📎 ${email.attachments.map((a) => a.filename).join(', ')}`
-              : '';
+            email.attachments.length > 0 ? `📎 ${describeAttachments(email.attachments)}` : '';
 
           results.push(
             [
@@ -546,19 +624,22 @@ export default function registerEmailsTools(
   // ---------------------------------------------------------------------------
   // get_email_status  (lightweight flag/label check — no body fetch)
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'get_email_status',
-    'Get the current read/flag/label state of an email without fetching its body. ' +
-      'Much cheaper than get_email when you only need to check whether an email is unread, ' +
-      'flagged, or which labels it has. ' +
-      'Also useful to confirm the result of a mark_email call. ' +
-      'Does NOT mark the email as seen.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      emailId: z.string().describe('Email ID from list_emails or search_emails'),
-      mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
+      description:
+        'Get the current read/flag/label state of an email without fetching its body. ' +
+        'Much cheaper than get_email when you only need to check whether an email is unread, ' +
+        'flagged, or which labels it has. ' +
+        'Also useful to confirm the result of a mark_email call. ' +
+        'Does NOT mark the email as seen.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        emailId: z.string().describe('Email ID from list_emails or search_emails'),
+        mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async ({ account, emailId, mailbox }) => {
       try {
         const flags = await imapService.getEmailFlags(account, emailId, mailbox);
@@ -597,116 +678,163 @@ export default function registerEmailsTools(
   // ---------------------------------------------------------------------------
   // search_emails
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'search_emails',
-    `Search emails with server-side filters. Omit query (or pass an empty string) to use pure filters. ` +
-      `Free-text \`query\` searches subject + from + body (deep by default). On a very large folder whose ` +
-      `server has no full-text index, a body scan is expensive: it is run on a bounded connection and, ` +
-      `if it cannot complete, returns an explicitly flagged failure (never a silent zero) with a cost ` +
-      `warning suggesting you narrow by date (since/before/on) or subject:/from:. ` +
-      `Supports date ranges (since/before/on, including "7d" / "yesterday"), subject/from/to/cc/bcc/body/text ` +
-      `filters, read/flag/answered state, keywords/labels, header matches, UID ranges, size limits, and attachments. ` +
-      `On Gmail accounts, pass gmail_raw (e.g. 'from:foo has:attachment older_than:30d') for a dramatically ` +
-      `faster native Gmail search. Results are paginated. ${COVERAGE_NOTE} ` +
-      `A failed or timed-out SEARCH is reported explicitly (searchFailed + a warning) and is NEVER returned as a ` +
-      `silent zero-result — if you see it, narrow the query and retry; the messages may still exist. ` +
-      `Archive folders and osTicket-ingested mailboxes (e.g. INBOX.osTicket on support@ addresses accumulate ` +
-      `tens of thousands of messages) are very large — always include a date filter (since/before/on or relative ` +
-      `tokens like "30d") or narrow by subject:/from:, otherwise the search may be slow or truncated.`,
     {
-      account: z.string().describe('Account name from list_accounts'),
-      query: z
-        .string()
-        .optional()
-        .default('')
-        .describe(
-          'Search keyword across subject + from + body (deep by default; omit to use filters only). ' +
-            'On a very large non-indexed folder a body scan is bounded and, if it cannot complete, ' +
-            'returns a flagged failure (never a silent zero) — narrow by date or subject:/from: and retry.',
+      description:
+        `Search emails with server-side filters. Omit query (or pass an empty string) to use pure filters. ` +
+        `Free-text \`query\` searches subject + from + body (deep by default). Pass deep=false to make it ` +
+        `header-only (subject + from + to): no body is scanned, which is much cheaper on a huge folder ` +
+        `when you know the word is in the subject or an address. On a very large folder whose ` +
+        `server has no full-text index, a body scan is expensive: it is run on a bounded connection and, ` +
+        `if it cannot complete, returns an explicitly flagged failure (never a silent zero) with a cost ` +
+        `warning suggesting you narrow by date (since/before/on) or subject:/from:. ` +
+        `Supports date ranges (since/before/on, including "7d" / "yesterday"), subject/from/to/cc/bcc/body/text ` +
+        `filters, read/flag/answered state, keywords/labels, header matches, UID ranges, size limits, and attachments. ` +
+        `On Gmail accounts, pass gmail_raw (e.g. 'from:foo has:attachment older_than:30d') for a dramatically ` +
+        `faster native Gmail search. Results are paginated. ${COVERAGE_NOTE} ` +
+        `A failed or timed-out SEARCH is reported explicitly (searchFailed + a warning) and is NEVER returned as a ` +
+        `silent zero-result — if you see it, narrow the query and retry; the messages may still exist. ` +
+        `On IMAP, an UNDATED search that fails this way is retried once on the last 90 days: matches from that ` +
+        `window come back as PARTIAL RESULTS (warning + searchStatus.windowed, total approximate); to go further ` +
+        `back, re-run with an explicit before:/since: range (dated searches are never re-windowed). ` +
+        `Archive folders and other high-volume mailboxes (shared or ticketing inboxes can accumulate tens of ` +
+        `thousands of messages) are very large — always include a date filter (since/before/on or relative ` +
+        `tokens like "30d") or narrow by subject:/from:, otherwise the search may be slow or truncated. ` +
+        `At least one criterion (query or a filter) is required — to browse a folder, use list_emails.`,
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        query: z
+          .string()
+          .optional()
+          .default('')
+          .describe(
+            'Search keyword across subject + from + body (deep by default; omit to use filters only). ' +
+              'On a very large non-indexed folder a body scan is bounded and, if it cannot complete, ' +
+              'returns a flagged failure (never a silent zero) — narrow by date or subject:/from: and retry.',
+          ),
+        deep: z
+          .boolean()
+          .optional()
+          .describe(
+            'How far `query` reaches. true/omitted = subject + from + body (default). ' +
+              'false = header-only (subject + from + to): no body term is sent, so the search stays ' +
+              'cheap on huge non-indexed folders. Does not affect the explicit body/text filters.',
+          ),
+        mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
+        page: numeric(z.number().int().min(1).default(1)).describe('Page number'),
+        pageSize: numeric(z.number().int().min(1).max(100).default(20)).describe(
+          'Results per page',
         ),
-      mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
-      page: z.number().int().min(1).default(1).describe('Page number'),
-      pageSize: z.number().int().min(1).max(100).default(20).describe('Results per page'),
-      to: z.string().optional().describe(TO_DESCRIPTION),
-      from: z.string().optional().describe(FROM_DESCRIPTION),
-      subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
-      ...literalFilterParams,
-      cc: z.string().optional().describe(`Filter by Cc. ${SERVER_MATCH_CAVEAT}`),
-      bcc: z.string().optional().describe(`Filter by Bcc. ${SERVER_MATCH_CAVEAT}`),
-      text: z.string().optional().describe('Any text field (headers + body)'),
-      body: z.string().optional().describe('Body only'),
-      since: z
-        .string()
-        .optional()
-        .describe(
-          'Date filter: received on/after. Accepts ISO 8601, YYYY-MM-DD, or relative like "7d" / "yesterday"',
-        ),
-      before: z.string().optional().describe('Date filter: received strictly before'),
-      on: z.string().optional().describe('Date filter: received on specific date'),
-      sent_since: z
-        .string()
-        .optional()
-        .describe(
-          'Date header: sent on/after (differs from since which uses internal delivery date)',
-        ),
-      sent_before: z.string().optional().describe('Date header: sent before'),
-      seen: z.boolean().optional().describe('true = read only; false = unread only'),
-      flagged: z.boolean().optional().describe('true = flagged; false = unflagged'),
-      has_attachment: z
-        .boolean()
-        .optional()
-        .describe('Filter: true=has attachments, false=no attachments'),
-      larger_than: z.number().optional().describe('Minimum email size in KB'),
-      smaller_than: z.number().optional().describe('Maximum email size in KB'),
-      answered: z.boolean().optional().describe('Filter: true=replied, false=not replied'),
-      draft: z.boolean().optional(),
-      deleted: z.boolean().optional(),
-      keyword: z
-        .union([z.string(), z.array(z.string())])
-        .optional()
-        .describe('IMAP keyword/label (AND when array)'),
-      not_keyword: z.union([z.string(), z.array(z.string())]).optional(),
-      header: z
-        .record(z.string(), z.string())
-        .optional()
-        .describe('Arbitrary header name/value match, e.g. {"X-Custom": "value"}'),
-      uids: z
-        .union([z.array(z.number()), z.string()])
-        .optional()
-        .describe('Specific UID ranges (array of numbers or IMAP sequence string like "1:100")'),
-      attachment_filename: z
-        .string()
-        .optional()
-        .describe(
-          'Filter by attachment filename substring (case-insensitive). Example: "lease" matches "signed_lease_v7.pdf".',
-        ),
-      attachment_mimetype: z
-        .string()
-        .optional()
-        .describe(
-          'Filter by MIME type regex (case-insensitive). Examples: "application/pdf", "image/.*".',
-        ),
-      facets: z
-        .array(z.enum(['sender', 'year', 'mailbox']))
-        .optional()
-        .describe(
-          'Return bucketed counts by sender/year/mailbox alongside the paginated results. ' +
-            'Useful for understanding large result sets. Skipped if match set exceeds 10000 UIDs.',
-        ),
-      gmail_raw: z
-        .string()
-        .optional()
-        .describe(
-          "Gmail accounts ONLY: pass Gmail search syntax (e.g. 'from:foo has:attachment') for dramatically faster server-side search. Other filters ignored when set.",
-        ),
+        to: z.string().optional().describe(TO_DESCRIPTION),
+        from: z.string().optional().describe(FROM_DESCRIPTION),
+        subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
+        ...literalFilterParams,
+        cc: z.string().optional().describe(`Filter by Cc. ${SERVER_MATCH_CAVEAT}`),
+        bcc: z.string().optional().describe(`Filter by Bcc. ${SERVER_MATCH_CAVEAT}`),
+        text: z.string().optional().describe('Any text field (headers + body)'),
+        body: z.string().optional().describe('Body only'),
+        since: z
+          .string()
+          .optional()
+          .describe(
+            'Date filter: received on/after. Accepts ISO 8601, YYYY-MM-DD, or relative like "7d" / "yesterday"',
+          ),
+        before: z.string().optional().describe('Date filter: received strictly before'),
+        on: z.string().optional().describe('Date filter: received on specific date'),
+        sent_since: z
+          .string()
+          .optional()
+          .describe(
+            'Date header: sent on/after (differs from since which uses internal delivery date)',
+          ),
+        sent_before: z.string().optional().describe('Date header: sent before'),
+        seen: z.boolean().optional().describe('true = read only; false = unread only'),
+        flagged: z.boolean().optional().describe('true = flagged; false = unflagged'),
+        has_attachment: z
+          .boolean()
+          .optional()
+          .describe('Filter: true=has attachments, false=no attachments'),
+        larger_than: numeric(z.number().optional()).describe('Minimum email size in KB'),
+        smaller_than: numeric(z.number().optional()).describe('Maximum email size in KB'),
+        answered: z.boolean().optional().describe('Filter: true=replied, false=not replied'),
+        draft: z.boolean().optional(),
+        deleted: z.boolean().optional(),
+        keyword: z
+          .union([z.string(), z.array(z.string())])
+          .optional()
+          .describe('IMAP keyword/label (AND when array)'),
+        not_keyword: z.union([z.string(), z.array(z.string())]).optional(),
+        header: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe('Arbitrary header name/value match, e.g. {"X-Custom": "value"}'),
+        uids: z
+          .union([z.array(numeric(z.number())), z.string()])
+          .optional()
+          .describe('Specific UID ranges (array of numbers or IMAP sequence string like "1:100")'),
+        attachment_filename: z
+          .string()
+          .optional()
+          .describe(
+            'Filter by attachment filename substring (case-insensitive). Example: "lease" matches "signed_lease_v7.pdf".',
+          ),
+        attachment_mimetype: z
+          .string()
+          .optional()
+          .describe(
+            'Filter by MIME type regex (case-insensitive). Examples: "application/pdf", "image/.*".',
+          ),
+        facets: z
+          .array(z.enum(['sender', 'year', 'mailbox']))
+          .optional()
+          .describe(
+            'Return bucketed counts by sender/year/mailbox alongside the paginated results. ' +
+              'Useful for understanding large result sets. Skipped if match set exceeds 10000 UIDs.',
+          ),
+        gmail_raw: z
+          .string()
+          .optional()
+          .describe(
+            "Gmail accounts ONLY: pass Gmail search syntax (e.g. 'from:foo has:attachment') for dramatically faster server-side search. Other filters ignored when set.",
+          ),
+        preview: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Include a ~200-character body preview per message (default: false). On IMAP this reads the ' +
+              'first 1.5 KB of each message text part (one extra FETCH per page); Microsoft Graph ' +
+              'serves it at no extra cost.',
+          ),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async (params) => {
+      // Sans aucun critère, le SEARCH IMAP rend TOUT le dossier : la réponse
+      // ressemble à une recherche réussie alors qu'un nom de filtre mal
+      // orthographié (retiré en silence par le schéma) en est souvent la
+      // cause. On refuse explicitement (codefuturist 480df07).
+      if (!hasSearchCriterion(params)) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text' as const,
+              text:
+                'search_emails needs at least one search criterion: a non-empty query or a filter ' +
+                '(from, subject, since, seen, …). Nothing was searched. To browse a folder without ' +
+                'criteria, use list_emails; if you did pass a filter, check its name against the ' +
+                'tool schema — unknown parameters are dropped.',
+            },
+          ],
+        };
+      }
       try {
         const result = await imapService.searchEmails(params.account, params.query ?? '', {
           mailbox: params.mailbox,
           page: params.page,
           pageSize: params.pageSize,
+          deep: params.deep,
           to: params.to,
           from: params.from,
           subject: params.subject,
@@ -735,6 +863,7 @@ export default function registerEmailsTools(
           attachmentMimetype: params.attachment_mimetype,
           facets: params.facets,
           gmailRaw: params.gmail_raw,
+          preview: params.preview,
           ...literalFilterOptions(params),
         });
 
@@ -752,7 +881,7 @@ export default function registerEmailsTools(
           content: [
             {
               type: 'text' as const,
-              text: formatSearchResult(result, header, emptyMsg),
+              text: formatSearchResult(result, header, emptyMsg, params.preview),
             },
           ],
         };
@@ -773,72 +902,90 @@ export default function registerEmailsTools(
   // ---------------------------------------------------------------------------
   // search_all_accounts
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'search_all_accounts',
-    `Search emails across multiple accounts in parallel. Same filter set as search_emails ` +
-      `but fans out across N accounts and merges results sorted by date. Each result is tagged ` +
-      `with the account it came from. Partial failures are surfaced as warnings without failing ` +
-      `the whole call. Useful for "find X anywhere in my inboxes" queries across your email ecosystem. ` +
-      `IMAP and Microsoft Graph accounts can be mixed. ${COVERAGE_NOTE}`,
     {
-      query: z
-        .string()
-        .optional()
-        .default('')
-        .describe(
-          'Search keyword across subject + from + body (deep by default; omit to use filters only). ' +
-            'On a very large non-indexed folder a body scan is bounded and, if it cannot complete, ' +
-            'returns a flagged failure (never a silent zero) — narrow by date or subject:/from: and retry.',
+      description:
+        `Search emails across multiple accounts in parallel. Same filter set as search_emails ` +
+        `but fans out across N accounts and merges results sorted by date. Each result is tagged ` +
+        `with the account it came from. Partial failures are surfaced as warnings without failing ` +
+        `the whole call. Useful for "find X anywhere in my inboxes" queries across your email ecosystem. ` +
+        `Pass deep=false for a cheap header-only free-text query (subject + from + to, no body). ` +
+        `IMAP and Microsoft Graph accounts can be mixed. ${COVERAGE_NOTE}`,
+      inputSchema: z.object({
+        query: z
+          .string()
+          .optional()
+          .default('')
+          .describe(
+            'Search keyword across subject + from + body (deep by default; omit to use filters only). ' +
+              'On a very large non-indexed folder a body scan is bounded and, if it cannot complete, ' +
+              'returns a flagged failure (never a silent zero) — narrow by date or subject:/from: and retry.',
+          ),
+        deep: z
+          .boolean()
+          .optional()
+          .describe(
+            'How far `query` reaches. true/omitted = subject + from + body (default). ' +
+              'false = header-only (subject + from + to): no body term is sent, so the search stays ' +
+              'cheap on huge non-indexed folders. Does not affect the explicit body/text filters.',
+          ),
+        accounts: z
+          .array(z.string())
+          .optional()
+          .describe('Specific accounts to search (default: all accounts from list_accounts)'),
+        mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
+        page: numeric(z.number().int().min(1).default(1)).describe(
+          'Page number of the merged result set',
         ),
-      accounts: z
-        .array(z.string())
-        .optional()
-        .describe('Specific accounts to search (default: all accounts from list_accounts)'),
-      mailbox: z.string().default('INBOX').describe('Mailbox path (default: INBOX)'),
-      page: z.number().int().min(1).default(1).describe('Page number of the merged result set'),
-      pageSize: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .default(20)
-        .describe('Results per page (merged across accounts)'),
-      to: z.string().optional().describe(TO_DESCRIPTION),
-      from: z.string().optional().describe(FROM_DESCRIPTION),
-      subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
-      ...literalFilterParams,
-      cc: z.string().optional(),
-      bcc: z.string().optional(),
-      text: z.string().optional(),
-      body: z.string().optional(),
-      since: z.string().optional(),
-      before: z.string().optional(),
-      on: z.string().optional(),
-      sent_since: z.string().optional(),
-      sent_before: z.string().optional(),
-      seen: z.boolean().optional(),
-      flagged: z.boolean().optional(),
-      has_attachment: z.boolean().optional(),
-      larger_than: z.number().optional(),
-      smaller_than: z.number().optional(),
-      answered: z.boolean().optional(),
-      draft: z.boolean().optional(),
-      deleted: z.boolean().optional(),
-      keyword: z.union([z.string(), z.array(z.string())]).optional(),
-      not_keyword: z.union([z.string(), z.array(z.string())]).optional(),
-      header: z.record(z.string(), z.string()).optional(),
-      attachment_filename: z.string().optional(),
-      attachment_mimetype: z.string().optional(),
-      facets: z.array(z.enum(['sender', 'year', 'mailbox'])).optional(),
-      gmail_raw: z
-        .string()
-        .optional()
-        .describe(
-          'Gmail accounts ONLY (when targeted accounts include Gmail). Non-Gmail accounts in the ' +
-            'fan-out will error individually and appear in warnings.',
+        pageSize: numeric(z.number().int().min(1).max(100).default(20)).describe(
+          'Results per page (merged across accounts)',
         ),
+        to: z.string().optional().describe(TO_DESCRIPTION),
+        from: z.string().optional().describe(FROM_DESCRIPTION),
+        subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
+        ...literalFilterParams,
+        cc: z.string().optional(),
+        bcc: z.string().optional(),
+        text: z.string().optional(),
+        body: z.string().optional(),
+        since: z.string().optional(),
+        before: z.string().optional(),
+        on: z.string().optional(),
+        sent_since: z.string().optional(),
+        sent_before: z.string().optional(),
+        seen: z.boolean().optional(),
+        flagged: z.boolean().optional(),
+        has_attachment: z.boolean().optional(),
+        larger_than: numeric(z.number().optional()),
+        smaller_than: numeric(z.number().optional()),
+        answered: z.boolean().optional(),
+        draft: z.boolean().optional(),
+        deleted: z.boolean().optional(),
+        keyword: z.union([z.string(), z.array(z.string())]).optional(),
+        not_keyword: z.union([z.string(), z.array(z.string())]).optional(),
+        header: z.record(z.string(), z.string()).optional(),
+        attachment_filename: z.string().optional(),
+        attachment_mimetype: z.string().optional(),
+        facets: z.array(z.enum(['sender', 'year', 'mailbox'])).optional(),
+        gmail_raw: z
+          .string()
+          .optional()
+          .describe(
+            'Gmail accounts ONLY (when targeted accounts include Gmail). Non-Gmail accounts in the ' +
+              'fan-out will error individually and appear in warnings.',
+          ),
+        preview: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Include a ~200-character body preview per message (default: false). On IMAP accounts this ' +
+              'reads the first 1.5 KB of each message text part (one extra FETCH per account page); ' +
+              'Microsoft Graph serves it at no extra cost.',
+          ),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async (params) => {
       try {
         const accountNames =
@@ -862,6 +1009,7 @@ export default function registerEmailsTools(
           mailbox: params.mailbox,
           page: params.page,
           pageSize: params.pageSize,
+          deep: params.deep,
           to: params.to,
           from: params.from,
           subject: params.subject,
@@ -889,6 +1037,7 @@ export default function registerEmailsTools(
           attachmentMimetype: params.attachment_mimetype,
           facets: params.facets,
           gmailRaw: params.gmail_raw,
+          preview: params.preview,
           ...literalFilterOptions(params),
         });
 
@@ -907,7 +1056,7 @@ export default function registerEmailsTools(
           content: [
             {
               type: 'text' as const,
-              text: formatSearchResult(result, header, emptyMsg),
+              text: formatSearchResult(result, header, emptyMsg, params.preview),
             },
           ],
         };

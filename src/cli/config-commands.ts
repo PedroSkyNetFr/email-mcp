@@ -4,6 +4,7 @@
  * - config show  — display current config with masked passwords
  * - config path  — print config file path
  * - config init  — create a template config file
+ * - config validate — check the file statically (syntax, schema, typos, consistency)
  */
 
 import fs from 'node:fs/promises';
@@ -18,6 +19,7 @@ import {
   loadRawConfig,
   saveConfig,
 } from '../config/loader.js';
+import { formatValidationReport, validateConfigContent } from '../config/validate.js';
 import ensureInteractive from './guard.js';
 
 function printConfigUsage(): void {
@@ -28,6 +30,10 @@ Subcommands:
   edit    Edit global settings interactively
   path    Print config file path
   init    Create a template config file
+  validate
+          Check the config file without connecting: TOML syntax, schema,
+          unknown keys (with did-you-mean), cross-setting consistency.
+          Never prints secrets. Exit code 1 on errors (warnings allowed).
 `);
 }
 
@@ -165,8 +171,39 @@ async function editSettings(): Promise<void> {
   outro('Done!');
 }
 
+/**
+ * `config validate` : contrôle statique du fichier, sans résoudre les
+ * `*_command` ni se connecter (c'est le rôle de `email-mcp test`). Non
+ * interactif — utilisable en CI : code de sortie 1 s'il y a une erreur.
+ */
+async function validateConfig(): Promise<void> {
+  let content: string;
+  try {
+    content = await fs.readFile(CONFIG_FILE, 'utf-8');
+  } catch (err) {
+    const { code } = err as NodeJS.ErrnoException;
+    console.error(
+      code === 'ENOENT'
+        ? `No config file found at: ${CONFIG_FILE} — run 'email-mcp setup' or 'email-mcp config init' to create one.`
+        : `Cannot read ${CONFIG_FILE}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const report = validateConfigContent(content);
+  const lines = formatValidationReport(report, CONFIG_FILE);
+  lines.forEach((line) => {
+    console.log(line);
+  });
+  if (report.errorCount > 0) process.exitCode = 1;
+}
+
 export default async function runConfigCommand(subcommand?: string): Promise<void> {
   switch (subcommand) {
+    case 'validate':
+    case 'check':
+      await validateConfig();
+      return;
     case 'show':
       await showConfig();
       return;

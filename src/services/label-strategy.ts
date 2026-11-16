@@ -9,6 +9,7 @@
 
 import type { ImapFlow } from 'imapflow';
 import type { LabelInfo, LabelStrategyType } from '../types/index.js';
+import { imapCommand } from '../utils/imap-error.js';
 
 // ---------------------------------------------------------------------------
 // Strategy interface
@@ -50,12 +51,25 @@ function createProtonMailStrategy(): LabelStrategy {
       const targetPath = `${LABELS_PREFIX}${label}`;
       const lock = await client.getMailboxLock(mailbox);
       try {
-        const result = await client.messageCopy(emailId, targetPath, { uid: true });
+        const result = await imapCommand(`Adding label "${label}"`, async () =>
+          client.messageCopy(emailId, targetPath, { uid: true }),
+        );
         if (!result) {
           throw new Error(
             `Server rejected adding label "${label}" (COPY to ${targetPath} failed).`,
           );
         }
+      } catch (err) {
+        // Ici un libellé EST un dossier : un dossier cible absent est l'échec le
+        // plus courant, et il a un remède précis.
+        const text = err instanceof Error ? err.message : String(err);
+        if (/no such mailbox|does not exist|nonexistent|trycreate/i.test(text)) {
+          throw new Error(
+            `Label "${label}" does not exist on this account. Create it first with create_label.`,
+            { cause: err },
+          );
+        }
+        throw err;
       } finally {
         lock.release();
       }
@@ -82,7 +96,9 @@ function createProtonMailStrategy(): LabelStrategy {
       }
 
       // Find the email's UID inside the label folder and delete it
-      const labelLock = await client.getMailboxLock(labelPath);
+      const labelLock = await imapCommand(`Opening label folder "${labelPath}"`, async () =>
+        client.getMailboxLock(labelPath),
+      );
       try {
         const results = await client.search({ header: { 'message-id': messageId } }, { uid: true });
         if (!results || !Array.isArray(results) || results.length === 0) {
@@ -101,11 +117,15 @@ function createProtonMailStrategy(): LabelStrategy {
     },
 
     createLabel: async (client, name) => {
-      await client.mailboxCreate(`${LABELS_PREFIX}${name}`);
+      await imapCommand(`Creating label "${name}"`, async () =>
+        client.mailboxCreate(`${LABELS_PREFIX}${name}`),
+      );
     },
 
     deleteLabel: async (client, name) => {
-      await client.mailboxDelete(`${LABELS_PREFIX}${name}`);
+      await imapCommand(`Deleting label "${name}"`, async () =>
+        client.mailboxDelete(`${LABELS_PREFIX}${name}`),
+      );
     },
   };
 }
@@ -142,10 +162,9 @@ function createGmailStrategy(): LabelStrategy {
     addLabel: async (client, emailId, mailbox, label) => {
       const lock = await client.getMailboxLock(mailbox);
       try {
-        const result = await client.messageFlagsAdd(emailId, [label], {
-          uid: true,
-          useLabels: true,
-        });
+        const result = await imapCommand(`Adding label "${label}"`, async () =>
+          client.messageFlagsAdd(emailId, [label], { uid: true, useLabels: true }),
+        );
         if (!result) {
           throw new Error(`Server rejected adding label "${label}".`);
         }
@@ -157,10 +176,9 @@ function createGmailStrategy(): LabelStrategy {
     removeLabel: async (client, emailId, mailbox, label) => {
       const lock = await client.getMailboxLock(mailbox);
       try {
-        const result = await client.messageFlagsRemove(emailId, [label], {
-          uid: true,
-          useLabels: true,
-        });
+        const result = await imapCommand(`Removing label "${label}"`, async () =>
+          client.messageFlagsRemove(emailId, [label], { uid: true, useLabels: true }),
+        );
         if (!result) {
           throw new Error(`Server rejected removing label "${label}".`);
         }
@@ -170,11 +188,11 @@ function createGmailStrategy(): LabelStrategy {
     },
 
     createLabel: async (client, name) => {
-      await client.mailboxCreate(name);
+      await imapCommand(`Creating label "${name}"`, async () => client.mailboxCreate(name));
     },
 
     deleteLabel: async (client, name) => {
-      await client.mailboxDelete(name);
+      await imapCommand(`Deleting label "${name}"`, async () => client.mailboxDelete(name));
     },
   };
 }
@@ -213,7 +231,9 @@ function createKeywordStrategy(): LabelStrategy {
     addLabel: async (client, emailId, mailbox, label) => {
       const lock = await client.getMailboxLock(mailbox);
       try {
-        const result = await client.messageFlagsAdd(emailId, [label], { uid: true });
+        const result = await imapCommand(`Adding keyword "${label}"`, async () =>
+          client.messageFlagsAdd(emailId, [label], { uid: true }),
+        );
         if (!result) {
           throw new Error(`Server rejected adding keyword "${label}".`);
         }
@@ -225,7 +245,9 @@ function createKeywordStrategy(): LabelStrategy {
     removeLabel: async (client, emailId, mailbox, label) => {
       const lock = await client.getMailboxLock(mailbox);
       try {
-        const result = await client.messageFlagsRemove(emailId, [label], { uid: true });
+        const result = await imapCommand(`Removing keyword "${label}"`, async () =>
+          client.messageFlagsRemove(emailId, [label], { uid: true }),
+        );
         if (!result) {
           throw new Error(`Server rejected removing keyword "${label}".`);
         }

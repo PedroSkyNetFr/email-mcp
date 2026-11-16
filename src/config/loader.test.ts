@@ -122,6 +122,121 @@ describe('Config Loader', () => {
       await expect(loadConfig(badPath)).rejects.toThrow('No configuration found');
     });
 
+    // Avant : toute erreur de lecture était avalée en « No configuration found ».
+    it('reports a TOML syntax error with the file and the line, not "no configuration"', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        `${MINIMAL_TOML}
+[settings
+rate_limit = 5
+`,
+      );
+
+      const err = await loadConfig(configPath).then(
+        () => new Error('expected a rejection'),
+        (e: unknown) => e as Error,
+      );
+
+      expect(err.message).toContain(`TOML syntax error in ${configPath}`);
+      expect(err.message).toMatch(/line \d+/i);
+      expect(err.message).not.toContain('No configuration found');
+    });
+
+    // Régression : le message brut de smol-toml recopie les lignes voisines du
+    // fichier ; une erreur près d'un mot de passe le faisait apparaître en clair
+    // dans les journaux du client MCP.
+    it('never echoes a secret value next to a TOML syntax error', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        '[[accounts]]\nname = "x"\npassword = "S3CRET-VALUE\nport = 1\n',
+      );
+
+      const err = await loadConfig(configPath).then(
+        () => new Error('expected a rejection'),
+        (e: unknown) => e as Error,
+      );
+
+      expect(err.message).toContain(`TOML syntax error in ${configPath}`);
+      expect(err.message).toMatch(/line 3/);
+      expect(err.message).toContain('password = ***');
+      expect(err.message).not.toContain('S3CRET-VALUE');
+    });
+
+    it('reports schema errors by field path and account name', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        MINIMAL_TOML.replace('host = "imap.example.com"', 'host = "imap.example.com"\nport = 0'),
+      );
+
+      const err = await loadConfig(configPath).then(
+        () => new Error('expected a rejection'),
+        (e: unknown) => e as Error,
+      );
+
+      expect(err.message).toContain(`Invalid configuration in ${configPath}`);
+      expect(err.message).toContain('accounts.0.imap.port (account "test")');
+      expect(err.message).not.toContain('No configuration found');
+    });
+
+    it('reads [settings.scheduler] sent_retention_days', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        `[settings.scheduler]
+sent_retention_days = 30
+${MINIMAL_TOML}`,
+      );
+      const config = await loadConfig(configPath);
+      expect(config.settings.sentRetentionDays).toBe(30);
+    });
+
+    describe('reply_language (14)', () => {
+      const twoAccounts = (settings: string, secondAccountExtra: string) => `${settings}
+${MINIMAL_TOML}
+[[accounts]]
+name = "pro"
+email = "pro@example.com"
+password = "secret"
+${secondAccountExtra}
+
+[accounts.imap]
+host = "imap.example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+`;
+
+      it('defaults to French when nothing is set', async () => {
+        const configPath = path.join(tmpDir, 'config.toml');
+        await fs.writeFile(configPath, MINIMAL_TOML);
+        const config = await loadConfig(configPath);
+        expect(config.settings.replyLanguage).toBe('fr');
+        expect(config.accounts[0].replyLanguage).toBe('fr');
+      });
+
+      it('[settings] reply_language applies to every account, an account can override it', async () => {
+        const configPath = path.join(tmpDir, 'config.toml');
+        await fs.writeFile(
+          configPath,
+          twoAccounts('[settings]\nreply_language = "en"', 'reply_language = "fr"'),
+        );
+        const config = await loadConfig(configPath);
+        expect(config.accounts.map((a) => [a.name, a.replyLanguage])).toEqual([
+          ['test', 'en'],
+          ['pro', 'fr'],
+        ]);
+      });
+
+      it('refuses an unknown language', async () => {
+        const configPath = path.join(tmpDir, 'config.toml');
+        await fs.writeFile(configPath, `[settings]\nreply_language = "de"\n${MINIMAL_TOML}`);
+        await expect(loadConfig(configPath)).rejects.toThrow(/reply_language/);
+      });
+    });
+
     it('normalizes snake_case to camelCase', async () => {
       const toml = `
 [[accounts]]

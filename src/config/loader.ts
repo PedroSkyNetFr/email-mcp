@@ -13,11 +13,13 @@ import type {
   AppConfig,
   HookRule,
   OAuth2Config,
+  ReplyLanguage,
   SearchPreset,
 } from '../types/index.js';
 import type { RawAccountConfig, RawAppConfig, RawSearchPreset } from './schema.js';
 import { AppConfigFileSchema } from './schema.js';
 import { resolveSecretCommands } from './secret-command.js';
+import { safeExcerpt } from './validate.js';
 import { CONFIG_FILE, xdg } from './xdg.js';
 
 // ---------------------------------------------------------------------------
@@ -139,14 +141,69 @@ function loadFromEnv(): RawAppConfig | null {
 // TOML file loader
 // ---------------------------------------------------------------------------
 
+/**
+ * Lit et analyse le fichier TOML.
+ *
+ * Ne renvoie `null` que si le fichier n'existe vraiment pas — le signal « pas
+ * encore configuré » que les appelants traduisent en consignes d'installation.
+ * Tout autre échec lève : une erreur de syntaxe ou un fichier illisible étaient
+ * auparavant avalés dans ce même `null`, si bien qu'une faute d'un caractère
+ * était annoncée « No configuration found » et envoyait l'utilisateur créer un
+ * fichier qu'il avait déjà.
+ */
 async function loadFromFile(filePath: string = CONFIG_FILE): Promise<RawAppConfig | null> {
+  let content: string;
   try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    const parsed = parseTOML(content);
-    return parsed as unknown as RawAppConfig;
-  } catch {
-    return null;
+    content = await fs.readFile(filePath, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`Cannot read config file at ${filePath}: ${detail}`);
   }
+
+  try {
+    return parseTOML(content) as unknown as RawAppConfig;
+  } catch (err) {
+    // smol-toml fournit la ligne et la colonne (propriétés de TomlError). Son
+    // message recopie AUSSI les lignes voisines du fichier — mot de passe
+    // compris si l'erreur tombe à côté — et ce texte finit dans les journaux
+    // du client MCP. On ne garde donc que la cause (premier paragraphe) et la
+    // ligne fautive passée par `safeExcerpt`, qui masque la valeur des clés
+    // sensibles (même règle que `config validate`).
+    const message = err instanceof Error ? err.message : String(err);
+    const cause = message.split(/\n\s*\n/)[0]?.trim() ?? message;
+    const { line, column } = err as { line?: unknown; column?: unknown };
+    const where =
+      typeof line === 'number'
+        ? ` (line ${line}${typeof column === 'number' ? `, column ${column}` : ''})`
+        : '';
+    const faulty = typeof line === 'number' ? content.split(/\r?\n/)[line - 1] : undefined;
+    const excerpt = faulty === undefined ? undefined : safeExcerpt(faulty);
+    const shown = excerpt === undefined ? '' : `\n  ${line}: ${excerpt}`;
+    throw new Error(`TOML syntax error in ${filePath}${where}: ${cause}${shown}`);
+  }
+}
+
+/**
+ * Valide une configuration brute en citant chaque champ fautif par son chemin
+ * (`accounts.0.imap.port`). Un `.parse()` nu remontait un bloc ZodError brut
+ * comme erreur fatale du processus, sans dire quel fichier ni quel compte.
+ */
+function validateRawConfig(raw: unknown, source: string): RawAppConfig {
+  const result = AppConfigFileSchema.safeParse(raw);
+  if (result.success) return result.data;
+
+  const accounts = (raw as { accounts?: { name?: unknown }[] } | null)?.accounts;
+  const lines = result.error.issues.map((issue) => {
+    const where = issue.path.length > 0 ? issue.path.join('.') : '(root)';
+    // « accounts.2 » ne dit rien : nommer le compte quand il a un nom.
+    const [section, index] = issue.path;
+    const accountName =
+      section === 'accounts' && typeof index === 'number' ? accounts?.[index]?.name : undefined;
+    const label = typeof accountName === 'string' ? ` (account "${accountName}")` : '';
+    return `  - ${where}${label}: ${issue.message}`;
+  });
+  throw new Error(`Invalid configuration in ${source}:\n${lines.join('\n')}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +288,16 @@ function normalizeOAuth2(
   };
 }
 
-function normalizeAccount(raw: RawAccountConfig): AccountConfig {
+/**
+ * Convertit un compte brut (snake_case, secrets déjà résolus) en `AccountConfig`.
+ * Exportée pour `account add/edit`, qui teste la connexion du compte saisi avec
+ * exactement la forme que le serveur utilisera.
+ */
+export function normalizeAccount(
+  raw: RawAccountConfig,
+  /** `reply_language` de [settings], appliqué quand le compte n'en fixe pas. */
+  defaultReplyLanguage: ReplyLanguage = 'fr',
+): AccountConfig {
   return {
     name: raw.name,
     email: raw.email,
@@ -264,6 +330,8 @@ function normalizeAccount(raw: RawAccountConfig): AccountConfig {
     signaturePath: raw.signature_path,
     backend: raw.backend,
     signatureDefault: raw.signature_default,
+    maxMessageMb: raw.max_message_mb,
+    replyLanguage: raw.reply_language ?? defaultReplyLanguage,
   };
 }
 
@@ -355,6 +423,10 @@ function normalizeConfig(raw: RawAppConfig): AppConfig {
       // tightens it: a client entry can make one instance read-only, never
       // lift a read_only set in the file.
       readOnly: raw.settings.read_only || process.env.MCP_EMAIL_READ_ONLY === 'true',
+      replyLanguage: raw.settings.reply_language ?? 'fr',
+      sentRetentionDays: raw.settings.scheduler?.sent_retention_days,
+      // Défaut 10 min (DEFAULT_DUPLICATE_WINDOW_MINUTES de services/send-guard.ts).
+      duplicateSendWindowMinutes: raw.settings.duplicate_send_window_minutes ?? 10,
       watcher: {
         enabled: raw.settings.watcher.enabled,
         folders: raw.settings.watcher.folders,
@@ -382,7 +454,9 @@ function normalizeConfig(raw: RawAppConfig): AppConfig {
         calendarConfirm: raw.settings.hooks.calendar_confirm ?? true,
       },
     },
-    accounts: raw.accounts.map(normalizeAccount),
+    accounts: raw.accounts.map((account) =>
+      normalizeAccount(account, raw.settings.reply_language ?? 'fr'),
+    ),
     searches: (raw.searches ?? []).map(normalizeSearchPreset),
   };
 }
@@ -411,7 +485,7 @@ export async function loadRawConfig(configPath?: string): Promise<RawAppConfig> 
   if (!fileConfig) {
     throw new Error(`No config file found at: ${filePath}`);
   }
-  return AppConfigFileSchema.parse(fileConfig);
+  return validateRawConfig(fileConfig, filePath);
 }
 
 /**
@@ -422,14 +496,14 @@ export async function loadConfig(configPath?: string): Promise<AppConfig> {
   // 1. Try environment variables first
   const envConfig = loadFromEnv();
   if (envConfig) {
-    const validated = AppConfigFileSchema.parse(envConfig);
+    const validated = validateRawConfig(envConfig, 'MCP_EMAIL_* environment variables');
     return normalizeConfig(await resolveSecretCommands(applyAccountFilter(validated)));
   }
 
   // 2. Fall back to TOML config file
   const fileConfig = await loadFromFile(configPath);
   if (fileConfig) {
-    const validated = AppConfigFileSchema.parse(fileConfig);
+    const validated = validateRawConfig(fileConfig, configPath ?? CONFIG_FILE);
     return normalizeConfig(await resolveSecretCommands(applyAccountFilter(validated)));
   }
 
@@ -463,7 +537,12 @@ export function generateTemplate(): string {
 
 [settings]
 rate_limit = 10  # max emails per minute per account
-read_only = false  # true: send nothing (scheduled emails included), change no mailbox
+read_only = false  # true: send nothing (scheduled emails included), change no mailbox (hook actions included)
+# reply_language = "fr"  # "fr" | "en": quote line and forward header (overridable per account)
+# duplicate_send_window_minutes = 10  # refuse an identical send within N minutes (probable retry); 0 = off
+
+# [settings.scheduler]
+# sent_retention_days = 30  # days of sent scheduled-email history kept (default 30; 0 = keep all)
 
 # [settings.watcher]
 # enabled = false        # enable IMAP IDLE real-time monitoring

@@ -156,7 +156,11 @@ export default class SchedulerService {
         subject: `[Scheduled: ${sendAtDate.toLocaleString()}] ${options.subject}`,
         body: options.body,
         cc: options.cc,
+        bcc: options.bcc,
         html: options.html,
+        // Le brouillon miroir porte les mêmes en-têtes de fil que l'envoi.
+        inReplyTo: options.inReplyTo,
+        references: options.references,
       });
       scheduled.draftMessageId = String(draftResult.id);
       scheduled.draftMailbox = draftResult.mailbox;
@@ -408,10 +412,19 @@ export default class SchedulerService {
           cc: scheduled.cc,
           bcc: scheduled.bcc,
           html: scheduled.html,
+          // Une réponse planifiée doit rejoindre son fil : sans ces en-têtes,
+          // elle arrivait comme un nouveau message (sur IMAP comme sur Graph).
+          inReplyTo: scheduled.inReplyTo,
+          references: scheduled.references,
         });
       } catch (err) {
-        // Not sent: back in the queue for another attempt, or failed for good
-        scheduled.status = scheduled.attempts >= MAX_ATTEMPTS ? 'failed' : 'pending';
+        // Not sent: back in the queue for another attempt, or failed for good.
+        // Exception : un envoi à l'issue INCONNUE (UncertainSendError côté
+        // Graph — coupure, 5xx ou 429 sur /send) a pu partir ; le remettre en
+        // file l'enverrait peut-être une seconde fois. Il passe en échec, avec
+        // la consigne de vérifier Éléments envoyés.
+        const uncertain = err instanceof Error && err.name === 'UncertainSendError';
+        scheduled.status = uncertain || scheduled.attempts >= MAX_ATTEMPTS ? 'failed' : 'pending';
         scheduled.lastError = errorMessage(err);
         await SchedulerService.writeEntry(filePath, scheduled);
         errors.push(scheduled.lastError);

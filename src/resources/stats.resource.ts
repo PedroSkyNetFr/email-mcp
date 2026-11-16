@@ -4,8 +4,8 @@
  * Dynamic resource providing lightweight daily inbox statistics.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
+import { ResourceTemplate } from '@modelcontextprotocol/server';
 
 import type ConnectionManager from '../connections/manager.js';
 import type { IMailService } from '../services/mail-service.types.js';
@@ -18,7 +18,7 @@ export default function registerStatsResource(
   const names = connections.getAccountNames();
   const accounts = names.map((name) => connections.getAccount(name));
 
-  server.resource(
+  server.registerResource(
     'stats',
     new ResourceTemplate('email://{account}/stats', {
       list: async () => ({
@@ -36,17 +36,24 @@ export default function registerStatsResource(
     async (uri, { account }) => {
       const accountName = account as string;
 
-      // Lightweight STATUS query (fast, no envelope fetch)
-      const stats = await imapService.getEmailStats(accountName, 'INBOX', 'day');
+      // Compteurs bon marché (STATUS sur IMAP, propriétés du dossier sur
+      // Graph) : `inbox_total` est désormais le vrai total du dossier, et non
+      // plus une copie du nombre de messages du jour.
+      const mailbox = await imapService.getMailboxSnapshot(accountName, 'INBOX');
 
-      const quota = await imapService.getQuota(accountName);
+      // Le quota n'existe que sur IMAP (extension QUOTA) : un compte Graph, ou
+      // un serveur qui refuse GETQUOTAROOT, rend simplement la ressource sans
+      // quota au lieu de la faire échouer entière.
+      const quota = await imapService.getQuota(accountName).catch(() => null);
 
       const snapshot = {
         account: accountName,
         date: new Date().toISOString().split('T')[0],
-        inbox_total: stats.totalReceived,
-        inbox_unread: stats.unreadCount,
-        inbox_today: stats.totalReceived,
+        inbox_total: mailbox.total,
+        inbox_unread: mailbox.unread,
+        // `null` (et non 0) quand le serveur n'a pas donné le compte du jour :
+        // la clé reste présente et l'absence se distingue d'une journée vide.
+        inbox_today: mailbox.receivedToday ?? null,
         quota: quota ?? undefined,
       };
 

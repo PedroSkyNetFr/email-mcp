@@ -39,23 +39,61 @@ const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 
 export default class OAuthService {
   /**
+   * Rafraîchissements en cours, indexés par l'objet de configuration OAuth2
+   * qu'ils concernent.
+   *
+   * Plusieurs appelants partagent un même compte : client IMAP, transport SMTP,
+   * veille IDLE, client Graph. À l'expiration du jeton, ils arrivent ensemble
+   * et lançaient chacun leur propre rafraîchissement. Ce n'est pas qu'une
+   * requête gaspillée : un fournisseur qui fait tourner le jeton de
+   * rafraîchissement à chaque usage invalide la copie des perdants, et
+   * Microsoft limite le débit des rafraîchissements — le compte pouvait finir
+   * incapable de s'authentifier. Les appelants concurrents reçoivent désormais
+   * la même promesse. `WeakMap` : une configuration abandonnée n'est pas
+   * retenue en mémoire.
+   */
+  private pendingRefreshes = new WeakMap<OAuth2Config, Promise<string>>();
+
+  /**
    * Get a valid access token, refreshing if expired.
    */
-  // eslint-disable-next-line class-methods-use-this
   async getAccessToken(oauth2: OAuth2Config): Promise<string> {
     if (!OAuthService.isTokenExpired(oauth2) && oauth2.accessToken) {
       return oauth2.accessToken;
     }
 
-    const result = await OAuthService.refreshAccessToken(oauth2);
+    const inFlight = this.pendingRefreshes.get(oauth2);
+    if (inFlight) return inFlight;
 
-    // Cache on the config object (in-memory only)
-    Object.assign(oauth2, {
-      accessToken: result.accessToken,
-      tokenExpiry: Date.now() + result.expiresIn * 1000,
-    });
+    const refresh = (async () => {
+      const result = await OAuthService.refreshAccessToken(oauth2);
 
-    return result.accessToken;
+      // Cache on the config object (in-memory only). Les appelants partagent
+      // cet objet : un rafraîchissement sert tous les détenteurs du compte.
+      Object.assign(oauth2, {
+        accessToken: result.accessToken,
+        tokenExpiry: Date.now() + result.expiresIn * 1000,
+        // Rotation du jeton de rafraîchissement (Microsoft en renvoie souvent
+        // un nouveau) : le garder pour la suite du processus. L'ancien reste
+        // en général valable jusqu'à son expiration, mais le nouveau est celui
+        // que le fournisseur attend. Il n'est PAS réécrit dans config.toml —
+        // aucun mécanisme de stockage de jetons n'existe ; après redémarrage,
+        // le jeton du fichier (ou de la *_command) est relu.
+        ...(result.refreshToken ? { refreshToken: result.refreshToken } : {}),
+      });
+
+      return result.accessToken;
+    })();
+
+    this.pendingRefreshes.set(oauth2, refresh);
+    try {
+      return await refresh;
+    } finally {
+      // Retirée sur échec aussi : un rafraîchissement refusé une fois (débit
+      // limité, coupure) ne doit pas faire échouer toutes les tentatives
+      // suivantes jusqu'au redémarrage.
+      this.pendingRefreshes.delete(oauth2);
+    }
   }
 
   /**
@@ -71,7 +109,7 @@ export default class OAuthService {
    */
   static async refreshAccessToken(
     oauth2: OAuth2Config,
-  ): Promise<{ accessToken: string; expiresIn: number }> {
+  ): Promise<{ accessToken: string; expiresIn: number; refreshToken?: string }> {
     const endpoints = OAuthService.getProviderEndpoints(oauth2);
 
     const body = new URLSearchParams({
@@ -89,17 +127,26 @@ export default class OAuthService {
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`OAuth2 token refresh failed (${response.status}): ${text}`);
+      // `invalid_grant` : jeton de rafraîchissement expiré, révoqué, ou
+      // consentement retiré — le seul remède est une nouvelle autorisation.
+      // Le dire évite de chercher du côté du mot de passe ou du réseau.
+      const hint = /invalid_grant/i.test(text)
+        ? ' — the refresh token is expired or revoked: re-authorize (pnpm oauth:setup) ' +
+          'and store the new refresh token on the account.'
+        : '';
+      throw new Error(`OAuth2 token refresh failed (${response.status}): ${text}${hint}`);
     }
 
     const data = (await response.json()) as {
       access_token: string;
       expires_in: number;
+      refresh_token?: string;
     };
 
     return {
       accessToken: data.access_token,
       expiresIn: data.expires_in,
+      ...(data.refresh_token ? { refreshToken: data.refresh_token } : {}),
     };
   }
 

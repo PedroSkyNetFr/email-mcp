@@ -15,6 +15,7 @@ import path from 'node:path';
 import { loadConfig } from '../config/loader.js';
 import createMailBackends from '../services/mail-backends.js';
 import SchedulerService from '../services/scheduler.service.js';
+import { DEFAULT_SENT_RETENTION_DAYS, pruneSentHistory } from '../services/scheduler-retention.js';
 import {
   installWindowsTask,
   removeWindowsTask,
@@ -43,6 +44,9 @@ function checkCommandLine(): string[] {
 async function createSchedulerService(): Promise<{
   scheduler: SchedulerService;
   close: () => Promise<void>;
+  /** Jours d'historique d'envois conservés (0 = tout garder). */
+  sentRetentionDays: number;
+  readOnly: boolean;
 }> {
   const config = await loadConfig();
   // The server's own wiring, so a Graph account sends through Graph here too
@@ -56,6 +60,8 @@ async function createSchedulerService(): Promise<{
     // Open IMAP/SMTP connections would keep the process alive long after the
     // check — and a periodic task waits for one check to end before the next.
     close: async () => connections.closeAll(),
+    sentRetentionDays: config.settings.sentRetentionDays ?? DEFAULT_SENT_RETENTION_DAYS,
+    readOnly: config.settings.readOnly,
   };
 }
 
@@ -64,12 +70,18 @@ async function createSchedulerService(): Promise<{
 // ---------------------------------------------------------------------------
 
 async function runCheck(): Promise<void> {
-  const { scheduler, close } = await createSchedulerService();
+  const { scheduler, close, sentRetentionDays, readOnly } = await createSchedulerService();
   let result: Awaited<ReturnType<SchedulerService['checkAndSend']>>;
   try {
     result = await scheduler.checkAndSend();
   } finally {
     await close();
+  }
+
+  // La tâche périodique de l'OS purge l'historique à chacun de ses passages
+  // (ménage : un échec ne fait pas échouer la vérification).
+  if (!readOnly) {
+    await pruneSentHistory({ retentionDays: sentRetentionDays }).catch(() => undefined);
   }
 
   if (result.sent > 0) {

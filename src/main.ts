@@ -6,14 +6,14 @@
  *   stdio     Run as MCP server over stdio (default)
  *   setup     Interactive account setup wizard
  *   test      Test IMAP/SMTP connections
- *   config    Config management (show, path, init)
+ *   config    Config management (show, path, init, validate)
  *   scheduler Email scheduling management
  */
 
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 
 import { loadConfig } from './config/loader.js';
-import { bindServer, markInitialized, mcpLog } from './logging.js';
+import { mcpLog } from './logging.js';
 import registerAllPrompts from './prompts/register.js';
 import registerAllResources from './resources/register.js';
 import createServer, { PKG_VERSION } from './server.js';
@@ -23,9 +23,14 @@ import LocalCalendarService from './services/local-calendar.service.js';
 import createMailBackends from './services/mail-backends.js';
 import RemindersService from './services/reminders.service.js';
 import SchedulerService from './services/scheduler.service.js';
+import {
+  DEFAULT_SENT_RETENTION_DAYS,
+  startSentHistoryPruning,
+} from './services/scheduler-retention.js';
 import { SearchPresetRegistry } from './services/search-presets.js';
 import TemplateService from './services/template.service.js';
 import WatcherService from './services/watcher.service.js';
+import { createShutdown, installShutdownTriggers } from './shutdown.js';
 import registerAllTools from './tools/register.js';
 
 const HELP = `
@@ -40,7 +45,7 @@ Commands:
   setup       Alias for 'account add'
   test        Test connections for all or a specific account
   install     Register/unregister with MCP clients (Claude, Cursor, …)
-  config      Config management (show, edit, path, init)
+  config      Config management (show, edit, path, init, validate)
   scheduler   Email scheduling management (check, list, install, uninstall, status)
   notify      Test and diagnose desktop notifications
   help        Show this help message
@@ -61,6 +66,7 @@ Examples:
   email-mcp config edit              # Edit global settings
   email-mcp config path              # Print config file path
   email-mcp config init              # Create template config
+  email-mcp config validate          # Check syntax, schema, typos, consistency (no connection)
   email-mcp scheduler check          # Send overdue scheduled emails
   email-mcp scheduler install        # Install OS periodic check
   email-mcp notify test              # Send a test notification
@@ -71,7 +77,7 @@ async function runServer(): Promise<void> {
   const config = await loadConfig();
 
   // IMAP/SMTP or Microsoft Graph, per account — the same wiring as the CLI.
-  const { connections, imapService, graphService, mailService, sendService } =
+  const { connections, imapService, graphService, mailService, sendService, oauthService } =
     createMailBackends(config);
   const templateService = new TemplateService();
   const calendarService = new CalendarService();
@@ -82,12 +88,19 @@ async function runServer(): Promise<void> {
     mailService,
     config.accounts.map((account) => account.name),
   );
-  const watcherService = new WatcherService(config.settings.watcher, config.accounts);
-  const hooksService = new HooksService(config.settings.hooks, imapService);
+  // La veille IDLE reçoit le service de jetons du serveur : un compte OAuth2 s'y
+  // authentifie avec un vrai jeton d'accès. Elle écarte d'elle-même les comptes
+  // Graph, qui n'ont pas de session IMAP.
+  const watcherService = new WatcherService(config.settings.watcher, config.accounts, oauthService);
+  // Les hooks ne reçoivent d'événements que de la veille IDLE, donc de comptes
+  // IMAP : ils gardent le service IMAP. En lecture seule, leurs actions sur la
+  // boîte (libellés, drapeaux, marquer lu) sont désactivées dès la construction.
+  const hooksService = new HooksService(config.settings.hooks, imapService, {
+    readOnly: config.settings.readOnly,
+  });
   const searchPresetRegistry = new SearchPresetRegistry(config.searches);
 
   const server = createServer();
-  bindServer(server);
 
   registerAllTools(
     server,
@@ -105,9 +118,19 @@ async function runServer(): Promise<void> {
     searchPresetRegistry,
     graphService,
   );
-  registerAllResources(server, connections, imapService, templateService, schedulerService);
+  // Les ressources passent par le routeur, comme les outils : `stats`,
+  // `unread` et `mailboxes` d'un compte Graph partaient sur IMAP — un compte
+  // dont la session IMAP n'existe pas — et échouaient.
+  registerAllResources(server, connections, mailService, templateService, schedulerService);
   registerAllPrompts(server);
 
+  // Transport stdio branché à la main (SDK v2) plutôt que `serveStdio()` : la
+  // connexion reste une session 2025 classique (`initialize` puis
+  // `notifications/initialized`), la seule que parle Claude Desktop. Les
+  // révisions 2024-10-07 à 2025-11-25 restent négociées. `serveStdio()`
+  // ajouterait l'ère 2026-07-28, mais sans poignée de main — donc sans
+  // `oninitialized` pour lancer les services ci-dessous — et sans
+  // `createMessage` poussé du serveur, dont dépend le tri des hooks.
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
@@ -121,9 +144,10 @@ async function runServer(): Promise<void> {
 
   const lowLevelServer = server.server;
 
-  lowLevelServer.oninitialized = () => {
-    markInitialized();
+  // Arrêt de la purge d'historique, remplacé quand elle démarre.
+  let stopSentPruning: () => void = () => {};
 
+  lowLevelServer.oninitialized = () => {
     // eslint-disable-next-line no-void
     void (async () => {
       try {
@@ -137,8 +161,16 @@ async function runServer(): Promise<void> {
         // Sends overdue scheduled emails now and every minute — unless the
         // server is read-only, in which case it logs why and does nothing.
         await schedulerService.start({ readOnly: config.settings.readOnly });
+
+        // Historique des envois programmés borné dans le temps (même règle
+        // que le planificateur : rien en lecture seule).
+        if (!config.settings.readOnly) {
+          stopSentPruning = startSentHistoryPruning(
+            config.settings.sentRetentionDays ?? DEFAULT_SENT_RETENTION_DAYS,
+          );
+        }
       } catch (err) {
-        // Log to stderr — mcpLog may not be safe if init itself errored
+        // Écriture directe sur stderr : ne dépend d'aucun module qui aurait pu échouer.
         process.stderr.write(
           `[email-mcp] post-init error: ${err instanceof Error ? err.message : String(err)}\n`,
         );
@@ -146,17 +178,24 @@ async function runServer(): Promise<void> {
     })();
   };
 
-  // Graceful shutdown
-  const shutdown = async () => {
-    schedulerService.stop();
-    hooksService.stop();
-    await watcherService.stop();
-    await connections.closeAll();
-    await server.close();
-  };
+  // Arrêt propre, idempotent et borné à 5 s (voir shutdown.ts). Sous Windows,
+  // Claude Desktop ferme stdin au lieu d'envoyer un signal : sans les
+  // déclencheurs stdin/transport, le processus restait orphelin, connexions
+  // IMAP ouvertes.
+  const shutdown = createShutdown([
+    { name: 'scheduler', run: () => schedulerService.stop() },
+    { name: 'sent-history pruning', run: () => stopSentPruning() },
+    { name: 'hooks', run: () => hooksService.stop() },
+    { name: 'watcher', run: async () => watcherService.stop() },
+    { name: 'connections', run: async () => connections.closeAll() },
+    { name: 'transport', run: async () => server.close() },
+  ]);
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  installShutdownTriggers(shutdown);
+  // Fermeture du transport MCP (le client a raccroché) : même arrêt.
+  lowLevelServer.onclose = () => {
+    shutdown('transport closed').catch(() => {});
+  };
 }
 
 async function main(): Promise<void> {

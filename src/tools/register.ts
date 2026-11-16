@@ -5,7 +5,7 @@
  * In read-only mode, write tools are not registered at all.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import type ConnectionManager from '../connections/manager.js';
 import type CalendarService from '../services/calendar.service.js';
 import type GraphService from '../services/graph/graph.service.js';
@@ -15,6 +15,7 @@ import type { IMailService } from '../services/mail-service.types.js';
 import type RemindersService from '../services/reminders.service.js';
 import type SchedulerService from '../services/scheduler.service.js';
 import type { SearchPresetRegistry } from '../services/search-presets.js';
+import SendGuard, { DEFAULT_DUPLICATE_WINDOW_MINUTES } from '../services/send-guard.js';
 import type { ISendService } from '../services/send-service.types.js';
 import type TemplateService from '../services/template.service.js';
 import type WatcherService from '../services/watcher.service.js';
@@ -25,6 +26,7 @@ import registerAttachmentTools from './attachments.tool.js';
 import registerBulkTools from './bulk.tool.js';
 import registerCalendarTools from './calendar.tool.js';
 import registerContactsTools from './contacts.tool.js';
+import registerCrossAccountCopyTool from './cross-account-copy.tool.js';
 import registerCrossAccountMoveTool from './cross-account-move.tool.js';
 import registerDraftTools from './drafts.tool.js';
 import registerEmailsTools from './emails.tool.js';
@@ -89,18 +91,28 @@ export default function registerAllTools(
 
   // Write tools — skipped in read-only mode
   if (!readOnly) {
-    registerSendTools(server, smtpService, imapService);
+    // Une seule garde anti-doublon pour tous les outils d'envoi : un même
+    // message envoyé par send_email puis apply_template est le même doublon.
+    // L'état est persistant (répertoire d'état XDG), il survit aux
+    // redémarrages du serveur par Claude Desktop.
+    const sendGuard = new SendGuard({
+      windowMinutes: config.settings.duplicateSendWindowMinutes ?? DEFAULT_DUPLICATE_WINDOW_MINUTES,
+    });
+    registerSendTools(server, smtpService, imapService, sendGuard);
     registerManageTools(server, imapService);
     registerLabelTools(server, imapService);
     registerBulkTools(server, imapService);
-    registerDraftTools(server, imapService, smtpService);
-    registerCrossAccountMoveTool(server, connections, config);
+    registerDraftTools(server, imapService, smtpService, sendGuard);
+    // Source IMAP ou Graph, destination IMAP (mêmes briques que la copie).
+    registerCrossAccountMoveTool(server, connections, config, imapService);
+    // Copie non destructive : source IMAP ou Graph, destination IMAP.
+    registerCrossAccountCopyTool(server, connections, config, imapService);
     // Server-side rules and the automatic reply change mailbox state, so they
     // belong with the write tools; each refuses a non-Graph account itself.
     registerExchangeTools(server, graphService, config);
     registerFolderTools(server, imapService);
-    registerTemplateWriteTools(server, templateService, imapService, smtpService);
-    registerSchedulerTools(server, schedulerService);
+    registerTemplateWriteTools(server, templateService, imapService, smtpService, sendGuard);
+    registerSchedulerTools(server, schedulerService, sendGuard);
     // Can send new-email metadata to a webhook and rewrite config.toml
     registerWatcherWriteTools(server, hooksService);
   }

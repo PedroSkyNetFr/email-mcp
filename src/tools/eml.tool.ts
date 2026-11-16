@@ -19,11 +19,12 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
 import type { IMailService } from '../services/mail-service.types.js';
+import { numeric } from './numeric-param.js';
 import {
   FROM_DESCRIPTION,
   literalFilterOptions,
@@ -40,30 +41,33 @@ export default function registerEmlTools(
   // ---------------------------------------------------------------------------
   // save_email — un message
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'save_email',
-    'Save one email to disk as a .eml file — the exact RFC822 source, so attachments, formatting, ' +
-      'DKIM signatures and the full Received chain are preserved and the file reopens in any mail ' +
-      'client. Use this to archive a message, keep evidence, or hand a message to another tool. ' +
-      '(export_search writes metadata as CSV/NDJSON; this writes the message itself.) ' +
-      'Default destination is ~/Downloads/<date>_<subject>_<id>.eml.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      emailId: z.string().describe('Email ID from list_emails or search_emails'),
-      mailbox: z.string().default('INBOX').describe('Mailbox containing the email'),
-      destination: z
-        .string()
-        .optional()
-        .describe(
-          'Absolute file path OR absolute directory. If a directory, the filename is derived ' +
-            'from the message date, subject and id. Default: ~/Downloads/',
-        ),
-      overwrite: z
-        .boolean()
-        .default(false)
-        .describe('Allow overwriting an existing file; otherwise auto-suffix (name-1.eml)'),
+      description:
+        'Save one email to disk as a .eml file — the exact RFC822 source, so attachments, formatting, ' +
+        'DKIM signatures and the full Received chain are preserved and the file reopens in any mail ' +
+        'client. Use this to archive a message, keep evidence, or hand a message to another tool. ' +
+        '(export_search writes metadata as CSV/NDJSON; this writes the message itself.) ' +
+        'Default destination is ~/Downloads/<date>_<subject>_<id>.eml.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        emailId: z.string().describe('Email ID from list_emails or search_emails'),
+        mailbox: z.string().default('INBOX').describe('Mailbox containing the email'),
+        destination: z
+          .string()
+          .optional()
+          .describe(
+            'Absolute file path OR absolute directory. If a directory, the filename is derived ' +
+              'from the message date, subject and id. Default: ~/Downloads/',
+          ),
+        overwrite: z
+          .boolean()
+          .default(false)
+          .describe('Allow overwriting an existing file; otherwise auto-suffix (name-1.eml)'),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async ({ account, emailId, mailbox, destination, overwrite }) => {
       try {
         const target = destination ?? join(homedir(), 'Downloads');
@@ -110,61 +114,64 @@ export default function registerEmlTools(
   // ---------------------------------------------------------------------------
   // save_emails_from_search — balayage d'une recherche
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'save_emails_from_search',
-    'Run any search and save every matching message as a .eml file into a dated folder under ' +
-      '~/Downloads/ (or a caller-supplied folder). Use for mailbox archival, year-end exports, ' +
-      'or handing a whole thread/sender history to another tool. Per-message failures are ' +
-      'collected and reported, they do not abort the batch. The response reports `matched` (what ' +
-      'the SEARCH returned) next to `files_saved` (what was written): when the two differ, or ' +
-      'when matched is lower than you expected, the query is the suspect — see the caveat on the ' +
-      'from/to/subject filters.',
     {
-      account: z.string().optional().describe('Single-account mode'),
-      accounts: z
-        .array(z.string())
-        .optional()
-        .describe('Cross-account fan-out; defaults to every configured account'),
-      mailbox: z.string().default('INBOX'),
-      query: z.string().optional().default(''),
-      to: z.string().optional().describe(TO_DESCRIPTION),
-      from: z.string().optional().describe(FROM_DESCRIPTION),
-      subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
-      ...literalFilterParams,
-      cc: z.string().optional(),
-      bcc: z.string().optional(),
-      text: z.string().optional(),
-      body: z.string().optional(),
-      since: z.string().optional(),
-      before: z.string().optional(),
-      on: z.string().optional(),
-      sent_since: z.string().optional(),
-      sent_before: z.string().optional(),
-      seen: z.boolean().optional(),
-      flagged: z.boolean().optional(),
-      has_attachment: z.boolean().optional(),
-      larger_than: z.number().optional(),
-      smaller_than: z.number().optional(),
-      answered: z.boolean().optional(),
-      draft: z.boolean().optional(),
-      deleted: z.boolean().optional(),
-      keyword: z.union([z.string(), z.array(z.string())]).optional(),
-      not_keyword: z.union([z.string(), z.array(z.string())]).optional(),
-      header: z.record(z.string(), z.string()).optional(),
-      attachment_filename: z.string().optional(),
-      attachment_mimetype: z.string().optional(),
-      gmail_raw: z.string().optional(),
-      max_emails: z.number().int().min(1).max(10000).default(500),
-      destination: z
-        .string()
-        .optional()
-        .describe('Destination folder. Default: ~/Downloads/email-messages-<ts>/'),
-      organize_by: z
-        .enum(['flat', 'date', 'sender', 'account'])
-        .default('flat')
-        .describe('Subfolder structure under destination'),
+      description:
+        'Run any search and save every matching message as a .eml file into a dated folder under ' +
+        '~/Downloads/ (or a caller-supplied folder). Use for mailbox archival, year-end exports, ' +
+        'or handing a whole thread/sender history to another tool. Per-message failures are ' +
+        'collected and reported, they do not abort the batch. The response reports `matched` (what ' +
+        'the SEARCH returned) next to `files_saved` (what was written): when the two differ, or ' +
+        'when matched is lower than you expected, the query is the suspect — see the caveat on the ' +
+        'from/to/subject filters.',
+      inputSchema: z.object({
+        account: z.string().optional().describe('Single-account mode'),
+        accounts: z
+          .array(z.string())
+          .optional()
+          .describe('Cross-account fan-out; defaults to every configured account'),
+        mailbox: z.string().default('INBOX'),
+        query: z.string().optional().default(''),
+        to: z.string().optional().describe(TO_DESCRIPTION),
+        from: z.string().optional().describe(FROM_DESCRIPTION),
+        subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
+        ...literalFilterParams,
+        cc: z.string().optional(),
+        bcc: z.string().optional(),
+        text: z.string().optional(),
+        body: z.string().optional(),
+        since: z.string().optional(),
+        before: z.string().optional(),
+        on: z.string().optional(),
+        sent_since: z.string().optional(),
+        sent_before: z.string().optional(),
+        seen: z.boolean().optional(),
+        flagged: z.boolean().optional(),
+        has_attachment: z.boolean().optional(),
+        larger_than: numeric(z.number().optional()),
+        smaller_than: numeric(z.number().optional()),
+        answered: z.boolean().optional(),
+        draft: z.boolean().optional(),
+        deleted: z.boolean().optional(),
+        keyword: z.union([z.string(), z.array(z.string())]).optional(),
+        not_keyword: z.union([z.string(), z.array(z.string())]).optional(),
+        header: z.record(z.string(), z.string()).optional(),
+        attachment_filename: z.string().optional(),
+        attachment_mimetype: z.string().optional(),
+        gmail_raw: z.string().optional(),
+        max_emails: numeric(z.number().int().min(1).max(10000).default(500)),
+        destination: z
+          .string()
+          .optional()
+          .describe('Destination folder. Default: ~/Downloads/email-messages-<ts>/'),
+        organize_by: z
+          .enum(['flat', 'date', 'sender', 'account'])
+          .default('flat')
+          .describe('Subfolder structure under destination'),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async (params) => {
       try {
         const tsSlug = new Date().toISOString().replace(/[:.]/g, '-');

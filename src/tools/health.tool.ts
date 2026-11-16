@@ -4,7 +4,7 @@
  * Connection health diagnostics for email accounts.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
@@ -17,16 +17,19 @@ export default function registerHealthTools(
   connections: ConnectionManager,
   imapService: IMailService,
 ): void {
-  server.tool(
+  server.registerTool(
     'check_health',
-    'Check connection health, quota, and capabilities for email accounts. Also reports which ' +
-      'build of the server is actually running (version, source, build date) — check this first ' +
-      'when a documented tool seems to be missing: a stdio MCP server keeps serving the code it ' +
-      'was started with, so an old compiled build looks exactly like a feature that does not exist.',
     {
-      account: z.string().optional().describe('Account name (checks all accounts if omitted)'),
+      description:
+        'Check connection health, quota, and capabilities for email accounts. Also reports which ' +
+        'build of the server is actually running (version, source, build date) — check this first ' +
+        'when a documented tool seems to be missing: a stdio MCP server keeps serving the code it ' +
+        'was started with, so an old compiled build looks exactly like a feature that does not exist.',
+      inputSchema: z.object({
+        account: z.string().optional().describe('Account name (checks all accounts if omitted)'),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async ({ account }) => {
       const names = account ? [account] : connections.getAccountNames();
 

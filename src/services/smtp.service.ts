@@ -4,58 +4,63 @@
  * No MCP dependency — fully unit-testable.
  */
 
-import { randomUUID } from 'node:crypto';
-import MailComposer from 'nodemailer/lib/mail-composer';
 import type { IConnectionManager } from '../connections/types.js';
 import type RateLimiter from '../safety/rate-limiter.js';
-import { sanitizeTemplateVariable } from '../safety/validation.js';
-import type { AccountConfig, SendResult } from '../types/index.js';
+import type {
+  AccountConfig,
+  DraftCleanupResult,
+  Email,
+  ReplyDraftResult,
+  SendResult,
+  SentCopyResult,
+} from '../types/index.js';
+import { htmlToPlainText } from '../utils/html-text.js';
+import type { ComposeOptions } from '../utils/mime-headers.js';
+import { buildReferences, composeMessage } from '../utils/mime-headers.js';
+import {
+  DEFAULT_REPLY_LANGUAGE,
+  forwardAsHtml,
+  forwardAsText,
+  quoteOriginalAsHtml,
+  quoteOriginalAsText,
+} from '../utils/quote.js';
+import { forwardSubject, replySubject } from '../utils/subject-prefix.js';
 import type { ResolvedAttachment } from './attachment-resolver.js';
+import { realAttachments, uniqueAttachmentNames } from './attachment-select.js';
 import type ImapService from './imap.service.js';
+import { assertMessageSize, explainSmtpSizeRejection } from './send-limit.js';
 import { applyAccountSignature, shouldAppendSignature } from './signature-loader.js';
 
 // ---------------------------------------------------------------------------
 // Helpers (must be defined before SmtpService)
 // ---------------------------------------------------------------------------
 
+/**
+ * Plafond PAR PIÈCE quand on reprend les pièces de l'original (réponse avec
+ * includeAttachments, transfert). Plus haut que les 5 Mo par défaut de
+ * `downloadAttachment`, qui visent à ne pas faire transiter un gros fichier en
+ * base64 dans une RÉPONSE d'outil MCP : ici les octets vont directement dans
+ * le message composé et n'atteignent jamais le modèle. La taille totale du
+ * message est contrôlée à part (send-limit.ts).
+ */
+export const ORIGINAL_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+
 function isGmailAccount(account: AccountConfig): boolean {
   return account.imap.host.includes('gmail.com') || account.smtp.host.includes('gmail.com');
 }
 
-function encodeRfc2047(value: string): string {
-  if (/^[\x20-\x7E]*$/.test(value)) return value;
-  return `=?UTF-8?B?${Buffer.from(value, 'utf-8').toString('base64')}?=`;
+function fromAddress(account: AccountConfig): string {
+  return account.fullName ? `"${account.fullName}" <${account.email}>` : account.email;
 }
 
-function buildRawMessage(options: {
-  from: string;
-  to: string;
-  subject: string;
-  body: string;
-  cc?: string;
-  messageId: string;
-  inReplyTo?: string;
-  references?: string;
-  html?: boolean;
-}): string {
-  const lines: string[] = [];
-  lines.push(`From: ${options.from}`);
-  lines.push(`To: ${options.to}`);
-  if (options.cc) lines.push(`Cc: ${options.cc}`);
-  lines.push(`Subject: ${encodeRfc2047(options.subject)}`);
-  lines.push(`Date: ${new Date().toUTCString()}`);
-  const mid = options.messageId || `<${randomUUID()}@email-mcp.local>`;
-  lines.push(`Message-ID: ${mid}`);
-  lines.push('MIME-Version: 1.0');
-  if (options.inReplyTo) lines.push(`In-Reply-To: ${options.inReplyTo}`);
-  if (options.references) lines.push(`References: ${options.references}`);
-  const contentType = options.html ? 'text/html; charset=utf-8' : 'text/plain; charset=utf-8';
-  lines.push(`Content-Type: ${contentType}`);
-  lines.push('Content-Transfer-Encoding: 8bit');
-  lines.push('');
-  const normalizedBody = options.body.replace(/\r?\n/g, '\r\n');
-  lines.push(normalizedBody);
-  return lines.join('\r\n');
+/**
+ * Parties du corps pour MailComposer. Un corps HTML reçoit toujours une
+ * alternative text/plain générée : sans elle, le message part en text/html
+ * seul (nodemailer 10 a retiré `text: 'auto'`), ce que les filtres anti-spam
+ * pénalisent et que les clients en mode texte affichent balises comprises.
+ */
+function bodyParts(body: string, html: boolean): { html: string; text: string } | { text: string } {
+  return html ? { html: body, text: htmlToPlainText(body) } : { text: body };
 }
 
 /**
@@ -141,6 +146,43 @@ export function normalizeEnvelopeRecipients(addrs: string[]): string[] {
   ).list;
 }
 
+/**
+ * Destinataires d'une réponse composée localement (IMAP / SMTP), comme le font
+ * les clients de messagerie (RFC 5322 §3.6.2) et Graph `/reply` :
+ *
+ * - destinataire principal : toutes les adresses de Reply-To quand l'original
+ *   en porte un, sinon From ;
+ * - `replyAll` : principal + To de l'original en To, Cc de l'original en Cc,
+ *   moins les adresses du compte (`selfAddresses`), sans tenir compte de la
+ *   casse. Si ce retrait vide To (réponse à tous à un message qu'on s'est
+ *   envoyé à soi seul), le principal est gardé tel quel plutôt que de
+ *   composer une réponse sans destinataire.
+ *
+ * Une adresse présente à la fois en To et en Cc n'est gardée qu'en To ; les
+ * doublons (casse différente comprise) sont fusionnés. Exportée pour les tests.
+ */
+export function computeReplyRecipients(
+  original: Pick<Email, 'from' | 'to' | 'cc' | 'replyTo'>,
+  selfAddresses: string[],
+  replyAll: boolean,
+): { to: string[]; cc: string[] } {
+  const replyTo = (original.replyTo ?? []).map((a) => a.address).filter(Boolean);
+  const primary = replyTo.length > 0 ? replyTo : [original.from.address];
+  if (!replyAll) return { to: normalizeEnvelopeRecipients(primary), cc: [] };
+
+  const self = new Set(selfAddresses.map((a) => a.trim().toLowerCase()));
+  const notSelf = (address: string) => !self.has(address.trim().toLowerCase());
+  let toList = normalizeEnvelopeRecipients(
+    [...primary, ...original.to.map((a) => a.address)].filter(notSelf),
+  );
+  if (toList.length === 0) toList = normalizeEnvelopeRecipients(primary);
+  const toKeys = new Set(toList.map((a) => a.toLowerCase()));
+  const ccList = normalizeEnvelopeRecipients(
+    (original.cc ?? []).map((a) => a.address).filter(notSelf),
+  ).filter((a) => !toKeys.has(a.toLowerCase()));
+  return { to: toList, cc: ccList };
+}
+
 export default class SmtpService {
   constructor(
     private connections: IConnectionManager,
@@ -163,6 +205,13 @@ export default class SmtpService {
       html?: boolean;
       attachments?: ResolvedAttachment[];
       appendSignature?: boolean;
+      /**
+       * Message-ID auquel ce message répond (envoi planifié d'une réponse).
+       * Posé avec References pour que le message rejoigne son fil.
+       */
+      inReplyTo?: string;
+      /** Chaîne References du fil ; défaut : `[inReplyTo]`. */
+      references?: string[];
     },
   ): Promise<SendResult> {
     this.checkRateLimit(accountName);
@@ -186,47 +235,27 @@ export default class SmtpService {
     // deliberately NOT placed in mailOptions — we send the raw message, so
     // nodemailer would not strip a Bcc header for us; the blind recipients ride
     // only in the SMTP envelope below.
-    const mailOptions = {
-      from: account.fullName ? `"${account.fullName}" <${account.email}>` : account.email,
+    const mailOptions: ComposeOptions = {
+      from: fromAddress(account),
       to: toAddrs.join(', '),
       cc: ccAddrs.length > 0 ? ccAddrs.join(', ') : undefined,
       subject: options.subject,
-      ...(signed.html ? { html: signed.body } : { text: signed.body }),
+      ...(options.inReplyTo
+        ? {
+            inReplyTo: options.inReplyTo,
+            references: buildReferences(options.inReplyTo, options.references),
+          }
+        : {}),
+      ...bodyParts(signed.body, signed.html),
       ...(signed.attachments.length ? { attachments: signed.attachments } : {}),
     };
 
-    const rawMessage = await new Promise<Buffer>((resolve, reject) => {
-      new MailComposer(mailOptions).compile().build((err: Error | null, buf: Buffer) => {
-        if (err) reject(err);
-        else resolve(buf);
-      });
+    return this.composeAndTransmit(accountName, account, transport, {
+      mailOptions,
+      recipients: [...toAddrs, ...ccAddrs, ...bccAddrs],
+      attachments: signed.attachments,
+      what: 'email',
     });
-
-    // Build the SMTP envelope explicitly — nodemailer cannot derive it from the
-    // opaque raw bytes. The RCPT TO list covers every To + Cc + Bcc recipient,
-    // de-duped case-insensitively.
-    const envelope = {
-      from: account.email,
-      to: normalizeEnvelopeRecipients([...toAddrs, ...ccAddrs, ...bccAddrs]),
-    };
-
-    if (envelope.to.length === 0) {
-      // The tool schema requires `to` (minItems 1); guard anyway so we never
-      // hand SMTP an empty RCPT TO list.
-      throw new Error('Cannot send email: no recipients (To/Cc/Bcc all empty)');
-    }
-
-    const result = await transport.sendMail({ envelope, raw: rawMessage });
-
-    // Append the SAME raw bytes to Sent — "one raw message, sent and stored".
-    // This also fixes the previously lossy Sent copy (attachment-blind
-    // buildRawMessage path).
-    await this.appendToSentFolder(accountName, rawMessage);
-
-    return {
-      messageId: result.messageId ?? '',
-      status: 'sent',
-    };
   }
 
   // -------------------------------------------------------------------------
@@ -243,114 +272,200 @@ export default class SmtpService {
       html?: boolean;
       includeAttachments?: boolean;
       appendSignature?: boolean;
+      /**
+       * Cite l'original sous la réponse (défaut : true), comme le font les
+       * clients de bureau et Graph `/reply`. false : corps seul.
+       */
+      quoteOriginal?: boolean;
     },
   ): Promise<SendResult> {
     this.checkRateLimit(accountName);
 
-    const account = this.connections.getAccount(accountName);
-    const original = await this.imapService.getEmail(accountName, options.emailId, options.mailbox);
+    const reply = await this.composeReply(accountName, options, 'reply');
+    const transport = await this.connections.getSmtpTransport(accountName);
 
-    // Build recipient list
-    const to = [original.from.address];
-    const cc: string[] = [];
+    // Build the raw message once — same bytes sent via SMTP and stored in Sent folder
+    const mailOptions: ComposeOptions = {
+      from: fromAddress(reply.account),
+      to: reply.to.join(', '),
+      cc: reply.cc.length > 0 ? reply.cc.join(', ') : undefined,
+      subject: reply.subject,
+      inReplyTo: reply.inReplyTo,
+      references: reply.references.join(' '),
+      ...bodyParts(reply.body, reply.html),
+      ...(reply.attachments.length > 0 ? { attachments: reply.attachments } : {}),
+    };
 
-    if (options.replyAll) {
-      // Add all original To recipients except ourselves
-      original.to
-        .filter((addr) => addr.address !== account.email)
-        .forEach((addr) => {
-          to.push(addr.address);
-        });
-      // Add CC recipients except ourselves
-      (original.cc ?? [])
-        .filter((addr) => addr.address !== account.email)
-        .forEach((addr) => {
-          cc.push(addr.address);
-        });
+    // When sending a pre-composed raw message, nodemailer cannot derive the SMTP
+    // envelope from the (opaque) raw bytes — it would compute an empty recipient
+    // list and throw "No recipients defined". The envelope is passed explicitly
+    // (composeAndTransmit) so the RCPT TO list covers every To + Cc recipient.
+    const result = await this.composeAndTransmit(accountName, reply.account, transport, {
+      mailOptions,
+      recipients: [...reply.to, ...reply.cc],
+      attachments: reply.attachments,
+      what: 'reply',
+    });
+    return SmtpService.withWarnings(result, reply.warnings);
+  }
+
+  /**
+   * Enregistre une réponse dans Brouillons SANS l'envoyer (outil `reply_draft`).
+   *
+   * Composée exactement comme `replyToEmail` (même {@link composeReply} :
+   * destinataires, sujet « Re: », In-Reply-To / References, citation, signature,
+   * pièces de l'original), puis déposée par `ImapService.saveDraft`, qui garde
+   * l'en-tête Bcc — un brouillon n'a pas d'enveloppe SMTP. Rien ne part : ni
+   * SMTP, ni quota d'envoi consommé. Le brouillon s'envoie ensuite avec
+   * `send_draft` ou se réécrit avec `update_draft`.
+   */
+  async saveReplyDraft(
+    accountName: string,
+    options: {
+      emailId: string;
+      mailbox?: string;
+      body: string;
+      replyAll?: boolean;
+      html?: boolean;
+      includeAttachments?: boolean;
+      appendSignature?: boolean;
+      quoteOriginal?: boolean;
+      /** Pièces supplémentaires, déjà résolues. */
+      attachments?: ResolvedAttachment[];
+      /** Destinataires cachés, conservés dans l'en-tête Bcc du brouillon. */
+      bcc?: string[];
+    },
+  ): Promise<ReplyDraftResult> {
+    const reply = await this.composeReply(accountName, options, 'draft a reply');
+    const saved = await this.imapService.saveDraft(accountName, {
+      to: reply.to,
+      cc: reply.cc,
+      bcc: options.bcc,
+      subject: reply.subject,
+      body: reply.body,
+      html: reply.html,
+      inReplyTo: reply.inReplyTo,
+      references: reply.references,
+      attachments: reply.attachments,
+      // La signature est déjà dans `reply.body` : saveDraft ne doit pas
+      // l'ajouter une seconde fois (son défaut suit signature_default).
+      appendSignature: false,
+    });
+    const warnings = [...reply.warnings];
+    if (!saved.id) {
+      warnings.push(
+        'The server did not report the UID of the saved draft (no UIDPLUS): find it with ' +
+          `list_emails on "${saved.mailbox}" before calling send_draft or update_draft.`,
+      );
     }
+    return {
+      id: saved.id,
+      mailbox: saved.mailbox,
+      subject: reply.subject,
+      to: reply.to,
+      cc: reply.cc,
+      warnings,
+    };
+  }
+
+  /**
+   * Compose une réponse à `options.emailId`, sans rien transmettre. Partagé
+   * par l'envoi (`replyToEmail`) et le brouillon (`saveReplyDraft`) pour que
+   * les deux ne puissent pas diverger : une réponse enregistrée puis envoyée
+   * doit être identique à une réponse envoyée directement.
+   */
+  private async composeReply(
+    accountName: string,
+    options: {
+      emailId: string;
+      mailbox?: string;
+      body: string;
+      replyAll?: boolean;
+      html?: boolean;
+      includeAttachments?: boolean;
+      appendSignature?: boolean;
+      quoteOriginal?: boolean;
+      attachments?: ResolvedAttachment[];
+    },
+    context: 'reply' | 'draft a reply',
+  ): Promise<{
+    account: AccountConfig;
+    to: string[];
+    cc: string[];
+    subject: string;
+    inReplyTo: string | undefined;
+    references: string[];
+    body: string;
+    html: boolean;
+    attachments: ResolvedAttachment[];
+    warnings: string[];
+  }> {
+    const account = this.connections.getAccount(accountName);
+    const mailbox = options.mailbox ?? 'INBOX';
+    const original = await this.imapService.getEmail(accountName, options.emailId, mailbox);
+
+    // Destinataires : Reply-To prioritaire sur From, soi-même retiré en
+    // réponse à tous (voir computeReplyRecipients). Le compte n'a pas d'alias
+    // déclarés dans la config : seule son adresse principale est « soi ».
+    const { to: toList, cc: ccList } = computeReplyRecipients(
+      original,
+      [account.email],
+      options.replyAll === true,
+    );
 
     // Build threading headers
     const references = [...(original.references ?? []), original.messageId].filter(Boolean);
 
-    const subject = original.subject.startsWith('Re:')
-      ? original.subject
-      : `Re: ${original.subject}`;
+    const subject = replySubject(original.subject);
 
-    const transport = await this.connections.getSmtpTransport(accountName);
-
-    const fromAddr = account.fullName ? `"${account.fullName}" <${account.email}>` : account.email;
-
-    // Fetch attachment binaries from IMAP when requested (parallel downloads)
-    const fetchAttachment = async (filename: string) =>
-      this.imapService.downloadAttachment(
-        accountName,
-        options.emailId,
-        options.mailbox ?? 'INBOX',
-        filename,
-      );
-
-    const attachments: { filename: string; content: Buffer; contentType: string }[] = [];
-    if (options.includeAttachments && original.attachments.length > 0) {
-      const results = await Promise.allSettled(
-        original.attachments.map(async (meta) => fetchAttachment(meta.filename)),
-      );
-      results.forEach((result, i) => {
-        if (result.status === 'rejected') {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[reply_email] Skipping attachment "${original.attachments[i].filename}":`,
-            result.reason,
-          );
-        } else {
-          attachments.push({
-            filename: result.value.filename,
-            content: Buffer.from(result.value.contentBase64, 'base64'),
-            contentType: result.value.mimeType,
-          });
-        }
-      });
-    }
+    // Pièces de l'original : stricte, comme pour un transfert — l'appelant les
+    // a demandées, un envoi qui en perdrait une en silence serait trompeur.
+    const fetched = options.includeAttachments
+      ? await this.fetchOriginalAttachments(
+          accountName,
+          original,
+          options.emailId,
+          mailbox,
+          context,
+        )
+      : { attachments: [], warnings: [] };
 
     // Optional signature: append the HTML below the body + inline (cid) images.
+    // La signature se place sous la réponse et AU-DESSUS de la citation.
     const signed = await applyAccountSignature(
       account,
-      { body: options.body, html: options.html, attachments },
+      {
+        body: options.body,
+        html: options.html,
+        attachments: [...fetched.attachments, ...(options.attachments ?? [])],
+      },
       options.appendSignature,
     );
 
-    // Build the raw message once — same bytes sent via SMTP and stored in Sent folder
-    const mailOptions = {
-      from: fromAddr,
-      to: to.join(', '),
-      cc: cc.length > 0 ? cc.join(', ') : undefined,
-      subject,
-      inReplyTo: original.messageId,
-      references: references.join(' '),
-      ...(signed.html ? { html: signed.body } : { text: signed.body }),
-      ...(signed.attachments.length > 0 ? { attachments: signed.attachments } : {}),
-    };
-
-    const rawMessage = await new Promise<Buffer>((resolve, reject) => {
-      new MailComposer(mailOptions).compile().build((err: Error | null, buf: Buffer) => {
-        if (err) reject(err);
-        else resolve(buf);
-      });
-    });
-
-    // When sending a pre-composed raw message, nodemailer cannot derive the SMTP
-    // envelope from the (opaque) raw bytes — it would compute an empty recipient
-    // list and throw "No recipients defined". Pass the envelope explicitly so the
-    // RCPT TO list covers every To + Cc recipient.
-    const result = await transport.sendMail({
-      envelope: { from: account.email, to: [...to, ...cc] },
-      raw: rawMessage,
-    });
-
-    await this.appendToSentFolder(accountName, rawMessage);
+    // Citation de l'original, au format du message (HTML dès qu'une signature
+    // a forcé le HTML). En HTML, l'original est cité en texte échappé.
+    let { body } = signed;
+    if (options.quoteOriginal !== false) {
+      const lang = account.replyLanguage ?? DEFAULT_REPLY_LANGUAGE;
+      body += signed.html
+        ? quoteOriginalAsHtml(original, lang)
+        : quoteOriginalAsText(original, lang);
+    }
 
     return {
-      messageId: result.messageId ?? '',
-      status: 'sent',
+      account,
+      to: toList,
+      cc: ccList,
+      subject,
+      inReplyTo: original.messageId || undefined,
+      references,
+      body,
+      html: signed.html,
+      // Doublons de noms (pièces de l'original + pièces ajoutées) renommés
+      // « nom (2).ext » : le destinataire distingue ce que l'original ne
+      // distinguait que par numéro de partie.
+      attachments: uniqueAttachmentNames(signed.attachments),
+      warnings: fetched.warnings,
     };
   }
 
@@ -358,6 +473,18 @@ export default class SmtpService {
   // Forward
   // -------------------------------------------------------------------------
 
+  /**
+   * Forward a message, carrying its attachments across by default (wgs4 9d6df7b).
+   *
+   * Attachment handling is strict: a forward's attachments are usually the
+   * whole point of forwarding, so a fetch failure throws instead of quietly
+   * transmitting a gutted message. Pass `includeAttachments: false` for a
+   * body-only forward.
+   *
+   * Le message est composé UNE fois en octets bruts : les mêmes octets partent
+   * en SMTP et sont copiés dans Envoyés (l'ancienne copie, reconstruite à part
+   * en text/plain seul, perdait pièces et mise en forme).
+   */
   async forwardEmail(
     accountName: string,
     options: {
@@ -367,93 +494,209 @@ export default class SmtpService {
       body?: string;
       cc?: string[];
       appendSignature?: boolean;
+      /** Reprendre les pièces jointes de l'original (défaut : true). */
+      includeAttachments?: boolean;
+      /**
+       * Ajouter une partie HTML reprenant le HTML de l'original (défaut :
+       * false — texte seul, original HTML converti en texte lisible).
+       */
+      html?: boolean;
     },
   ): Promise<SendResult> {
     this.checkRateLimit(accountName);
 
     const account = this.connections.getAccount(accountName);
-    const original = await this.imapService.getEmail(accountName, options.emailId, options.mailbox);
+    const mailbox = options.mailbox ?? 'INBOX';
+    const original = await this.imapService.getEmail(accountName, options.emailId, mailbox);
 
-    const subject = original.subject.startsWith('Fwd:')
-      ? original.subject
-      : `Fwd: ${original.subject}`;
-
-    // Build forwarded message body
-    const forwardHeader = [
-      '',
-      '---------- Forwarded message ----------',
-      `From: ${original.from.name ? `${original.from.name} <${original.from.address}>` : original.from.address}`,
-      `Date: ${original.date}`,
-      `Subject: ${original.subject}`,
-      `To: ${original.to.map((a) => a.address).join(', ')}`,
-      '',
-    ].join('\n');
-
-    const originalBody = original.bodyText ?? original.bodyHtml ?? '';
-    const fullBody = (options.body ?? '') + forwardHeader + originalBody;
+    const subject = forwardSubject(original.subject);
 
     const transport = await this.connections.getSmtpTransport(accountName);
 
-    const fromAddr = account.fullName ? `"${account.fullName}" <${account.email}>` : account.email;
+    const fetched =
+      options.includeAttachments === false
+        ? { attachments: [], warnings: [] }
+        : await this.fetchOriginalAttachments(
+            accountName,
+            original,
+            options.emailId,
+            mailbox,
+            'forward',
+          );
 
-    // With a signature, switch to an HTML message: HTML-escape the plain-text
-    // forward (so its `<`/`&` and line breaks render correctly) and append the
-    // signature with its inline (cid) images. Composed once → raw bytes are both
-    // transmitted and stored in Sent (mirrors sendEmail).
-    if (shouldAppendSignature(account, options.appendSignature)) {
-      const htmlForward = `<div>${sanitizeTemplateVariable(fullBody, true).replace(/\r?\n/g, '<br>')}</div>`;
+    // Une signature force le HTML (comme ailleurs) ; sinon c'est `html` qui
+    // décide. La signature se place sous la note, au-dessus du message transféré.
+    const signing = shouldAppendSignature(account, options.appendSignature);
+    const asHtml = options.html === true || signing;
+    // Langue de l'en-tête « Message transféré » (réglage reply_language).
+    const lang = account.replyLanguage ?? DEFAULT_REPLY_LANGUAGE;
+
+    let parts: { html: string; text: string } | { text: string };
+    let signatureAttachments: ResolvedAttachment[] = [];
+    if (asHtml) {
       const signed = await applyAccountSignature(
         account,
-        { body: htmlForward, html: true, attachments: [] },
-        true,
+        { body: options.body ?? '', html: false },
+        options.appendSignature,
       );
-      const ccAddrs = options.cc ?? [];
-      const mailOptions = {
-        from: fromAddr,
-        to: options.to.join(', '),
-        cc: ccAddrs.length > 0 ? ccAddrs.join(', ') : undefined,
-        subject,
-        html: signed.body,
-        ...(signed.attachments.length > 0 ? { attachments: signed.attachments } : {}),
+      signatureAttachments = signed.attachments;
+      const noteText = signed.html ? htmlToPlainText(signed.body) : options.body;
+      parts = {
+        html: forwardAsHtml(signed.html ? signed.body : options.body, original, signed.html, lang),
+        // L'alternative texte reprend la note (signature comprise) et l'original
+        // converti — pas une conversion du HTML complet, qui perdrait la
+        // structure de l'en-tête de transfert.
+        text: forwardAsText(noteText, original, lang),
       };
-      const rawMessage = await new Promise<Buffer>((resolve, reject) => {
-        new MailComposer(mailOptions).compile().build((err: Error | null, buf: Buffer) => {
-          if (err) reject(err);
-          else resolve(buf);
-        });
-      });
-      const signedResult = await transport.sendMail({
-        envelope: { from: account.email, to: [...options.to, ...ccAddrs] },
-        raw: rawMessage,
-      });
-      await this.appendToSentFolder(accountName, rawMessage);
-      return { messageId: signedResult.messageId ?? '', status: 'sent' };
+    } else {
+      // Texte seul : l'original HTML est converti en texte lisible, jamais
+      // collé brut (ses balises s'affichaient telles quelles).
+      parts = { text: forwardAsText(options.body, original, lang) };
     }
 
-    const result = await transport.sendMail({
-      from: fromAddr,
+    const attachments = uniqueAttachmentNames([...fetched.attachments, ...signatureAttachments]);
+    const ccAddrs = options.cc ?? [];
+    const mailOptions: ComposeOptions = {
+      from: fromAddress(account),
       to: options.to.join(', '),
-      cc: options.cc?.join(', '),
+      cc: ccAddrs.length > 0 ? ccAddrs.join(', ') : undefined,
       subject,
-      text: fullBody,
-    });
+      ...parts,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    };
 
-    await this.appendToSentFolder(
-      accountName,
-      buildRawMessage({
-        from: fromAddr,
-        to: options.to.join(', '),
-        subject,
-        body: fullBody,
-        cc: options.cc?.join(', '),
-        messageId: result.messageId ?? '',
-      }),
+    const result = await this.composeAndTransmit(accountName, account, transport, {
+      mailOptions,
+      recipients: [...options.to, ...ccAddrs],
+      attachments,
+      what: 'forward',
+    });
+    return SmtpService.withWarnings(result, fetched.warnings);
+  }
+
+  /**
+   * Télécharge les pièces jointes de l'original (réponse avec
+   * includeAttachments, transfert).
+   *
+   * Chaque pièce est désignée par son numéro de partie MIME : deux pièces de
+   * même nom (les `image001.png` des signatures Outlook) sont TOUTES reprises,
+   * avec leurs propres octets — autrefois seule la première l'était, avec un
+   * avertissement. À l'envoi, les doublons sont renommés « image001 (2).png »
+   * (`uniqueAttachmentNames`) pour que le destinataire les distingue.
+   *
+   * Les images inline à cid restent derrière, comme avant qu'elles soient
+   * listées : la réponse et le transfert ne reprennent pas le HTML qui les
+   * référence, elles deviendraient des pièces jointes parasites.
+   *
+   * Stricte : le moindre échec lève une erreur qui nomme chaque pièce, et rien
+   * n'est envoyé.
+   */
+  private async fetchOriginalAttachments(
+    accountName: string,
+    original: Pick<Email, 'attachments'>,
+    emailId: string,
+    mailbox: string,
+    context: 'reply' | 'draft a reply' | 'forward',
+  ): Promise<{ attachments: ResolvedAttachment[]; warnings: string[] }> {
+    const metas = realAttachments(original.attachments);
+    if (metas.length === 0) return { attachments: [], warnings: [] };
+
+    const results = await Promise.allSettled(
+      metas.map(async (meta) =>
+        this.imapService.downloadAttachment(
+          accountName,
+          emailId,
+          mailbox,
+          meta.partId !== undefined ? { partId: meta.partId } : meta.filename,
+          ORIGINAL_ATTACHMENT_MAX_BYTES,
+        ),
+      ),
     );
+
+    const failures = results.flatMap((result, i) =>
+      result.status === 'rejected'
+        ? [
+            `"${metas[i].filename}"${metas[i].partId !== undefined ? ` (partId ${metas[i].partId})` : ''} (${result.reason instanceof Error ? result.reason.message : String(result.reason)})`,
+          ]
+        : [],
+    );
+    if (failures.length > 0) {
+      throw new Error(
+        `Cannot ${context}: ${failures.length} of ${metas.length} attachment(s) of the original ` +
+          `could not be fetched — ${failures.join('; ')}. Nothing was sent. Retry, or pass ` +
+          `includeAttachments=false to ${context} without them.`,
+      );
+    }
+
+    const attachments = results.flatMap((result) =>
+      result.status === 'fulfilled'
+        ? [
+            {
+              filename: result.value.filename,
+              content: Buffer.from(result.value.contentBase64, 'base64'),
+              contentType: result.value.mimeType,
+            },
+          ]
+        : [],
+    );
+    return { attachments, warnings: [] };
+  }
+
+  /**
+   * Compose le message, contrôle sa taille, l'envoie, puis en dépose une
+   * copie dans Envoyés — les MÊMES octets dans les deux cas.
+   *
+   * La taille contrôlée est celle du message composé, exacte : c'est ce que
+   * reçoit le serveur SMTP (pièces encodées en base64 comprises).
+   */
+  private async composeAndTransmit(
+    accountName: string,
+    account: AccountConfig,
+    transport: Awaited<ReturnType<IConnectionManager['getSmtpTransport']>>,
+    params: {
+      mailOptions: ComposeOptions;
+      recipients: string[];
+      attachments: ResolvedAttachment[];
+      what: 'email' | 'reply' | 'forward';
+    },
+  ): Promise<SendResult> {
+    // Build the SMTP envelope explicitly — nodemailer cannot derive it from the
+    // opaque raw bytes. The RCPT TO list covers every To + Cc + Bcc recipient,
+    // de-duped case-insensitively.
+    const envelope = {
+      from: account.email,
+      to: normalizeEnvelopeRecipients(params.recipients),
+    };
+    if (envelope.to.length === 0) {
+      // The tool schema requires `to` (minItems 1); guard anyway so we never
+      // hand SMTP an empty RCPT TO list.
+      throw new Error(`Cannot send ${params.what}: no recipients (To/Cc/Bcc all empty)`);
+    }
+
+    // Les noms de fichiers longs ne sont plus pliés au milieu des guillemets
+    // (composeMessage → refoldParamHeaders).
+    const rawMessage = await composeMessage(params.mailOptions);
+    assertMessageSize(account, rawMessage.length, params.attachments);
+
+    const result = await transport
+      .sendMail({ envelope, raw: rawMessage })
+      .catch((error: unknown) => {
+        throw explainSmtpSizeRejection(error, account, rawMessage.length);
+      });
+
+    // Append the SAME raw bytes to Sent — "one raw message, sent and stored".
+    const sentCopy = await this.appendToSentFolder(accountName, rawMessage);
 
     return {
       messageId: result.messageId ?? '',
       status: 'sent',
+      sentCopy,
     };
+  }
+
+  private static withWarnings(result: SendResult, warnings: string[]): SendResult {
+    if (warnings.length === 0) return result;
+    return { ...result, warnings: [...(result.warnings ?? []), ...warnings] };
   }
 
   // -------------------------------------------------------------------------
@@ -473,24 +716,37 @@ export default class SmtpService {
   // Sent folder helpers
   // -------------------------------------------------------------------------
 
+  /**
+   * Dépose une copie dans Envoyés. Ne lève jamais : le message est déjà parti,
+   * et annoncer un échec pousserait l'appelant à le renvoyer en double. Le
+   * résultat est RENVOYÉ (il était auparavant avalé par un console.warn) pour
+   * que l'outil puisse le signaler et que send_draft garde le brouillon quand
+   * la copie a échoué.
+   */
   private async appendToSentFolder(
     accountName: string,
     rawMessage: string | Buffer,
-  ): Promise<void> {
+  ): Promise<SentCopyResult> {
     const account = this.connections.getAccount(accountName);
 
     // Skip if disabled in config
-    if (account.saveToSent === false) return;
+    if (account.saveToSent === false) {
+      return { kind: 'skipped', reason: 'save_to_sent is disabled for this account' };
+    }
 
     // Skip Gmail (auto-saves via SMTP)
-    if (isGmailAccount(account) && account.gmailAutoSave !== false) return;
+    if (isGmailAccount(account) && account.gmailAutoSave !== false) {
+      return { kind: 'skipped', reason: 'Gmail files the sent copy itself' };
+    }
 
     try {
       await this.imapService.appendToSent(accountName, rawMessage);
+      return { kind: 'filed' };
     } catch (error) {
       // Log warning but do not throw — SMTP send already succeeded
       // eslint-disable-next-line no-console
       console.warn(`Failed to save to Sent folder for ${accountName}:`, error);
+      return { kind: 'failed', error: error instanceof Error ? error.message : String(error) };
     }
   }
 
@@ -502,6 +758,13 @@ export default class SmtpService {
    * Send an existing draft. The id arrives in its wire shape — a UID on IMAP, an
    * opaque string on a Graph account — but only IMAP ids reach here, the router
    * sending Graph accounts to the Graph send service.
+   *
+   * Après un envoi SMTP réussi, plus rien ne lève (inspiré de la PR
+   * codefuturist #108) : un échec rapporté inviterait à renvoyer, donc à
+   * livrer le message en double. L'issue est décrite dans le résultat :
+   *   - copie Envoyés en échec → brouillon GARDÉ (`draftCleanup.kind = 'kept'`) :
+   *     le supprimer effacerait la seule trace locale du message ;
+   *   - suppression du brouillon en échec → succès + `draftCleanup.kind = 'failed'`.
    */
   async sendDraft(
     accountName: string,
@@ -552,21 +815,43 @@ export default class SmtpService {
     // Message-ID/Date are already embedded in the raw bytes — leave them as-is.
     const sanitizedRaw = stripBccHeader(rawBuffer);
 
+    // Taille totale contrôlée avant l'envoi si le compte fixe `max_message_mb` ;
+    // en cas de refus, le brouillon reste intact.
+    assertMessageSize(account, sanitizedRaw.length);
+
     // When sending pre-composed raw bytes, nodemailer cannot derive the SMTP
     // envelope from the opaque message — pass it explicitly (mirrors
     // replyToEmail) so the RCPT TO list covers every To + Cc + Bcc recipient.
-    const result = await transport.sendMail({ envelope, raw: sanitizedRaw });
+    const result = await transport
+      .sendMail({ envelope, raw: sanitizedRaw })
+      .catch((error: unknown) => {
+        throw explainSmtpSizeRejection(error, account, sanitizedRaw.length);
+      });
 
     // Append the SAME sanitized bytes to Sent BEFORE deleting the draft —
     // "one raw message, sent and stored".
-    await this.appendToSentFolder(accountName, sanitizedRaw);
+    const sentCopy = await this.appendToSentFolder(accountName, sanitizedRaw);
 
-    // Delete the draft after successful send
-    await this.imapService.deleteDraft(accountName, draftId, draftsPath);
+    let draftCleanup: DraftCleanupResult;
+    if (sentCopy.kind === 'failed') {
+      draftCleanup = {
+        kind: 'kept',
+        reason: 'the copy to the Sent folder failed, so the draft is the only local copy left',
+      };
+    } else {
+      try {
+        await this.imapService.deleteDraft(accountName, draftId, draftsPath);
+        draftCleanup = { kind: 'removed' };
+      } catch (err) {
+        draftCleanup = { kind: 'failed', error: err instanceof Error ? err.message : String(err) };
+      }
+    }
 
     return {
       messageId: result.messageId ?? '',
       status: 'sent',
+      sentCopy,
+      draftCleanup,
     };
   }
 }

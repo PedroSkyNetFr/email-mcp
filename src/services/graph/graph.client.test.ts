@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AccountConfig } from '../../types/index.js';
 import type OAuthService from '../oauth.service.js';
-import GraphClient, { GraphError } from './graph.client.js';
+import GraphClient, { GraphError, shouldRetry } from './graph.client.js';
 
 const account: AccountConfig = {
   name: 'work',
@@ -78,5 +78,47 @@ describe('GraphClient.request', () => {
     expect(url).toBe('https://graph.microsoft.com/v1.0/me/sendMail');
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer access-token');
     expect(init.body).toBe('{"message":{"subject":"hi"}}');
+  });
+
+  // Régression : un 503 sur POST /send était rejoué. Si Exchange avait déjà
+  // accepté le message avant la panne, le destinataire le recevait deux fois.
+  it('does not replay a POST that answered 503 (possible double send)', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn().mockResolvedValue(response(503, 'unavailable'));
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(client().request('POST', '/me/messages/abc/send')).rejects.toThrow(/503/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('replays a GET once after a 503, and any method after a 429', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(response(503, 'unavailable'))
+        .mockResolvedValueOnce(response(200, '{"id":"abc"}'));
+      vi.stubGlobal('fetch', fetchMock);
+      const pending = client().request('GET', '/me/messages/abc');
+      await vi.runAllTimersAsync();
+      await expect(pending).resolves.toEqual({ id: 'abc' });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('shouldRetry', () => {
+  it('always retries 429, retries 503 only for non-POST methods', () => {
+    expect(shouldRetry('POST', 429)).toBe(true);
+    expect(shouldRetry('POST', 503)).toBe(false);
+    expect(shouldRetry('post', 503)).toBe(false);
+    expect(shouldRetry('GET', 503)).toBe(true);
+    expect(shouldRetry('PATCH', 503)).toBe(true);
+    expect(shouldRetry('GET', 500)).toBe(false);
   });
 });

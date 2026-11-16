@@ -3,6 +3,8 @@
  * The resulting string is stored in the calendar event's description/notes field.
  */
 
+import { htmlToPlainText } from './body-format.js';
+
 export interface CalendarNotesInput {
   emailFrom?: string;
   emailSubject?: string;
@@ -26,23 +28,9 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function stripHtml(html: string): string {
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n')
-    .replace(/<\/div>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
+// Même convertisseur que la lecture : l'ancienne copie locale (regex, 6
+// entités) laissait `&eacute;` et `&#233;` tels quels dans les notes.
+const stripHtml = htmlToPlainText;
 
 /** Build the full rich notes string for a calendar event. */
 export function buildCalendarNotes(input: CalendarNotesInput): string {

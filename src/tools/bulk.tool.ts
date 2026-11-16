@@ -2,7 +2,7 @@
  * MCP tool: bulk_action — batch operations on multiple emails.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import audit from '../safety/audit.js';
 
@@ -10,29 +10,32 @@ import type { IMailService } from '../services/mail-service.types.js';
 import type { BulkResult } from '../types/index.js';
 
 export default function registerBulkTools(server: McpServer, imapService: IMailService): void {
-  server.tool(
+  server.registerTool(
     'bulk_action',
-    'Batch operation on multiple emails by UID list. Supports mark_read, mark_unread, flag, unflag, move, and delete. Max 100 IDs per call. Returns success/failure counts.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      mailbox: z.string().default('INBOX').describe('Source mailbox containing the emails'),
-      action: z
-        .enum(['mark_read', 'mark_unread', 'flag', 'unflag', 'move', 'delete'])
-        .describe('Bulk action to perform'),
-      ids: z
-        .array(z.union([z.number().int(), z.string()]))
-        .min(1)
-        .max(100)
-        .describe(
-          'Array of email ids (max 100), from list_emails or search_emails. Numeric UIDs on ' +
-            'IMAP accounts; opaque string ids on Graph-backed (Exchange) accounts.',
-        ),
-      destination: z
-        .string()
-        .optional()
-        .describe("Destination mailbox — required when action is 'move'"),
+      description:
+        'Batch operation on multiple emails by UID list. Supports mark_read, mark_unread, flag, unflag, move, and delete. Max 100 IDs per call. Returns success/failure counts.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        mailbox: z.string().default('INBOX').describe('Source mailbox containing the emails'),
+        action: z
+          .enum(['mark_read', 'mark_unread', 'flag', 'unflag', 'move', 'delete'])
+          .describe('Bulk action to perform'),
+        ids: z
+          .array(z.union([z.number().int(), z.string()]))
+          .min(1)
+          .max(100)
+          .describe(
+            'Array of email ids (max 100), from list_emails or search_emails. Numeric UIDs on ' +
+              'IMAP accounts; opaque string ids on Graph-backed (Exchange) accounts.',
+          ),
+        destination: z
+          .string()
+          .optional()
+          .describe("Destination mailbox — required when action is 'move'"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    { readOnlyHint: false, destructiveHint: true },
     async ({ account, mailbox, action, ids, destination }) => {
       try {
         if (action === 'move' && !destination) {

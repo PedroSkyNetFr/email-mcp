@@ -5,8 +5,8 @@
  * Only includes folders with unread messages.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
+import { ResourceTemplate } from '@modelcontextprotocol/server';
 
 import type ConnectionManager from '../connections/manager.js';
 import type { IMailService } from '../services/mail-service.types.js';
@@ -19,7 +19,7 @@ export default function registerUnreadResource(
   const names = connections.getAccountNames();
   const accounts = names.map((name) => connections.getAccount(name));
 
-  server.resource(
+  server.registerResource(
     'unread',
     new ResourceTemplate('email://{account}/unread', {
       list: async () => ({

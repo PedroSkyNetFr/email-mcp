@@ -9,7 +9,7 @@
  * - Falls back to logging if sampling is unavailable
  */
 
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import type { Server } from '@modelcontextprotocol/server';
 import { mcpLog } from '../logging.js';
 import type { EmailMeta, HookRule, HooksConfig } from '../types/index.js';
 import type { NewEmailEvent } from './event-bus.js';
@@ -105,9 +105,31 @@ export default class HooksService {
 
   private static readonly MAX_SAMPLING_PER_MIN = 10;
 
-  constructor(config: HooksConfig, imapService: ImapService) {
+  /**
+   * Les actions qui MODIFIENT la boîte (libellés, drapeaux, marquer lu) sont-
+   * elles permises ? Décidé une fois, à la construction, à partir de
+   * `read_only` : une instance en lecture seule promet de ne changer aucune
+   * boîte, et les règles statiques comme le tri IA (`auto_label`,
+   * `auto_flag`) passaient jusqu'ici outre. Les notifications, elles, ne
+   * touchent pas la boîte et restent actives.
+   */
+  private readonly mailboxWritesAllowed: boolean;
+
+  /**
+   * Écouteur nommé, pour que stop() détache exactement CET abonnement. Le
+   * canal `email:new` est partagé : `removeAllListeners` désabonnait en
+   * silence tout autre consommateur.
+   */
+  private readonly onNewEmailHandler = (event: NewEmailEvent): void => {
+    this.onNewEmail(event);
+  };
+
+  private listening = false;
+
+  constructor(config: HooksConfig, imapService: ImapService, options: { readOnly?: boolean } = {}) {
     this.config = config;
     this.imapService = imapService;
+    this.mailboxWritesAllowed = options.readOnly !== true;
     this.notifier = new NotifierService(config.alerts);
     this.localCalendar = new LocalCalendarService();
     this.resolvedSystemPrompt = buildSystemPrompt(config.preset, {
@@ -136,9 +158,19 @@ export default class HooksService {
 
     if (this.config.onNewEmail === 'none') return;
 
-    eventBus.on('email:new', (event: NewEmailEvent) => {
-      this.onNewEmail(event);
-    });
+    if (!this.listening) {
+      eventBus.on('email:new', this.onNewEmailHandler);
+      this.listening = true;
+    }
+
+    if (!this.mailboxWritesAllowed && this.hasMailboxActions()) {
+      mcpLog(
+        'info',
+        'hooks',
+        'read_only is set: hook actions that change the mailbox (labels, flags, mark read, ' +
+          'auto_label, auto_flag) are skipped; notifications still run.',
+      ).catch(() => {});
+    }
 
     // Rate limit reset every 60s
     this.rateResetTimer = setInterval(() => {
@@ -165,7 +197,27 @@ export default class HooksService {
       this.rateResetTimer = null;
     }
     this.notifier.stop();
-    eventBus.removeAllListeners('email:new');
+    eventBus.off('email:new', this.onNewEmailHandler);
+    this.listening = false;
+  }
+
+  /** La configuration demande-t-elle au moins une action qui modifie la boîte ? */
+  private hasMailboxActions(): boolean {
+    return (
+      this.config.autoLabel ||
+      this.config.autoFlag ||
+      this.config.rules.some(
+        (rule) =>
+          (rule.actions.labels?.length ?? 0) > 0 ||
+          rule.actions.flag === true ||
+          rule.actions.markRead === true,
+      )
+    );
+  }
+
+  /** Message d'une erreur, pour la journaliser au lieu de l'avaler. */
+  private static describe(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
   }
 
   // -------------------------------------------------------------------------
@@ -260,42 +312,28 @@ export default class HooksService {
   private async applyStaticRule(email: BatchEmail, rule: HookRule): Promise<void> {
     const { actions } = rule;
 
-    // Apply labels
-    if (actions.labels?.length) {
-      const labelOps = actions.labels.map(async (label) => {
-        try {
-          await this.imapService.addLabel(email.account, email.meta.id, email.mailbox, label);
-        } catch {
-          await mcpLog(
-            'warning',
-            'hooks',
-            `Could not add label "${label}" to email ${email.meta.id}`,
-          );
-        }
-      });
-      await Promise.allSettled(labelOps);
-    }
-
-    // Apply flag
-    if (actions.flag) {
-      try {
-        await this.imapService.setFlags(email.account, email.mailbox, email.meta.id, 'flag');
-      } catch {
-        await mcpLog('warning', 'hooks', `Could not flag email ${email.meta.id}`);
+    // Les actions sur la boîte sont sautées en lecture seule (voir
+    // `mailboxWritesAllowed`) ; l'alerte et le calendrier local restent.
+    if (this.mailboxWritesAllowed) {
+      // Apply labels
+      if (actions.labels?.length) {
+        await this.applyLabels(email, actions.labels);
       }
-    }
 
-    // Mark read
-    if (actions.markRead) {
-      try {
-        await this.imapService.setFlags(email.account, email.mailbox, email.meta.id, 'read');
-      } catch {
-        await mcpLog('warning', 'hooks', `Could not mark email ${email.meta.id} as read`);
+      // Apply flag
+      if (actions.flag) {
+        await this.applyFlag(email, 'flag');
+      }
+
+      // Mark read
+      if (actions.markRead) {
+        await this.applyFlag(email, 'read');
       }
     }
 
     // Send alert via notifier (rule with alert=true forces desktop notification)
     const payload: AlertPayload = {
+      ...HooksService.messageRef(email),
       account: email.account,
       sender: email.meta.from,
       subject: email.meta.subject,
@@ -325,6 +363,57 @@ export default class HooksService {
   }
 
   // -------------------------------------------------------------------------
+  // Mailbox actions (labels / flags)
+  // -------------------------------------------------------------------------
+
+  /** Pose des libellés ; un échec est journalisé avec sa cause, jamais avalé. */
+  private async applyLabels(email: BatchEmail, labels: string[]): Promise<void> {
+    const labelOps = labels.map(async (label) => {
+      try {
+        await this.imapService.addLabel(email.account, email.meta.id, email.mailbox, label);
+      } catch (err) {
+        await mcpLog(
+          'warning',
+          'hooks',
+          `Could not add label "${label}" to email ${email.meta.id}: ${HooksService.describe(err)}`,
+        );
+      }
+    });
+    await Promise.allSettled(labelOps);
+  }
+
+  /**
+   * Pose un drapeau. L'ordre des arguments est celui de
+   * `setFlags(compte, idMessage, dossier, action)` : l'ancien appel passait le
+   * dossier à la place de l'identifiant (et inversement), si bien que chaque
+   * `flag` / `mark_read` d'un hook échouait — en silence, l'erreur étant
+   * avalée par un `catch` vide.
+   */
+  private async applyFlag(email: BatchEmail, action: 'flag' | 'read'): Promise<void> {
+    try {
+      await this.imapService.setFlags(email.account, email.meta.id, email.mailbox, action);
+    } catch (err) {
+      const what = action === 'flag' ? 'flag' : 'mark as read';
+      await mcpLog(
+        'warning',
+        'hooks',
+        `Could not ${what} email ${email.meta.id}: ${HooksService.describe(err)}`,
+      );
+    }
+  }
+
+  /** Références du message pour un consommateur de webhook (le retrouver, savoir où). */
+  private static messageRef(
+    email: BatchEmail,
+  ): Pick<AlertPayload, 'uid' | 'folder' | 'hasAttachments'> {
+    return {
+      uid: email.meta.id,
+      folder: email.mailbox,
+      hasAttachments: email.meta.hasAttachments,
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // Resource subscription notifications
   // -------------------------------------------------------------------------
 
@@ -348,6 +437,7 @@ export default class HooksService {
   private async notifyBatch(emails: BatchEmail[]): Promise<void> {
     const ops = emails.map(async (e) => {
       const payload: AlertPayload = {
+        ...HooksService.messageRef(e),
         account: e.account,
         sender: e.meta.from,
         subject: e.meta.subject,
@@ -430,34 +520,20 @@ export default class HooksService {
   }
 
   private async applySingleTriage(email: BatchEmail, triage: TriageResult): Promise<void> {
-    // Auto-label
-    if (this.config.autoLabel && triage.labels?.length) {
-      const labelOps = triage.labels.map(async (label) => {
-        try {
-          await this.imapService.addLabel(email.account, email.meta.id, email.mailbox, label);
-        } catch {
-          await mcpLog(
-            'warning',
-            'hooks',
-            `Could not add label "${label}" to email ${email.meta.id}`,
-          );
-        }
-      });
-      await Promise.allSettled(labelOps);
+    // Auto-label (sauté en lecture seule)
+    if (this.mailboxWritesAllowed && this.config.autoLabel && triage.labels?.length) {
+      await this.applyLabels(email, triage.labels);
     }
 
-    // Auto-flag
-    if (this.config.autoFlag && triage.flag) {
-      try {
-        await this.imapService.setFlags(email.account, email.mailbox, email.meta.id, 'flag');
-      } catch {
-        await mcpLog('warning', 'hooks', `Could not flag email ${email.meta.id}`);
-      }
+    // Auto-flag (sauté en lecture seule)
+    if (this.mailboxWritesAllowed && this.config.autoFlag && triage.flag) {
+      await this.applyFlag(email, 'flag');
     }
 
     // Route through notifier for urgency-based alerts
     const priority: UrgencyLevel = triage.priority ?? 'normal';
     const payload: AlertPayload = {
+      ...HooksService.messageRef(email),
       account: email.account,
       sender: email.meta.from,
       subject: email.meta.subject,

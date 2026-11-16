@@ -80,6 +80,15 @@ export class MoveLogRepository {
 
   constructor(private readonly url: string | undefined) {}
 
+  /**
+   * Une base est-elle configurée (`[database].url`) ? Permet aux appelants de
+   * distinguer « pas de journal du tout » (installation sans PostgreSQL) de
+   * « journal configuré mais en panne », sans ouvrir de connexion.
+   */
+  isConfigured(): boolean {
+    return !!this.url?.trim();
+  }
+
   private client(): Sql {
     if (this.sql) {
       return this.sql;
@@ -128,6 +137,39 @@ export class MoveLogRepository {
           : null;
         return { ok: false, existing };
       }
+      throw classifyConnectError(err);
+    }
+  }
+
+  /**
+   * Insère la ligne de journal d'une COPIE (`operation='copy'`, migration 002).
+   *
+   * Contrairement à claim(), elle ne fait pas partie du contrat de l'opération :
+   * l'appelant transforme toute exception en avertissement et termine la copie
+   * quand même. Pas de branche 23505 : `uniq_move_log_msgid` est restreint à
+   * `operation='move'` pour qu'une copie ne puisse ni perdre la course contre
+   * un déplacement, ni la fausser. `source_deleted` reste FALSE et
+   * `source_cleanup` NULL : une copie ne touche jamais la source.
+   */
+  async logCopy(entry: MoveLogEntry): Promise<number> {
+    const sql = this.client();
+    try {
+      const rows = await sql<{ id: number }[]>`
+        INSERT INTO email_move_log (
+          source_account, source_mailbox, source_uid,
+          dest_account, dest_mailbox, dest_uid,
+          message_id, subject, from_addr, email_date, size_bytes,
+          manual, status, source_deleted, operation
+        ) VALUES (
+          ${entry.source_account}, ${entry.source_mailbox}, ${entry.source_uid},
+          ${entry.dest_account}, ${entry.dest_mailbox}, ${entry.dest_uid},
+          ${entry.message_id}, ${entry.subject}, ${entry.from_addr},
+          ${entry.email_date}, ${entry.size_bytes},
+          ${entry.manual}, ${entry.status}, FALSE, 'copy'
+        )
+        RETURNING id`;
+      return rows[0].id;
+    } catch (err) {
       throw classifyConnectError(err);
     }
   }

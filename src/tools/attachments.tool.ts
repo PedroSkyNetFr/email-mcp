@@ -10,11 +10,13 @@ import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
+import type { AttachmentSelector } from '../services/attachment-select.js';
 import type { IMailService } from '../services/mail-service.types.js';
+import { numeric } from './numeric-param.js';
 import {
   FROM_DESCRIPTION,
   literalFilterOptions,
@@ -22,6 +24,23 @@ import {
   SUBJECT_DESCRIPTION,
   TO_DESCRIPTION,
 } from './search-filter-params.js';
+
+/**
+ * Désignation d'une pièce jointe depuis les paramètres d'outil : `partId`
+ * prioritaire, nom de fichier en repli. Ni l'un ni l'autre : erreur explicite.
+ */
+function attachmentRef(
+  partId: string | undefined,
+  filename: string | undefined,
+): AttachmentSelector {
+  if ((partId === undefined || partId === '') && (filename === undefined || filename === '')) {
+    throw new Error('Provide partId or filename (see the attachment list of get_email)');
+  }
+  return {
+    ...(partId ? { partId } : {}),
+    ...(filename ? { filename } : {}),
+  };
+}
 
 export default function registerAttachmentTools(
   server: McpServer,
@@ -31,19 +50,40 @@ export default function registerAttachmentTools(
   // ---------------------------------------------------------------------------
   // download_attachment (legacy — base64 through MCP response)
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'download_attachment',
-    'Download an email attachment by filename. First use get_email to see available attachments and their filenames. Returns base64-encoded content for files ≤5MB.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      id: z.string().describe('Email ID (UID) from list_emails or get_email'),
-      mailbox: z.string().default('INBOX').describe('Mailbox containing the email'),
-      filename: z.string().describe('Exact attachment filename (from get_email metadata)'),
+      description:
+        'Download an email attachment by partId (preferred) or filename. First use get_email: it lists ' +
+        'each attachment with its partId (MIME part number on IMAP, attachment id on Graph), inline cid ' +
+        'images included (marked inline). partId is unambiguous; a filename carried by several ' +
+        'attachments (e.g. two image001.png from an Outlook signature) is refused with the list of ' +
+        'candidates. Returns base64-encoded content for files ≤5MB.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        id: z.string().describe('Email ID (UID) from list_emails or get_email'),
+        mailbox: z.string().default('INBOX').describe('Mailbox containing the email'),
+        partId: z
+          .string()
+          .optional()
+          .describe('Attachment partId from get_email (takes precedence over filename)'),
+        filename: z
+          .string()
+          .optional()
+          .describe(
+            'Exact attachment filename (from get_email metadata). Refused when several attachments carry it.',
+          ),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
-    async ({ account, id, mailbox, filename }) => {
+    async ({ account, id, mailbox, filename, partId }) => {
       try {
-        const result = await imapService.downloadAttachment(account, id, mailbox, filename);
+        const result = await imapService.downloadAttachment(
+          account,
+          id,
+          mailbox,
+          attachmentRef(partId, filename),
+        );
 
         return {
           content: [
@@ -83,43 +123,57 @@ export default function registerAttachmentTools(
   // ---------------------------------------------------------------------------
   // save_attachment — direct-to-disk, no base64 hop
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'save_attachment',
-    'Save an email attachment directly to disk. Unlike download_attachment (which returns base64), ' +
-      'this writes the file to your filesystem without size limits and without streaming bytes through ' +
-      'the MCP response. Default destination is ~/Downloads/<filename>.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      emailId: z.string().describe('Email ID (UID) from list_emails or get_email'),
-      mailbox: z.string().default('INBOX').describe('Mailbox containing the email'),
-      filename: z.string().describe('Exact attachment filename from get_email metadata'),
-      destination: z
-        .string()
-        .optional()
-        .describe(
-          'Absolute path OR directory. If directory, the attachment keeps its original filename. ' +
-            'Default: ~/Downloads/',
-        ),
-      open: z
-        .boolean()
-        .default(false)
-        .describe('Open the file in the default macOS application after save'),
-      overwrite: z
-        .boolean()
-        .default(false)
-        .describe(
-          'Allow overwriting an existing file; otherwise auto-suffix (file-1.pdf, file-2.pdf)',
-        ),
+      description:
+        'Save an email attachment directly to disk. Unlike download_attachment (which returns base64), ' +
+        'this writes the file to your filesystem without size limits and without streaming bytes through ' +
+        'the MCP response. Default destination is ~/Downloads/<filename>. Designate the attachment by ' +
+        'partId (from get_email, unambiguous) or by filename; a filename carried by several attachments ' +
+        'is refused with the list of candidates.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        emailId: z.string().describe('Email ID (UID) from list_emails or get_email'),
+        mailbox: z.string().default('INBOX').describe('Mailbox containing the email'),
+        partId: z
+          .string()
+          .optional()
+          .describe('Attachment partId from get_email (takes precedence over filename)'),
+        filename: z
+          .string()
+          .optional()
+          .describe(
+            'Exact attachment filename from get_email metadata. Refused when several attachments carry it.',
+          ),
+        destination: z
+          .string()
+          .optional()
+          .describe(
+            'Absolute path OR directory. If directory, the attachment keeps its original filename. ' +
+              'Default: ~/Downloads/',
+          ),
+        open: z
+          .boolean()
+          .default(false)
+          .describe('Open the file in the default macOS application after save'),
+        overwrite: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Allow overwriting an existing file; otherwise auto-suffix (file-1.pdf, file-2.pdf)',
+          ),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
-    async ({ account, emailId, mailbox, filename, destination, open, overwrite }) => {
+    async ({ account, emailId, mailbox, partId, filename, destination, open, overwrite }) => {
       try {
         const target = destination ?? join(homedir(), 'Downloads');
         const result = await imapService.saveAttachmentToDisk(
           account,
           emailId,
           mailbox,
-          filename,
+          attachmentRef(partId, filename),
           target,
           overwrite,
         );
@@ -171,68 +225,74 @@ export default function registerAttachmentTools(
   // ---------------------------------------------------------------------------
   // save_all_attachments_from_search — batch sweep
   // ---------------------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     'save_all_attachments_from_search',
-    'Run a search and download every attachment (optionally filtered by filename/mimetype) into a ' +
-      'dated folder under ~/Downloads/. Useful for audit exports, year-end lease PDF sweeps, vendor ' +
-      'invoice collections.',
     {
-      account: z
-        .string()
-        .optional()
-        .describe('Single-account mode; mutually exclusive with accounts'),
-      accounts: z
-        .array(z.string())
-        .optional()
-        .describe(
-          'Cross-account fan-out; defaults to all accounts when neither account nor accounts is set',
-        ),
-      mailbox: z.string().default('INBOX'),
-      query: z.string().optional().default(''),
-      to: z.string().optional().describe(TO_DESCRIPTION),
-      from: z.string().optional().describe(FROM_DESCRIPTION),
-      subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
-      ...literalFilterParams,
-      cc: z.string().optional(),
-      bcc: z.string().optional(),
-      text: z.string().optional(),
-      body: z.string().optional(),
-      since: z.string().optional(),
-      before: z.string().optional(),
-      on: z.string().optional(),
-      sent_since: z.string().optional(),
-      sent_before: z.string().optional(),
-      seen: z.boolean().optional(),
-      flagged: z.boolean().optional(),
-      has_attachment: z.boolean().optional(),
-      larger_than: z.number().optional(),
-      smaller_than: z.number().optional(),
-      answered: z.boolean().optional(),
-      draft: z.boolean().optional(),
-      deleted: z.boolean().optional(),
-      keyword: z.union([z.string(), z.array(z.string())]).optional(),
-      not_keyword: z.union([z.string(), z.array(z.string())]).optional(),
-      header: z.record(z.string(), z.string()).optional(),
-      gmail_raw: z.string().optional(),
-      attachment_filename: z
-        .string()
-        .optional()
-        .describe('Only save attachments whose filename matches this substring (case-insensitive)'),
-      attachment_mimetype: z
-        .string()
-        .optional()
-        .describe('Only save attachments whose MIME type matches this regex'),
-      max_emails: z.number().int().min(1).max(10000).default(1000),
-      destination: z
-        .string()
-        .optional()
-        .describe('Destination folder. Default: ~/Downloads/email-attachments-<ts>/'),
-      organize_by: z
-        .enum(['flat', 'date', 'sender', 'account'])
-        .default('flat')
-        .describe('Subfolder structure under destination'),
+      description:
+        'Run a search and download every attachment (optionally filtered by filename/mimetype) into a ' +
+        'dated folder under ~/Downloads/. Useful for audit exports, year-end lease PDF sweeps, vendor ' +
+        'invoice collections. Each attachment is fetched by its partId, so two attachments with the same ' +
+        'name are both saved (the second gets a -1 suffix); inline cid images (signature logos) are skipped.',
+      inputSchema: z.object({
+        account: z
+          .string()
+          .optional()
+          .describe('Single-account mode; mutually exclusive with accounts'),
+        accounts: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Cross-account fan-out; defaults to all accounts when neither account nor accounts is set',
+          ),
+        mailbox: z.string().default('INBOX'),
+        query: z.string().optional().default(''),
+        to: z.string().optional().describe(TO_DESCRIPTION),
+        from: z.string().optional().describe(FROM_DESCRIPTION),
+        subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
+        ...literalFilterParams,
+        cc: z.string().optional(),
+        bcc: z.string().optional(),
+        text: z.string().optional(),
+        body: z.string().optional(),
+        since: z.string().optional(),
+        before: z.string().optional(),
+        on: z.string().optional(),
+        sent_since: z.string().optional(),
+        sent_before: z.string().optional(),
+        seen: z.boolean().optional(),
+        flagged: z.boolean().optional(),
+        has_attachment: z.boolean().optional(),
+        larger_than: numeric(z.number().optional()),
+        smaller_than: numeric(z.number().optional()),
+        answered: z.boolean().optional(),
+        draft: z.boolean().optional(),
+        deleted: z.boolean().optional(),
+        keyword: z.union([z.string(), z.array(z.string())]).optional(),
+        not_keyword: z.union([z.string(), z.array(z.string())]).optional(),
+        header: z.record(z.string(), z.string()).optional(),
+        gmail_raw: z.string().optional(),
+        attachment_filename: z
+          .string()
+          .optional()
+          .describe(
+            'Only save attachments whose filename matches this substring (case-insensitive)',
+          ),
+        attachment_mimetype: z
+          .string()
+          .optional()
+          .describe('Only save attachments whose MIME type matches this regex'),
+        max_emails: numeric(z.number().int().min(1).max(10000).default(1000)),
+        destination: z
+          .string()
+          .optional()
+          .describe('Destination folder. Default: ~/Downloads/email-attachments-<ts>/'),
+        organize_by: z
+          .enum(['flat', 'date', 'sender', 'account'])
+          .default('flat')
+          .describe('Subfolder structure under destination'),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async (params) => {
       try {
         // Default destination — dated subfolder under ~/Downloads.

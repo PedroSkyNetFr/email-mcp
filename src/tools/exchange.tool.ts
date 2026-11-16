@@ -7,12 +7,13 @@
  * Microsoft Graph and say so plainly on any other.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import audit from '../safety/audit.js';
 import type GraphService from '../services/graph/graph.service.js';
 import type { AppConfig } from '../types/index.js';
+import { numeric } from './numeric-param.js';
 
 function errorResult(message: string) {
   return { isError: true as const, content: [{ type: 'text' as const, text: message }] };
@@ -45,12 +46,17 @@ export default function registerExchangeTools(
   // Inbox rules
   // ---------------------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'list_mail_rules',
-    'List the server-side inbox rules of an Exchange / Outlook.com account. These run in the ' +
-      'mailbox itself, so they sort mail even when no client is connected.',
-    { account: z.string().describe('Account name (must be a Graph-backed account)') },
-    { readOnlyHint: true, destructiveHint: false },
+    {
+      description:
+        'List the server-side inbox rules of an Exchange / Outlook.com account. These run in the ' +
+        'mailbox itself, so they sort mail even when no client is connected.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name (must be a Graph-backed account)'),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
     async ({ account }) => {
       const problem = assertGraph(account);
       if (problem) return errorResult(problem);
@@ -65,34 +71,42 @@ export default function registerExchangeTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     'create_mail_rule',
-    'Create a server-side inbox rule. Needs at least one condition and one action. The ' +
-      'destination is given as a mailbox path (e.g. "NISSAN/Reçu nissan"), not an internal id.',
     {
-      account: z.string().describe('Account name (must be a Graph-backed account)'),
-      name: z.string().describe('Rule name as it appears in Outlook'),
-      from_addresses: z
-        .array(z.string())
-        .optional()
-        .describe('Condition: sender contains any of these strings'),
-      subject_contains: z.array(z.string()).optional().describe('Condition: subject contains'),
-      body_contains: z.array(z.string()).optional().describe('Condition: body contains'),
-      move_to_mailbox: z.string().optional().describe('Action: move the message to this folder'),
-      mark_as_read: z.boolean().optional().describe('Action: mark the message read'),
-      mark_importance: z
-        .enum(['low', 'normal', 'high'])
-        .optional()
-        .describe('Action: set importance'),
-      delete_message: z.boolean().optional().describe('Action: move the message to Deleted Items'),
-      stop_processing: z
-        .boolean()
-        .optional()
-        .describe('Stop evaluating later rules when this one matches'),
-      sequence: z.number().int().optional().describe('Evaluation order (lower runs first)'),
-      enabled: z.boolean().optional().describe('Create the rule disabled by passing false'),
+      description:
+        'Create a server-side inbox rule. Needs at least one condition and one action. The ' +
+        'destination is given as a mailbox path (e.g. "NISSAN/Reçu nissan"), not an internal id.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name (must be a Graph-backed account)'),
+        name: z.string().describe('Rule name as it appears in Outlook'),
+        from_addresses: z
+          .array(z.string())
+          .optional()
+          .describe('Condition: sender contains any of these strings'),
+        subject_contains: z.array(z.string()).optional().describe('Condition: subject contains'),
+        body_contains: z.array(z.string()).optional().describe('Condition: body contains'),
+        move_to_mailbox: z.string().optional().describe('Action: move the message to this folder'),
+        mark_as_read: z.boolean().optional().describe('Action: mark the message read'),
+        mark_importance: z
+          .enum(['low', 'normal', 'high'])
+          .optional()
+          .describe('Action: set importance'),
+        delete_message: z
+          .boolean()
+          .optional()
+          .describe('Action: move the message to Deleted Items'),
+        stop_processing: z
+          .boolean()
+          .optional()
+          .describe('Stop evaluating later rules when this one matches'),
+        sequence: numeric(z.number().int().optional()).describe(
+          'Evaluation order (lower runs first)',
+        ),
+        enabled: z.boolean().optional().describe('Create the rule disabled by passing false'),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    { readOnlyHint: false, destructiveHint: false },
     async (params) => {
       const problem = assertGraph(params.account);
       if (problem) return errorResult(problem);
@@ -126,14 +140,16 @@ export default function registerExchangeTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     'delete_mail_rule',
-    'Delete a server-side inbox rule by id (get ids from list_mail_rules).',
     {
-      account: z.string().describe('Account name (must be a Graph-backed account)'),
-      rule_id: z.string().describe('Rule id from list_mail_rules'),
+      description: 'Delete a server-side inbox rule by id (get ids from list_mail_rules).',
+      inputSchema: z.object({
+        account: z.string().describe('Account name (must be a Graph-backed account)'),
+        rule_id: z.string().describe('Rule id from list_mail_rules'),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    { readOnlyHint: false, destructiveHint: true },
     async ({ account, rule_id: ruleId }) => {
       const problem = assertGraph(account);
       if (problem) return errorResult(problem);
@@ -153,11 +169,16 @@ export default function registerExchangeTools(
   // Automatic reply
   // ---------------------------------------------------------------------------
 
-  server.tool(
+  server.registerTool(
     'get_auto_reply',
-    'Read the automatic reply (out of office) setting of an Exchange / Outlook.com account.',
-    { account: z.string().describe('Account name (must be a Graph-backed account)') },
-    { readOnlyHint: true, destructiveHint: false },
+    {
+      description:
+        'Read the automatic reply (out of office) setting of an Exchange / Outlook.com account.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name (must be a Graph-backed account)'),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
     async ({ account }) => {
       const problem = assertGraph(account);
       if (problem) return errorResult(problem);
@@ -171,33 +192,36 @@ export default function registerExchangeTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     'set_auto_reply',
-    'Turn the automatic reply (out of office) on or off. Use status "scheduled" with a start and ' +
-      'end, "alwaysEnabled" until turned off, or "disabled".',
     {
-      account: z.string().describe('Account name (must be a Graph-backed account)'),
-      status: z.enum(['disabled', 'alwaysEnabled', 'scheduled']),
-      internal_message: z
-        .string()
-        .optional()
-        .describe('HTML reply sent to people inside the organisation'),
-      external_message: z.string().optional().describe('HTML reply sent to outside senders'),
-      external_audience: z
-        .enum(['none', 'contactsOnly', 'all'])
-        .optional()
-        .describe('Who outside gets a reply (default: all)'),
-      start_datetime: z
-        .string()
-        .optional()
-        .describe('ISO date-time, required when status is "scheduled"'),
-      end_datetime: z
-        .string()
-        .optional()
-        .describe('ISO date-time, required when status is "scheduled"'),
-      time_zone: z.string().optional().describe('Time zone for the dates (default: UTC)'),
+      description:
+        'Turn the automatic reply (out of office) on or off. Use status "scheduled" with a start and ' +
+        'end, "alwaysEnabled" until turned off, or "disabled".',
+      inputSchema: z.object({
+        account: z.string().describe('Account name (must be a Graph-backed account)'),
+        status: z.enum(['disabled', 'alwaysEnabled', 'scheduled']),
+        internal_message: z
+          .string()
+          .optional()
+          .describe('HTML reply sent to people inside the organisation'),
+        external_message: z.string().optional().describe('HTML reply sent to outside senders'),
+        external_audience: z
+          .enum(['none', 'contactsOnly', 'all'])
+          .optional()
+          .describe('Who outside gets a reply (default: all)'),
+        start_datetime: z
+          .string()
+          .optional()
+          .describe('ISO date-time, required when status is "scheduled"'),
+        end_datetime: z
+          .string()
+          .optional()
+          .describe('ISO date-time, required when status is "scheduled"'),
+        time_zone: z.string().optional().describe('Time zone for the dates (default: UTC)'),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    { readOnlyHint: false, destructiveHint: false },
     async (params) => {
       const problem = assertGraph(params.account);
       if (problem) return errorResult(problem);

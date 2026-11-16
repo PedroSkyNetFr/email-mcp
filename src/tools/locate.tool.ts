@@ -6,26 +6,30 @@
  * which don't support IMAP MOVE operations.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type { IMailService } from '../services/mail-service.types.js';
 
 export default function registerLocateTools(server: McpServer, imapService: IMailService): void {
-  server.tool(
+  server.registerTool(
     'find_email_folder',
-    'Find which real mailbox folder(s) an email belongs to. ' +
-      'Required before move_email or delete_email when the email was found in a virtual folder ' +
-      '(e.g., "All Mail", "Starred"). Returns the real folder path to use as sourceMailbox.',
     {
-      account: z.string().describe('Account name from list_accounts'),
-      emailId: z.string().describe('Email ID (UID) from list_emails'),
-      sourceMailbox: z
-        .string()
-        .default('INBOX')
-        .describe('Mailbox where the email is currently visible (e.g., "All Mail")'),
+      description:
+        'Find the real mailbox folder an email belongs to (the search stops at the first match, ' +
+        'trying INBOX, Sent, Drafts and Archive first). ' +
+        'Required before move_email or delete_email when the email was found in a virtual folder ' +
+        '(e.g., "All Mail", "Starred"). Returns the real folder path to use as sourceMailbox.',
+      inputSchema: z.object({
+        account: z.string().describe('Account name from list_accounts'),
+        emailId: z.string().describe('Email ID (UID) from list_emails'),
+        sourceMailbox: z
+          .string()
+          .default('INBOX')
+          .describe('Mailbox where the email is currently visible (e.g., "All Mail")'),
+      }),
+      annotations: { readOnlyHint: true },
     },
-    { readOnlyHint: true },
     async ({ account, emailId, sourceMailbox }) => {
       try {
         const { folders, messageId } = await imapService.findEmailFolder(
@@ -46,10 +50,9 @@ export default function registerLocateTools(server: McpServer, imapService: IMai
         }
 
         const lines = [
-          `📁 Email ${emailId} found in ${folders.length} folder(s):`,
-          ...folders.map((f) => `  • ${f}`),
+          `📁 Email ${emailId} found in real folder: ${folders[0]}`,
           '',
-          `Use the first folder as sourceMailbox for move_email or delete_email.`,
+          `Use it as sourceMailbox for move_email or delete_email.`,
         ];
         if (messageId) {
           lines.push(`Message-ID: ${messageId}`);

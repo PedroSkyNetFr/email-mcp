@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SCHEDULED_DIR, SCHEDULED_SENT_DIR } from '../config/xdg.js';
 import { mcpLog } from '../logging.js';
 import type { ScheduledEmail } from '../types/index.js';
+import { UncertainSendError } from './graph/graph-send.service.js';
 import type { IMailService } from './mail-service.types.js';
 import SchedulerService from './scheduler.service.js';
 import type { ISendService } from './send-service.types.js';
@@ -194,6 +195,29 @@ describe('SchedulerService.checkAndSend — claims', () => {
     expect(second.sent).toBe(1);
     expect(smtp.sendEmail).toHaveBeenCalledTimes(1);
     expect((await readEntry(SCHEDULED_SENT_DIR, scheduled.id))?.attempts).toBe(2);
+  });
+
+  it('an uncertain send (Graph /send without a clear answer) is not queued again', async () => {
+    const scheduled = await seed();
+    const uncertain = {
+      sendEmail: vi.fn(async () => {
+        throw new UncertainSendError(
+          'Send outcome uncertain: check Sent Items before sending again',
+        );
+      }),
+    };
+
+    const first = await createScheduler(uncertain).checkAndSend();
+
+    expect(first.failed).toBe(1);
+    // Remis en « pending », il serait renvoyé au prochain passage : doublon possible.
+    expect(await readEntry(SCHEDULED_DIR, scheduled.id)).toMatchObject({
+      status: 'failed',
+      attempts: 1,
+      lastError: expect.stringMatching(/check Sent Items/),
+    });
+    await createScheduler(uncertain).checkAndSend();
+    expect(uncertain.sendEmail).toHaveBeenCalledTimes(1);
   });
 
   it('leaves an entry that is not due yet untouched, without claiming it', async () => {
@@ -429,5 +453,27 @@ describe('SchedulerService.checkAndSend — accounts this instance does not serv
     });
     const sent = await Promise.all(entries.map(async (e) => readEntry(SCHEDULED_SENT_DIR, e.id)));
     expect(sent.map((e) => e?.attempts)).toEqual([1, 1, 1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fil de discussion d'une réponse planifiée
+// ---------------------------------------------------------------------------
+
+describe('SchedulerService.checkAndSend — threading', () => {
+  it('passes In-Reply-To and References to the send service', async () => {
+    // Sans eux, une réponse planifiée arrivait comme un nouveau message.
+    await seed({ inReplyTo: '<orig@example.com>', references: ['<root@example.com>'] });
+    const smtp = createFakeSmtp();
+
+    await createScheduler(smtp).checkAndSend();
+
+    expect(smtp.sendEmail).toHaveBeenCalledWith(
+      'work',
+      expect.objectContaining({
+        inReplyTo: '<orig@example.com>',
+        references: ['<root@example.com>'],
+      }),
+    );
   });
 });

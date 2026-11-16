@@ -44,3 +44,9 @@ export const CALENDAR_ATTACHMENTS_DIR = path.join(xdg.data, 'calendar-attachment
 
 /** JSON state file tracking which emails have been auto-processed for calendar/reminders */
 export const CALENDAR_STATE_FILE = path.join(xdg.state, 'calendar-processed.json');
+
+/**
+ * Répertoire des repères du watcher IDLE (dernier UID vu + UIDVALIDITY), un
+ * fichier JSON par compte et dossier.
+ */
+export const WATCHER_STATE_DIR = path.join(xdg.state, 'watcher');

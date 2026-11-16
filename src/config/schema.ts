@@ -83,6 +83,13 @@ export const AccountConfigSchema = z
     // (send/reply/forward/draft) for this account, unless a call passes
     // append_signature:false. Requires signature_path. Defaults to false.
     signature_default: z.boolean().optional(),
+    // Taille maximale d'un message sortant, pièces jointes encodées comprises
+    // (Mo). Défaut : aucune limite locale en SMTP (le serveur annonce la sienne
+    // via SIZE), 35 sur Graph. Voir services/send-limit.ts.
+    max_message_mb: z.number().positive().max(1024).optional(),
+    // Langue de la ligne d'introduction des citations et de l'en-tête de
+    // transfert pour ce compte ; à défaut, celle de [settings] (« fr »).
+    reply_language: z.enum(['fr', 'en']).optional(),
   })
   .refine((data) => !(data.password && data.password_command), {
     message: 'Set password or password_command, not both',
@@ -149,9 +156,23 @@ export const HooksConfigSchema = z.object({
   calendar_confirm: z.boolean().default(true),
 });
 
+// Historique des envois programmés (`scheduled/sent/`). Facultatif : absent,
+// la rétention par défaut (30 jours) s'applique. 0 = tout garder.
+export const SchedulerSettingsSchema = z.object({
+  sent_retention_days: z.number().int().min(0).optional(),
+});
+
 export const SettingsSchema = z.object({
   rate_limit: z.number().int().min(1).default(10),
   read_only: z.boolean().default(false),
+  // Langue par défaut des citations (« Le …, X a écrit : ») et des en-têtes de
+  // transfert ; chaque compte peut la surcharger. Absent : « fr ».
+  reply_language: z.enum(['fr', 'en']).optional(),
+  scheduler: SchedulerSettingsSchema.optional(),
+  // Fenêtre anti-doublon des envois, en minutes : un message identique (même
+  // compte, destinataires, objet, corps, pièces) dans la fenêtre est refusé
+  // comme un probable appel relancé. Absent : 10 ; 0 = protection désactivée.
+  duplicate_send_window_minutes: z.number().int().min(0).max(1440).optional(),
   watcher: WatcherConfigSchema.default({
     enabled: false,
     folders: ['INBOX'],

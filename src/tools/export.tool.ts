@@ -11,14 +11,16 @@ import { createWriteStream } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import type ConnectionManager from '../connections/manager.js';
+import { realAttachments } from '../services/attachment-select.js';
 import { toCsvRow } from '../services/csv.js';
 import { assertSafeDestination } from '../services/file-paths.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import type { EmailMeta } from '../types/index.js';
+import { numeric } from './numeric-param.js';
 import {
   COVERAGE_NOTE,
   FROM_DESCRIPTION,
@@ -77,8 +79,16 @@ function flagsString(meta: EmailMeta): string {
   return flags.join('|');
 }
 
+/**
+ * Colonne `attachments` : pièces « réelles » (celles que compte
+ * has_attachments), chacune suivie de son partId — « devis.pdf#2 » — pour
+ * qu'une ligne d'export suffise à télécharger la bonne pièce, même quand deux
+ * portent le même nom.
+ */
 function attachmentsString(meta: EmailMeta): string {
-  return (meta.attachments ?? []).map((a) => a.filename).join('|');
+  return realAttachments(meta.attachments ?? [])
+    .map((a) => (a.partId !== undefined ? `${a.filename}#${a.partId}` : a.filename))
+    .join('|');
 }
 
 function columnValue(meta: EmailMeta, col: CsvColumn | DefaultColumn): string {
@@ -105,7 +115,7 @@ function columnValue(meta: EmailMeta, col: CsvColumn | DefaultColumn): string {
       return meta.preview ?? '';
     case 'size':
       // EmailMeta doesn't track size directly — fall back to summed attachment size
-      return String((meta.attachments ?? []).reduce((s, a) => s + a.size, 0));
+      return String(realAttachments(meta.attachments ?? []).reduce((s, a) => s + a.size, 0));
     case 'has_attachments':
       return meta.hasAttachments ? 'true' : 'false';
     case 'seen':
@@ -125,6 +135,20 @@ function columnValue(meta: EmailMeta, col: CsvColumn | DefaultColumn): string {
  * pressure is bounded by `max_rows` (hard ceiling 50_000) × per-row size,
  * well below any reasonable budget.
  */
+/**
+ * L'export doit-il lire l'aperçu du corps ?
+ *
+ * - NDJSON : oui, toujours. La description promet « full EmailMeta », et Graph
+ *   fournit de toute façon `bodyPreview` avec chaque message ; sans cela, un
+ *   export NDJSON IMAP n'avait jamais d'aperçu alors qu'un export Graph en
+ *   avait un — le même outil rendait deux formats selon le backend.
+ * - CSV : seulement si la colonne `preview` est demandée, car sur IMAP c'est
+ *   une lecture partielle de la partie texte PAR message.
+ */
+export function exportNeedsPreview(format: 'csv' | 'ndjson', columns?: string[]): boolean {
+  return format === 'ndjson' || (columns ?? []).includes('preview');
+}
+
 export async function writeExport(params: {
   format: 'csv' | 'ndjson';
   items: EmailMeta[];
@@ -163,75 +187,81 @@ export default function registerExportTools(
   imapService: IMailService,
   connections: ConnectionManager,
 ): void {
-  server.tool(
+  server.registerTool(
     'export_search',
-    `Run any search_emails / search_all_accounts query and stream the result set to a CSV or ` +
-      `NDJSON file under ~/Downloads/ (or a caller-supplied destination). Bypasses the MCP response ` +
-      `byte budget — returns only a summary (path, rows_written, truncated). Default CSV columns: ` +
-      `id, account, date, from, subject, labels, attachments, has_attachments, seen, flagged. ${
-        COVERAGE_NOTE
-      }`,
     {
-      account: z.string().optional().describe('Single-account mode'),
-      accounts: z
-        .array(z.string())
-        .optional()
-        .describe('Cross-account fan-out; defaults to every configured account'),
-      mailbox: z.string().default('INBOX'),
-      query: z.string().optional().default(''),
-      to: z.string().optional().describe(TO_DESCRIPTION),
-      from: z.string().optional().describe(FROM_DESCRIPTION),
-      subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
-      ...literalFilterParams,
-      cc: z.string().optional(),
-      bcc: z.string().optional(),
-      text: z.string().optional(),
-      body: z.string().optional(),
-      since: z.string().optional(),
-      before: z.string().optional(),
-      on: z.string().optional(),
-      sent_since: z.string().optional(),
-      sent_before: z.string().optional(),
-      seen: z.boolean().optional(),
-      flagged: z.boolean().optional(),
-      has_attachment: z.boolean().optional(),
-      larger_than: z.number().optional(),
-      smaller_than: z.number().optional(),
-      answered: z.boolean().optional(),
-      draft: z.boolean().optional(),
-      deleted: z.boolean().optional(),
-      keyword: z.union([z.string(), z.array(z.string())]).optional(),
-      not_keyword: z.union([z.string(), z.array(z.string())]).optional(),
-      header: z.record(z.string(), z.string()).optional(),
-      attachment_filename: z.string().optional(),
-      attachment_mimetype: z.string().optional(),
-      gmail_raw: z.string().optional(),
-      format: z.enum(['csv', 'ndjson']).default('csv'),
-      max_rows: z.number().int().min(1).max(50000).default(5000),
-      columns: z
-        .array(
-          z.enum([
-            'id',
-            'account',
-            'date',
-            'from',
-            'to',
-            'subject',
-            'flags',
-            'labels',
-            'attachments',
-            'preview',
-            'size',
-          ]),
-        )
-        .optional()
-        .describe('CSV only; ignored for NDJSON (NDJSON always writes full EmailMeta JSON)'),
-      destination: z
-        .string()
-        .optional()
-        .describe('Absolute path. Default: ~/Downloads/email-export-<ISO-ts>.{csv|ndjson}'),
+      description:
+        `Run any search_emails / search_all_accounts query and stream the result set to a CSV or ` +
+        `NDJSON file under ~/Downloads/ (or a caller-supplied destination). Bypasses the MCP response ` +
+        `byte budget — returns only a summary (path, rows_written, truncated). Default CSV columns: ` +
+        `id, account, date, from, subject, labels, attachments, has_attachments, seen, flagged. ` +
+        `NDJSON writes the full EmailMeta of each message, body preview included (on IMAP this ` +
+        `reads the start of each message's text part). ${COVERAGE_NOTE}`,
+      inputSchema: z.object({
+        account: z.string().optional().describe('Single-account mode'),
+        accounts: z
+          .array(z.string())
+          .optional()
+          .describe('Cross-account fan-out; defaults to every configured account'),
+        mailbox: z.string().default('INBOX'),
+        query: z.string().optional().default(''),
+        to: z.string().optional().describe(TO_DESCRIPTION),
+        from: z.string().optional().describe(FROM_DESCRIPTION),
+        subject: z.string().optional().describe(SUBJECT_DESCRIPTION),
+        ...literalFilterParams,
+        cc: z.string().optional(),
+        bcc: z.string().optional(),
+        text: z.string().optional(),
+        body: z.string().optional(),
+        since: z.string().optional(),
+        before: z.string().optional(),
+        on: z.string().optional(),
+        sent_since: z.string().optional(),
+        sent_before: z.string().optional(),
+        seen: z.boolean().optional(),
+        flagged: z.boolean().optional(),
+        has_attachment: z.boolean().optional(),
+        larger_than: numeric(z.number().optional()),
+        smaller_than: numeric(z.number().optional()),
+        answered: z.boolean().optional(),
+        draft: z.boolean().optional(),
+        deleted: z.boolean().optional(),
+        keyword: z.union([z.string(), z.array(z.string())]).optional(),
+        not_keyword: z.union([z.string(), z.array(z.string())]).optional(),
+        header: z.record(z.string(), z.string()).optional(),
+        attachment_filename: z.string().optional(),
+        attachment_mimetype: z.string().optional(),
+        gmail_raw: z.string().optional(),
+        format: z.enum(['csv', 'ndjson']).default('csv'),
+        max_rows: numeric(z.number().int().min(1).max(50000).default(5000)),
+        columns: z
+          .array(
+            z.enum([
+              'id',
+              'account',
+              'date',
+              'from',
+              'to',
+              'subject',
+              'flags',
+              'labels',
+              'attachments',
+              'preview',
+              'size',
+            ]),
+          )
+          .optional()
+          .describe(
+            'CSV only; ignored for NDJSON (NDJSON always writes full EmailMeta JSON, body preview ' +
+              'included on both IMAP and Graph)',
+          ),
+        destination: z
+          .string()
+          .optional()
+          .describe('Absolute path. Default: ~/Downloads/email-export-<ISO-ts>.{csv|ndjson}'),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
-    { readOnlyHint: true, destructiveHint: false },
     async (params) => {
       try {
         const tsSlug = new Date().toISOString().replace(/[:.]/g, '-');
@@ -286,6 +316,8 @@ export default function registerExportTools(
             attachmentMimetype: params.attachment_mimetype,
             gmailRaw: params.gmail_raw,
             ...literalFilterOptions(params),
+            // Aperçu : toujours en NDJSON, sur demande en CSV (exportNeedsPreview).
+            preview: exportNeedsPreview(params.format, params.columns),
             maxRows: params.max_rows,
           },
         );

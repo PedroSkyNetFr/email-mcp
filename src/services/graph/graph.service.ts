@@ -19,6 +19,7 @@
 
 import type {
   AccountConfig,
+  AttachmentMeta,
   BatchEmailSaveResult,
   BulkResult,
   Email,
@@ -28,6 +29,7 @@ import type {
   EmailSaveResult,
   LabelInfo,
   Mailbox,
+  MailboxSnapshot,
   PaginatedResult,
   SearchCoverage,
 } from '../../types/index.js';
@@ -42,6 +44,8 @@ import {
 } from '../../utils/headers.js';
 import type { AttachmentInput, ResolvedAttachment } from '../attachment-resolver.js';
 import { resolveAttachments } from '../attachment-resolver.js';
+import type { AttachmentRef } from '../attachment-select.js';
+import { realAttachments, selectAttachment, uniqueAttachmentNames } from '../attachment-select.js';
 import {
   assertSafeDestination,
   defaultEmlFilename,
@@ -55,6 +59,7 @@ import { buildCoverage, MAX_SCANNED_MESSAGES, SEARCH_SCAN_BUDGET_MS } from '../s
 import { applyLiteralFilters } from '../search-criteria.js';
 import { applyAccountSignature } from '../signature-loader.js';
 import type GraphClient from './graph.client.js';
+import GraphSendService from './graph-send.service.js';
 
 /** Graph mailFolder subset we rely on. */
 interface GraphFolder {
@@ -75,6 +80,8 @@ interface GraphMessage {
   toRecipients?: { emailAddress?: { name?: string; address?: string } }[];
   ccRecipients?: { emailAddress?: { name?: string; address?: string } }[];
   bccRecipients?: { emailAddress?: { name?: string; address?: string } }[];
+  /** Adresses Reply-To ; tableau vide quand l'expéditeur n'en a pas posé. */
+  replyTo?: { emailAddress?: { name?: string; address?: string } }[];
   receivedDateTime?: string;
   sentDateTime?: string;
   isRead?: boolean;
@@ -104,6 +111,32 @@ interface GraphAttachment {
   isInline?: boolean;
 }
 
+/**
+ * Champs d'une pièce jointe listée. `contentId` n'existe que sur le type
+ * dérivé fileAttachment : le préfixe de type est obligatoire dans $select.
+ */
+const ATTACHMENT_LIST_SELECT =
+  'id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId';
+
+/**
+ * Pièce jointe Graph → AttachmentMeta. Le `partId` est l'id de la pièce :
+ * stable, et seul désignateur sans ambiguïté quand deux pièces portent le
+ * même nom. Une pièce inline à cid est marquée comme sur IMAP.
+ */
+function toAttachmentMeta(a: GraphAttachment): AttachmentMeta {
+  const bare = a.contentId?.trim().replace(/^</, '').replace(/>$/, '');
+  const contentId = bare !== undefined && bare !== '' ? bare : undefined;
+  const inline = a.isInline === true && !!contentId;
+  return {
+    filename: a.name ?? 'unnamed',
+    mimeType: a.contentType ?? 'application/octet-stream',
+    size: a.size ?? 0,
+    partId: a.id,
+    ...(contentId ? { contentId } : {}),
+    ...(inline ? { inline: true } : {}),
+  };
+}
+
 /** Fields needed to build an EmailMeta — kept narrow to limit payload size. */
 const META_SELECT =
   'id,subject,from,toRecipients,receivedDateTime,isRead,flag,hasAttachments,bodyPreview,categories';
@@ -125,7 +158,7 @@ const SCAN_SELECT =
   'id,subject,from,receivedDateTime,sentDateTime,isRead,flag,hasAttachments,bodyPreview,categories';
 const SCAN_SELECT_WITH_TO = `${SCAN_SELECT},toRecipients`;
 
-const FULL_SELECT = `${META_SELECT},ccRecipients,bccRecipients,sentDateTime,internetMessageId,body,internetMessageHeaders`;
+const FULL_SELECT = `${META_SELECT},ccRecipients,bccRecipients,replyTo,sentDateTime,internetMessageId,body,internetMessageHeaders`;
 
 /**
  * Convertit la liste d'en-têtes de Graph vers la représentation partagée avec
@@ -238,6 +271,8 @@ export function toEmailMeta(message: GraphMessage): EmailMeta {
 /** Options de recherche comprises par le backend Graph. */
 interface GraphSearchOptions extends DateFilters {
   mailbox?: string;
+  /** false : requête libre sur sujet / expéditeur / destinataires seulement. */
+  deep?: boolean;
   page?: number;
   pageSize?: number;
   from?: string;
@@ -295,9 +330,32 @@ function hasLiteralFilters(options: GraphSearchOptions): boolean {
   );
 }
 
-/** Texte envoyé à `$search` : requête libre + sujet / expéditeur / destinataire. */
+/**
+ * Requête libre restreinte aux en-têtes (`deep: false`) : sujet, expéditeur ou
+ * destinataires, jamais le corps — même portée que SUBJECT / FROM / TO côté
+ * IMAP. KQL : `(subject:a OR from:a OR to:a)` ; une requête de plusieurs mots
+ * exige que chaque mot figure dans le MÊME champ (`(subject:a AND subject:b)
+ * OR …`). Les guillemets et barres obliques inverses sont retirés : le texte
+ * KQL entier est déjà placé entre guillemets dans `$search`.
+ */
+export function headerOnlyKql(query: string): string {
+  const words = query.replace(/["\\]/g, ' ').split(/\s+/).filter(Boolean);
+  if (words.length === 0) return '';
+  const clause = (property: string): string =>
+    words.length === 1
+      ? `${property}:${words[0]}`
+      : `(${words.map((word) => `${property}:${word}`).join(' AND ')})`;
+  return `(${['subject', 'from', 'to'].map(clause).join(' OR ')})`;
+}
+
+/**
+ * Texte envoyé à `$search` : requête libre + sujet / expéditeur / destinataire.
+ * Sans propriété, `$search` couvre expéditeur, sujet ET corps ; `deep: false`
+ * restreint la requête libre aux en-têtes (voir headerOnlyKql).
+ */
 function searchText(query: string, options: GraphSearchOptions): string {
-  return [query, options.subject, options.from, options.to].filter(Boolean).join(' ').trim();
+  const free = options.deep === false ? headerOnlyKql(query) : query;
+  return [free, options.subject, options.from, options.to].filter(Boolean).join(' ').trim();
 }
 
 /** Messages lus par requête lors d'un parcours `$filter` (Graph accepte 1 à 1000). */
@@ -571,6 +629,38 @@ export default class GraphService {
     }));
   }
 
+  /**
+   * Compteurs d'un dossier pour la ressource `stats`, côté Graph : le total et
+   * les non-lus viennent des propriétés du dossier (`totalItemCount`,
+   * `unreadItemCount`) — une seule requête, sans parcourir les messages —, le
+   * nombre du jour d'un `$count` filtré sur `receivedDateTime` qui ne renvoie
+   * qu'un identifiant.
+   */
+  async getMailboxSnapshot(accountName: string, mailbox = 'INBOX'): Promise<MailboxSnapshot> {
+    const client = this.client(accountName);
+    const folderId = await this.resolveFolderId(accountName, mailbox);
+    const folder = await client.request<GraphFolder>(
+      'GET',
+      `/me/mailFolders/${folderId}?$select=totalItemCount,unreadItemCount`,
+    );
+
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    const filter = encodeURIComponent(`receivedDateTime ge ${midnight.toISOString()}`);
+    const today = await client.request<{ value: unknown[]; '@odata.count'?: number }>(
+      'GET',
+      `/me/mailFolders/${folderId}/messages?$select=id&$top=1&$count=true&$filter=${filter}`,
+    );
+
+    return {
+      total: folder.totalItemCount ?? 0,
+      unread: folder.unreadItemCount ?? 0,
+      // Sans `@odata.count`, le nombre reste inconnu : `value.length` vaudrait
+      // au plus 1 (à cause de `$top=1`) et afficherait un faux compteur.
+      receivedToday: today['@odata.count'],
+    };
+  }
+
   // -------------------------------------------------------------------------
   // Messages
   // -------------------------------------------------------------------------
@@ -637,26 +727,30 @@ export default class GraphService {
       `/me/messages/${emailId}?$select=${FULL_SELECT}`,
     );
 
-    const attachments = message.hasAttachments
-      ? await client.collect<GraphAttachment>(
-          `/me/messages/${emailId}/attachments?$select=id,name,contentType,size`,
-        )
-      : [];
-
     const isHtml = (message.body?.contentType ?? '').toLowerCase() === 'html';
     const content = message.body?.content ?? '';
+
+    // `hasAttachments` de Graph ignore les pièces inline : un message dont
+    // seules des images cid (logo de signature) sont jointes y vaut false. La
+    // liste est donc aussi lue quand le corps HTML référence un `cid:`, pour
+    // que ces images soient listées — et téléchargeables — comme sur IMAP.
+    const attachments =
+      message.hasAttachments || (isHtml && /cid:/i.test(content))
+        ? await client.collect<GraphAttachment>(
+            `/me/messages/${emailId}/attachments?$select=${ATTACHMENT_LIST_SELECT}`,
+          )
+        : [];
 
     return {
       ...toEmailMeta(message),
       cc: toAddresses(message.ccRecipients),
       bcc: toAddresses(message.bccRecipients),
+      // Pour l'affichage seulement : la réponse Graph (`/reply`, `createReply`)
+      // suit déjà `replyTo` côté serveur.
+      ...(message.replyTo?.length ? { replyTo: toAddresses(message.replyTo) } : {}),
       ...(isHtml ? { bodyHtml: content } : { bodyText: content }),
       messageId: message.internetMessageId ?? '',
-      attachments: attachments.map((a) => ({
-        filename: a.name ?? 'unnamed',
-        mimeType: a.contentType ?? 'application/octet-stream',
-        size: a.size ?? 0,
-      })),
+      attachments: attachments.map(toAttachmentMeta),
       // Même aplatissement que le backend IMAP (la dernière occurrence gagne) ;
       // la chaîne Received complète s'obtient via `getEmailHeaders`.
       headers: flattenHeaders(toHeaderEntries(message.internetMessageHeaders)),
@@ -969,6 +1063,27 @@ export default class GraphService {
   }
 
   /**
+   * Copie un message dans un autre dossier de la même boîte, sans toucher
+   * l'original (`POST /me/messages/{id}/copy`). Le dossier de destination est
+   * résolu comme pour `moveEmail` (chemin → id Graph). Graph répond avec la
+   * copie créée : son id, opaque et propre à la copie, est renvoyé.
+   */
+  async copyEmail(
+    accountName: string,
+    emailId: string,
+    _sourceMailbox: string,
+    destinationMailbox: string,
+  ): Promise<{ newId?: string }> {
+    const destinationId = await this.resolveFolderId(accountName, destinationMailbox);
+    const copy = await this.client(accountName).request<{ id?: string } | undefined>(
+      'POST',
+      `/me/messages/${emailId}/copy`,
+      { destinationId },
+    );
+    return copy?.id ? { newId: copy.id } : {};
+  }
+
+  /**
    * Delete a message. The default moves it to Deleted Items, mirroring the IMAP
    * path; `permanent` issues a real DELETE, which Graph does not undo.
    */
@@ -1089,21 +1204,48 @@ export default class GraphService {
       cc?: string[];
       bcc?: string[];
       html?: boolean;
+      /** Message-ID auquel le brouillon répond : il est alors rattaché au fil. */
+      inReplyTo?: string;
       attachments?: { filename: string; content: Buffer; contentType: string; cid?: string }[];
     },
-  ): Promise<{ id: number | string; mailbox: string }> {
+  ): Promise<{ id: number | string; mailbox: string; warning?: string }> {
     const recipients = (addresses?: string[]) =>
       (addresses ?? [])
         .map((address) => address.trim())
         .filter(Boolean)
         .map((address) => ({ emailAddress: { address } }));
-
-    const created = await this.client(accountName).request<{ id: string }>('POST', '/me/messages', {
+    const client = this.client(accountName);
+    const message = {
       subject: options.subject,
       body: { contentType: options.html ? 'HTML' : 'Text', content: options.body },
       toRecipients: recipients(options.to),
       ccRecipients: recipients(options.cc),
       bccRecipients: recipients(options.bcc),
+    };
+
+    // in_reply_to était ignoré : le brouillon partait comme un nouveau fil.
+    // Graph ne permet pas de poser In-Reply-To ; on part donc d'un brouillon
+    // createReply sur l'original, comme l'envoi planifié (même code).
+    let warning: string | undefined;
+    if (options.inReplyTo) {
+      const originalId = await GraphSendService.findByInternetMessageId(client, options.inReplyTo);
+      if (originalId) {
+        const draft = await GraphSendService.createThreadedReplyDraft(client, originalId, message);
+        try {
+          await GraphSendService.addAttachments(client, draft.id, options.attachments ?? []);
+        } catch (err) {
+          await GraphSendService.discardDraft(client, draft.id);
+          throw err;
+        }
+        return { id: draft.id, mailbox: 'Drafts' };
+      }
+      warning =
+        `The message being replied to (${options.inReplyTo}) was not found in this mailbox, so ` +
+        'the draft was saved without threading (Graph cannot set In-Reply-To directly).';
+    }
+
+    const created = await client.request<{ id: string }>('POST', '/me/messages', {
+      ...message,
       ...(options.attachments?.length
         ? {
             attachments: options.attachments.map((attachment) => ({
@@ -1118,7 +1260,7 @@ export default class GraphService {
     });
 
     // Graph files new messages in Drafts itself; the id is opaque, not a UID.
-    return { id: created.id, mailbox: 'Drafts' };
+    return { id: created.id, mailbox: 'Drafts', ...(warning ? { warning } : {}) };
   }
 
   /**
@@ -1160,10 +1302,11 @@ export default class GraphService {
       cc?: string[];
       bcc?: string[];
       html?: boolean;
+      inReplyTo?: string;
       attachments?: AttachmentInput[];
       appendSignature?: boolean;
     },
-  ): Promise<{ id: number | string; mailbox: string }> {
+  ): Promise<{ id: number | string; mailbox: string; warning?: string }> {
     let resolved: ResolvedAttachment[] = [];
     if (options.attachments?.length) {
       const result = await resolveAttachments(
@@ -1191,6 +1334,7 @@ export default class GraphService {
       cc: options.cc,
       bcc: options.bcc,
       html: signed.html,
+      inReplyTo: options.inReplyTo,
       attachments: signed.attachments,
     });
   }
@@ -1615,18 +1759,22 @@ export default class GraphService {
     accountName: string,
     emailId: string,
     mailbox: string,
-    filename: string,
+    ref: AttachmentRef,
     destination: string,
     overwrite = false,
   ): Promise<{
+    path: string;
     filename: string;
     localPath: string;
     fileUrl: string;
     mimeType: string;
     size: number;
   }> {
-    const payload = await this.downloadAttachment(accountName, emailId, mailbox, filename);
-    return GraphService.writeToDisk(payload, destination, overwrite);
+    const payload = await this.downloadAttachment(accountName, emailId, mailbox, ref);
+    const written = await GraphService.writeToDisk(payload, destination, overwrite);
+    // `path` : le champ que lit save_attachment (contrat IMAP) ; il manquait,
+    // l'outil affichait un chemin vide sur un compte Graph.
+    return { path: written.localPath, ...written };
   }
 
   async saveEmailAttachments(
@@ -1639,7 +1787,7 @@ export default class GraphService {
     { filename: string; localPath: string; fileUrl: string; mimeType: string; size: number }[]
   > {
     const attachments = await this.client(accountName).collect<GraphAttachment>(
-      `/me/messages/${emailId}/attachments?$select=id,name,contentType,size`,
+      `/me/messages/${emailId}/attachments?$select=${ATTACHMENT_LIST_SELECT}`,
     );
 
     const saved: {
@@ -1650,19 +1798,25 @@ export default class GraphService {
       size: number;
     }[] = [];
 
-    // Oversized attachments are skipped, matching the IMAP path.
-    const withinBudget = attachments.filter((meta) => (meta.size ?? 0) <= maxSizeBytes);
+    // Oversized attachments are skipped, matching the IMAP path ; les images
+    // inline (logos de signature) aussi, comme sur IMAP. Les doublons de noms
+    // sont enregistrés « nom (2).ext », comme sur IMAP.
+    const withinBudget = uniqueAttachmentNames(
+      realAttachments(attachments.map(toAttachmentMeta)).filter(
+        (meta) => meta.size <= maxSizeBytes,
+      ),
+    );
 
     /* eslint-disable no-restricted-syntax, no-await-in-loop -- sequential: Graph throttles bursts */
     for (const meta of withinBudget) {
       const full = await this.client(accountName).request<GraphAttachment>(
         'GET',
-        `/me/messages/${emailId}/attachments/${meta.id}`,
+        `/me/messages/${emailId}/attachments/${meta.partId ?? ''}`,
       );
       saved.push(
         await GraphService.writeToDisk(
           {
-            filename: full.name ?? 'unnamed',
+            filename: meta.filename,
             mimeType: full.contentType ?? 'application/octet-stream',
             contentBase64: full.contentBytes ?? '',
           },
@@ -1722,28 +1876,27 @@ export default class GraphService {
     this.folderCache.clear();
   }
 
+  /**
+   * Télécharge UNE pièce jointe, désignée par son id (`partId`, prioritaire)
+   * ou par son nom — refusé, liste des candidates à l'appui, quand plusieurs
+   * pièces le portent. Même contrat que le backend IMAP.
+   */
   async downloadAttachment(
     accountName: string,
     emailId: string,
     _mailbox: string,
-    filename: string,
+    ref: AttachmentRef,
     maxSizeBytes = 25 * 1024 * 1024,
   ): Promise<{ filename: string; mimeType: string; contentBase64: string; size: number }> {
     const client = this.client(accountName);
     const attachments = await client.collect<GraphAttachment>(
-      `/me/messages/${emailId}/attachments?$select=id,name,contentType,size`,
+      `/me/messages/${emailId}/attachments?$select=${ATTACHMENT_LIST_SELECT}`,
     );
-    const match = attachments.find((a) => a.name === filename);
-    if (!match) {
+    const match = selectAttachment(attachments.map(toAttachmentMeta), ref);
+    const { filename } = match;
+    if (match.size > maxSizeBytes) {
       throw new Error(
-        `Attachment "${filename}" not found. Available: ${
-          attachments.map((a) => a.name).join(', ') || 'none'
-        }`,
-      );
-    }
-    if ((match.size ?? 0) > maxSizeBytes) {
-      throw new Error(
-        `Attachment "${filename}" is ${Math.round((match.size ?? 0) / 1024 / 1024)}MB, exceeds ` +
+        `Attachment "${filename}" is ${Math.round(match.size / 1024 / 1024)}MB, exceeds ` +
           `${Math.round(maxSizeBytes / 1024 / 1024)}MB limit`,
       );
     }
@@ -1751,7 +1904,7 @@ export default class GraphService {
     // Re-fetch the single attachment so contentBytes is included.
     const full = await client.request<GraphAttachment>(
       'GET',
-      `/me/messages/${emailId}/attachments/${match.id}`,
+      `/me/messages/${emailId}/attachments/${match.partId ?? ''}`,
     );
     return {
       filename: full.name ?? filename,
