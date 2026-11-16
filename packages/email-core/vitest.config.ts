@@ -5,6 +5,8 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['src/**/*.test.ts'],
+    // Dovecot tests need their container: run them with `pnpm test:integration`.
+    exclude: ['src/__integration__/**'],
     testTimeout: 10_000,
   },
 });

@@ -15,7 +15,7 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['src/**/*.test.ts', 'packages/email-core/src/**/*.test.ts'],
-    exclude: ['src/__integration__/**'],
+    exclude: ['src/__integration__/**', 'packages/*/src/__integration__/**'],
     reporters: ['default', 'junit', 'json'],
     outputFile: {
       junit: 'reports/test-results.xml',

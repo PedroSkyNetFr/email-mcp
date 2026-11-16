@@ -96,6 +96,16 @@ export default defineConfig([
     },
   },
   {
+    // Engine tests against a Dovecot container: test tooling (testcontainers)
+    // is a dev dependency by nature, and seeding a mailbox is sequential.
+    name: "integration/engine-tests",
+    files: ["packages/*/src/__integration__/**/*.ts"],
+    rules: {
+      "import-x/no-extraneous-dependencies": "off",
+      "no-await-in-loop": "off",
+    },
+  },
+  {
     name: "test/relaxed-rules",
     files: ["src/**/*.test.ts", "packages/*/src/**/*.test.ts"],
     rules: {

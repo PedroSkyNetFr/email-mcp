@@ -15,10 +15,14 @@ The engine is chosen per account (`backend = "imap"` or `"graph"` in
 `AccountConfig`); callers only see `IMailService` and `ISendService`.
 
 > **Status: 0.1.0, not published.** The package was extracted from the email-mcp
-> server without changing its behaviour. Its contract is still *derived* from
-> the IMAP class (`Pick<ImapService, keyof ImapService>`), so a new engine has
-> to mimic IMAP; an explicit, provider-neutral contract is being designed.
-> Until then, expect breaking changes between minor versions.
+> server without changing its behaviour; the server still uses the contract
+> *derived* from the IMAP class (`IMailService`). A provider-neutral contract,
+> `MailEngine` (`src/contract/`), is meant for new hosts: one engine per
+> account, opaque ids, folder roles, UID-anchored pages, `listChanges` for
+> synchronisation. It is being implemented: so far the IMAP **reading** half
+> (`src/engines/imap/imap-reader.ts`) — listing folders and messages, reading a
+> message, its source and its attachments, capabilities. Expect breaking
+> changes between minor versions.
 
 ## Installation
 
@@ -76,6 +80,16 @@ pnpm --filter @pedroskynet/email-core build      # dist/
 ```
 
 `pnpm test` at the root runs these tests together with the server's.
+
+The engine integration tests run against a real Dovecot 2.4.5 in a container
+(Docker required) — GreenMail, used by the server's integration tests,
+announces none of the synchronisation extensions (CONDSTORE, QRESYNC):
+
+```bash
+pnpm --filter @pedroskynet/email-core test:integration
+```
+
+`pnpm test:integration` at the root runs them after the server's.
 
 ## License and credits
 

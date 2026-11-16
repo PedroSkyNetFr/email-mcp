@@ -26,7 +26,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "prepare": "tsc -p tsconfig.build.json",
-    "prepublishOnly": "tsc -p tsconfig.build.json"
+    "prepublishOnly": "tsc -p tsconfig.build.json",
+    "test:integration": "vitest run --config vitest.config.integration.ts"
   },
   "keywords": [
     "email",
@@ -70,6 +71,7 @@
     "@types/html-to-text": "^9.0.4",
     "@types/mailparser": "^3.9.0",
     "@types/node": "^26.6.6",
+    "testcontainers": "^12.2.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.12"
   },
