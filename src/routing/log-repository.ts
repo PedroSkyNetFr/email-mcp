@@ -80,6 +80,15 @@ export class MoveLogRepository {
 
   constructor(private readonly url: string | undefined) {}
 
+  /**
+   * Une base est-elle configurée (`[database].url`) ? Permet aux appelants de
+   * distinguer « pas de journal du tout » (installation sans PostgreSQL) de
+   * « journal configuré mais en panne », sans ouvrir de connexion.
+   */
+  isConfigured(): boolean {
+    return !!this.url?.trim();
+  }
+
   private client(): Sql {
     if (this.sql) {
       return this.sql;

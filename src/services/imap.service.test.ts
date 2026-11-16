@@ -253,6 +253,35 @@ describe('ImapService', () => {
       expect(result).toBe('Sent Items');
     });
 
+    // Cas OVH constaté le 2026-11-16 : le serveur marque `\Sent` un « Sent »
+    // quasi vide, Outlook range les envois dans « Éléments envoyés » (non marqué).
+    it('prefers the fuller candidate over a near-empty \\Sent folder (OVH + Outlook)', async () => {
+      client.list.mockResolvedValue([
+        { name: 'INBOX', path: 'INBOX', specialUse: '\\Inbox' },
+        { name: 'Sent', path: 'Sent', specialUse: '\\Sent' },
+        { name: 'Éléments envoyés', path: 'Éléments envoyés' },
+      ]);
+      client.status = vi.fn(async (path: string) => ({
+        path,
+        messages: path === 'Sent' ? 5 : 560,
+      }));
+
+      expect(await service.resolveSentFolder('test')).toBe('Éléments envoyés');
+      // Mémorisé pour le processus : pas de nouveau LIST/STATUS au second envoi.
+      expect(await service.resolveSentFolder('test')).toBe('Éléments envoyés');
+      expect(client.list).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the \\Sent folder on a tie', async () => {
+      client.list.mockResolvedValue([
+        { name: 'Sent', path: 'Sent', specialUse: '\\Sent' },
+        { name: 'Envoyés', path: 'Envoyés' },
+      ]);
+      client.status = vi.fn(async (path: string) => ({ path, messages: 0 }));
+
+      expect(await service.resolveSentFolder('test')).toBe('Sent');
+    });
+
     it('throws when no Sent folder can be resolved', async () => {
       client.list.mockResolvedValue([{ name: 'INBOX', path: 'INBOX', specialUse: '\\Inbox' }]);
 

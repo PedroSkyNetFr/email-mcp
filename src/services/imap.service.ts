@@ -130,6 +130,28 @@ const LARGE_FOLDER_THRESHOLD = 5000;
 const EPHEMERAL_SEARCH_TIMEOUT_MS = 20_000;
 
 /**
+ * Noms courants d'un dossier des envoyés, candidats en plus de celui marqué
+ * `\Sent` (voir resolveSentFolder). imapflow décode les noms UTF-7 modifié :
+ * « Éléments envoyés » arrive tel quel.
+ */
+const SENT_FOLDER_NAMES = [
+  'Sent',
+  'INBOX.Sent',
+  'Sent Items',
+  'INBOX.Sent Items',
+  'Sent Messages',
+  'INBOX.Sent Messages',
+  'Sent Mail',
+  '[Gmail]/Sent Mail',
+  'Éléments envoyés',
+  'INBOX.Éléments envoyés',
+  'Envoyés',
+  'INBOX.Envoyés',
+  'Messages envoyés',
+  'INBOX.Messages envoyés',
+];
+
+/**
  * Per-account fetch cap for `searchAcrossAccounts`. Each account is queried
  * with `page=1` and `pageSize = min(requestedPageSize * 10, 500)` so we have
  * enough rows to merge + paginate without fetching the full match set.
@@ -254,6 +276,22 @@ export function flattenParsedAddresses(
  * elsewhere. Le numéro de partie (`partId`) est ajouté par le parcours de
  * l'arbre, seul à connaître la position du nœud.
  */
+/**
+ * Taille RÉELLE estimée d'une partie MIME, en octets.
+ *
+ * BODYSTRUCTURE donne la taille de la partie telle que stockée, donc encodée :
+ * en base64, 76 caractères + CRLF par 57 octets, soit ~1,37 fois la taille du
+ * fichier. L'afficher telle quelle annonçait 7,8 Ko pour une image de 5,7 Ko,
+ * et ne correspondait pas à Graph, qui donne la taille réelle. Estimation à
+ * quelques octets près (fin de ligne finale, remplissage `=`). Les autres
+ * encodages (7bit, 8bit, binary, quoted-printable) sont laissés tels quels.
+ */
+export function decodedPartSize(node: Record<string, unknown>): number {
+  const size = typeof node.size === 'number' ? node.size : 0;
+  const encoding = typeof node.encoding === 'string' ? node.encoding.toLowerCase() : '';
+  return encoding === 'base64' ? Math.floor((size * 57) / 78) : size;
+}
+
 export function classifyAttachmentNode(node: unknown): AttachmentMeta | null {
   if (!node || typeof node !== 'object') return null;
   const n = node as Record<string, unknown>;
@@ -306,7 +344,7 @@ export function classifyAttachmentNode(node: unknown): AttachmentMeta | null {
   return {
     filename: filename ?? cidName ?? 'unnamed',
     mimeType,
-    size: typeof n.size === 'number' ? n.size : 0,
+    size: decodedPartSize(n),
     ...(contentId ? { contentId } : {}),
     ...(inlineResource ? { inline: true } : {}),
   };
@@ -1171,6 +1209,9 @@ export default class ImapService {
    * cross-account call. TTL'd at `MAILBOX_CACHE_TTL_MS`.
    */
   private mailboxListCache = new Map<string, { list: MailboxRef[]; expiresAt: number }>();
+
+  /** Dossier des envoyés retenu par compte (voir resolveSentFolder), pour le processus. */
+  private sentFolderCache = new Map<string, string>();
 
   /**
    * Ordre par date de réception déjà calculé pour une liste ou une recherche
@@ -2871,53 +2912,68 @@ export default class ImapService {
   // -------------------------------------------------------------------------
 
   /**
-   * Resolve the Sent folder path for an account.
-   * Uses account config override, then SPECIAL-USE attribute, then common names.
+   * Dossier où ranger la copie d'un envoi.
+   *
+   * 1. `sent_folder` du compte, s'il est réglé ;
+   * 2. sinon, parmi les candidats — le dossier marqué `\Sent` par le serveur
+   *    et ceux qui portent un nom courant (anglais, français…) —, celui qui
+   *    contient le PLUS de messages, c'est-à-dire celui où le logiciel de
+   *    messagerie de l'utilisateur range réellement ses envois. À égalité, le
+   *    dossier marqué `\Sent` l'emporte.
+   *
+   * Pourquoi le comptage : OVH marque `\Sent` un dossier « Sent » quasi vide,
+   * alors qu'Outlook range les envois dans « Éléments envoyés », non marqué
+   * (constaté le 2026-11-16 : 5 messages contre 560). Suivre le seul marquage
+   * classait les copies là où l'utilisateur ne les voit jamais.
    */
   async resolveSentFolder(accountName: string): Promise<string> {
     const account = this.connections.getAccount(accountName);
     if (account.sentFolder) return account.sentFolder;
+    const cached = this.sentFolderCache.get(accountName);
+    if (cached) return cached;
 
     const client = await this.connections.getImapClient(accountName);
     const mailboxesRaw = await client.list();
     const mailboxes = Array.isArray(mailboxesRaw) ? mailboxesRaw : [...mailboxesRaw];
 
-    // Try SPECIAL-USE attribute first
-    function isSent(mb: unknown): mb is { specialUse: string; path: string } {
-      if (typeof mb !== 'object' || mb === null) return false;
-      if (!('specialUse' in mb) || !('path' in mb)) return false;
-      return mb.specialUse === '\\Sent' && typeof mb.path === 'string';
-    }
-
-    const specialUse = mailboxes.find(isSent);
-    if (specialUse) return specialUse.path;
-
-    // Fall back to common names
-    const commonNames = [
-      'INBOX.Sent',
-      'Sent',
-      'Sent Items',
-      'Sent Mail',
-      '[Gmail]/Sent Mail',
-      'INBOX.Sent Items',
-      'INBOX.Sent Messages',
-    ];
-
-    function hasPath(mb: unknown): mb is { path: string } {
+    function hasPath(mb: unknown): mb is { path: string; specialUse?: unknown } {
       if (typeof mb !== 'object' || mb === null) return false;
       if (!('path' in mb)) return false;
       return typeof mb.path === 'string';
     }
+    const listed = mailboxes.filter(hasPath);
+    const paths = new Set(listed.map((mb) => mb.path));
 
-    const paths = new Set(mailboxes.filter(hasPath).map((mb) => mb.path));
-    const match = commonNames.find((name) => paths.has(name));
-    if (!match) {
+    // Marqués `\Sent` d'abord (prioritaires à égalité), puis noms courants.
+    const candidates = [
+      ...listed.filter((mb) => mb.specialUse === '\\Sent').map((mb) => mb.path),
+      ...SENT_FOLDER_NAMES.filter((name) => paths.has(name)),
+    ].filter((path, index, all) => all.indexOf(path) === index);
+
+    if (candidates.length === 0) {
       throw new Error(
         `Cannot resolve Sent folder for "${accountName}". ` +
-          `Available mailboxes: ${[...paths].join(', ')}`,
+          `Available mailboxes: ${[...paths].join(', ')} — set sent_folder for this account.`,
       );
     }
-    return match;
+
+    let chosen = candidates[0] ?? '';
+    if (candidates.length > 1) {
+      // Comptage séquentiel (une seule connexion partagée) ; un STATUS refusé
+      // compte -1. Strictement supérieur : à égalité, le premier (\Sent) reste.
+      const best = await candidates.reduce<Promise<{ path: string; count: number }>>(
+        async (accP, path) => {
+          const acc = await accP;
+          const status = await client.status(path, { messages: true }).catch(() => false as const);
+          const count = status === false ? -1 : (status.messages ?? 0);
+          return count > acc.count ? { path, count } : acc;
+        },
+        Promise.resolve({ path: chosen, count: -2 }),
+      );
+      chosen = best.path;
+    }
+    this.sentFolderCache.set(accountName, chosen);
+    return chosen;
   }
 
   /**
@@ -3430,36 +3486,6 @@ export default class ImapService {
    * accounts elsewhere. A non-numeric id here means the two were crossed, which
    * is worth an explicit error rather than a NaN flowing into a fetch.
    */
-  /**
-   * Encodage de transfert (`base64`, `quoted-printable`…) de la partie MIME
-   * `part` d'un BODYSTRUCTURE imapflow, en minuscules ; undefined si inconnu.
-   */
-  private static partEncoding(bodyStructure: unknown, part: string): string | undefined {
-    const walk = (node: unknown, depth: number): string | undefined => {
-      if (depth > MAX_MIME_DEPTH || !node || typeof node !== 'object') return undefined;
-      const n = node as Record<string, unknown>;
-      if (n.part === part) {
-        return typeof n.encoding === 'string' ? n.encoding.toLowerCase() : undefined;
-      }
-      if (!Array.isArray(n.childNodes)) return undefined;
-      return n.childNodes.reduce<string | undefined>(
-        (found, child) => found ?? walk(child, depth + 1),
-        undefined,
-      );
-    };
-    // Message à partie unique : la racine n'a pas de numéro, sa section est « 1 ».
-    const root = bodyStructure as Record<string, unknown> | undefined;
-    if (
-      part === '1' &&
-      root &&
-      !Array.isArray(root.childNodes) &&
-      typeof root.encoding === 'string'
-    ) {
-      return root.encoding.toLowerCase();
-    }
-    return walk(bodyStructure, 0);
-  }
-
   private static toUid(value: number | string, what: string): number {
     const uid = typeof value === 'number' ? value : Number.parseInt(value, 10);
     if (!Number.isFinite(uid)) {
@@ -3540,14 +3566,10 @@ export default class ImapService {
         throw new Error(`Could not locate MIME part for ${selectorLabel(ref)}`);
       }
 
-      // Contrôle préalable sur la taille DÉCODÉE estimée. BODYSTRUCTURE donne la
-      // taille de la partie telle que stockée, donc ENCODÉE : en base64, ~1,37
-      // fois la taille réelle (76 caractères + CRLF pour 57 octets). Comparer
-      // cette valeur brute au plafond refusait à tort une pièce de 20 Mo
-      // (≈ 27,5 Mo encodés) face à un plafond de 25 Mo.
-      const encoding = ImapService.partEncoding(msg.bodyStructure, partNumber);
-      const estimatedSize =
-        encoding === 'base64' ? Math.floor((attachment.size * 57) / 78) : attachment.size;
+      // Contrôle préalable sur la taille DÉCODÉE estimée : `attachment.size` l'est
+      // déjà (voir decodedPartSize). Comparer la taille encodée au plafond
+      // refusait à tort une pièce de 20 Mo (≈ 27,5 Mo encodés) face à 25 Mo.
+      const estimatedSize = attachment.size;
       if (estimatedSize > maxSizeBytes) {
         throw new Error(
           `Attachment "${filename}" is about ${Math.round(estimatedSize / 1024 / 1024)}MB, exceeds ${Math.round(maxSizeBytes / 1024 / 1024)}MB limit`,

@@ -10,6 +10,7 @@ import type {
   AccountConfig,
   DraftCleanupResult,
   Email,
+  ReplyDraftResult,
   SendResult,
   SentCopyResult,
 } from '../types/index.js';
@@ -334,7 +335,7 @@ export default class SmtpService {
       /** Destinataires cachés, conservés dans l'en-tête Bcc du brouillon. */
       bcc?: string[];
     },
-  ): Promise<{ id: number | string; mailbox: string; warnings: string[] }> {
+  ): Promise<ReplyDraftResult> {
     const reply = await this.composeReply(accountName, options, 'draft a reply');
     const saved = await this.imapService.saveDraft(accountName, {
       to: reply.to,
@@ -357,7 +358,14 @@ export default class SmtpService {
           `list_emails on "${saved.mailbox}" before calling send_draft or update_draft.`,
       );
     }
-    return { id: saved.id, mailbox: saved.mailbox, warnings };
+    return {
+      id: saved.id,
+      mailbox: saved.mailbox,
+      subject: reply.subject,
+      to: reply.to,
+      cc: reply.cc,
+      warnings,
+    };
   }
 
   /**

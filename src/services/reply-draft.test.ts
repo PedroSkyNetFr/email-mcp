@@ -100,7 +100,17 @@ describe('SmtpService.saveReplyDraft (IMAP)', () => {
       body: 'Merci, je regarde.',
     });
 
-    expect(result).toEqual({ id: 77, mailbox: 'Drafts', warnings: [] });
+    // Objet et destinataires rappelés à l'appelant, comme dans le brouillon.
+    const saved = imap.saveDraft.mock.calls[0]?.[1] as { to: string[]; subject: string };
+    expect(result).toEqual({
+      id: 77,
+      mailbox: 'Drafts',
+      subject: saved.subject,
+      to: saved.to,
+      cc: expect.any(Array),
+      warnings: [],
+    });
+    expect(result.subject).toMatch(/^Re: /);
     expect(transport.sendMail).not.toHaveBeenCalled();
     // Un brouillon ne consomme pas la limite d'envoi.
     expect(rateLimiter.tryConsume).not.toHaveBeenCalled();
@@ -226,11 +236,26 @@ function graphSetup(
 
 describe('GraphSendService.saveReplyDraft (Graph)', () => {
   it('quoted reply: createReply with the body as comment, never /send', async () => {
-    const { service, calls } = graphSetup({ 'POST /me/messages/AAA/createReply': { id: 'D1' } });
+    const { service, calls } = graphSetup({
+      'POST /me/messages/AAA/createReply': {
+        id: 'D1',
+        subject: 'RE: Devis',
+        toRecipients: [{ emailAddress: { address: 'support@boutique.fr' } }],
+        ccRecipients: [],
+      },
+    });
 
     const result = await service.saveReplyDraft('work', { emailId: 'AAA', body: 'Merci' });
 
-    expect(result).toEqual({ id: 'D1', mailbox: 'Drafts', warnings: [] });
+    // Objet et destinataires tels qu'Exchange les a calculés (Reply-To compris).
+    expect(result).toEqual({
+      id: 'D1',
+      mailbox: 'Drafts',
+      subject: 'RE: Devis',
+      to: ['support@boutique.fr'],
+      cc: [],
+      warnings: [],
+    });
     expect(calls).toEqual([
       { method: 'POST', path: '/me/messages/AAA/createReply', body: { comment: 'Merci' } },
     ]);

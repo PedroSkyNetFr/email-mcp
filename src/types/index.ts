@@ -402,6 +402,20 @@ export interface SendResult {
 }
 
 /**
+ * Résultat de `reply_draft`, sur les deux backends. L'objet et les
+ * destinataires sont rendus pour que l'appelant vérifie le brouillon sans
+ * devoir le relire (le destinataire dépend du Reply-To et de replyAll).
+ */
+export interface ReplyDraftResult {
+  id: number | string;
+  mailbox: string;
+  subject?: string;
+  to?: string[];
+  cc?: string[];
+  warnings: string[];
+}
+
+/**
  * IMAP SEARCH failure classification (R1 — search false-negatives).
  *
  * const-object-derived union mirroring ERROR_KIND/WARNING_KIND. Lives here in

@@ -630,7 +630,7 @@ en-têtes d'un message en liste.
 | `add_label` / `remove_label` | Pose / retire un libellé sur un message. | both | — |
 | `create_label` / `delete_label` | Crée / supprime un libellé. | both | — |
 | `create_mailbox` / `rename_mailbox` / `delete_mailbox` | Gestion des dossiers (`delete_mailbox` supprime aussi le contenu). | both | — |
-| `cross_account_move` | Déplace des messages vers un autre compte en gardant en-têtes, indicateurs et date. Exige Postgres. | source : both · destination : IMAP | — |
+| `cross_account_move` | Déplace des messages vers un autre compte en gardant en-têtes, indicateurs et date. Journal Postgres facultatif. | source : both · destination : IMAP | — |
 | `cross_account_copy` | Copie des messages vers un autre compte en gardant en-têtes, indicateurs et date ; la source n'est jamais modifiée. Sans base de données. | source : both · destination : IMAP | — |
 | `list_mail_rules` | Règles de boîte de réception côté serveur. | Graph | — |
 | `create_mail_rule` / `delete_mail_rule` | Crée / supprime une règle côté serveur. | Graph | — |
@@ -1367,8 +1367,12 @@ récupère le message brut, l'ajoute à la destination avec ses indicateurs et s
 date d'origine (il paraît livré nativement), consigne le déplacement, puis
 déplace la copie source dans la Corbeille du compte source. Un message déjà
 présent à la destination (même `Message-ID`) n'est pas ajouté deux fois. Le
-journal des déplacements vit dans **PostgreSQL** ; sans base, cet outil refuse
-et tous les autres fonctionnent normalement.
+journal des déplacements vit dans **PostgreSQL** et il est facultatif. Avec
+`[database]`, chaque déplacement est consigné, et un déplacement qui ne peut pas
+l'être n'a pas lieu (sa copie à destination est retirée, la source reste
+intacte). Sans base, les déplacements se font sans journal (avertissement
+`audit_log_skipped`) : le contrôle du `Message-ID` évite toujours les doublons ;
+seuls deux déplacements *simultanés* du même message ne sont plus protégés.
 
 - **Source IMAP** : `UID MOVE` vers le dossier `\Trash` (SPECIAL-USE), seulement
   si le serveur annonce `MOVE` et que l'UIDVALIDITY du dossier n'a pas changé —

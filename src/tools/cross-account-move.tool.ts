@@ -4,8 +4,10 @@
  * Moves a message between two *different* configured accounts, preserving the
  * raw RFC822 (headers, MIME, attachments), flags, and INTERNALDATE. Mechanism
  * (D18): FETCH source → APPEND dest → audit-log → UID MOVE source into the
- * source account's Trash (capability-gated, fail-closed). The audit log is part
- * of the move contract — no Postgres, no move (D-Premise-2 / D20).
+ * source account's Trash (capability-gated, fail-closed). With a database
+ * configured, the audit log is part of the move contract — a move that cannot
+ * be logged does not happen (D-Premise-2 / D20). Sans `[database].url`, le
+ * déplacement se fait sans journal (avertissement audit_log_skipped).
  *
  * Source IMAP ou Graph (lecture `/$value`, nettoyage vers Éléments supprimés) ;
  * destination IMAP seulement — une destination Graph est refusée avant de
@@ -41,7 +43,7 @@ function summarize(results: MoveResult[]): string {
       const keptNote = r.source_cleanup_error
         ? ` — SOURCE KEPT (${r.source_cleanup_error.kind}: ${r.source_cleanup_error.message})`
         : '';
-      return `  ✅ ${label(r)} → ${r.dest_account}/${r.dest_mailbox} (${r.status}, dest_uid ${r.dest_uid ?? '?'}, source ${r.source_cleanup}, log #${r.move_log_id})${r.warnings.length ? ` ⚠️ ${r.warnings.map((w) => w.kind).join(',')}` : ''}${keptNote}`;
+      return `  ✅ ${label(r)} → ${r.dest_account}/${r.dest_mailbox} (${r.status}, dest_uid ${r.dest_uid ?? '?'}, source ${r.source_cleanup}, ${r.move_log_id === undefined ? 'not journaled' : `log #${r.move_log_id}`})${r.warnings.length ? ` ⚠️ ${r.warnings.map((w) => w.kind).join(',')}` : ''}${keptNote}`;
     }
     return `  ❌ ${label(r)} — ${r.error_kind}: ${r.error_message}`;
   });
@@ -94,8 +96,10 @@ export default function registerCrossAccountMoveTool(
         'Graph: Deleted Items, never a permanent delete). If that cleanup fails, the result ' +
         'says so (source_cleanup_error, warning source_not_removed): the message is at the ' +
         'destination and the source is still in place. For moves within ONE account use ' +
-        'move_email instead. Requires the routing Postgres database to be configured (the ' +
-        'move is audit-logged).',
+        'move_email instead. With a Postgres database configured ([database].url) every move ' +
+        'is audit-logged and a move that cannot be logged does not happen (its destination ' +
+        'copy is removed); without one the move still runs, unjournaled (warning ' +
+        'audit_log_skipped), duplicates being prevented by the Message-ID check.',
       inputSchema: z.object({
         sourceAccount: z.string().describe('Source account name (from list_accounts)'),
         sourceMailbox: z.string().describe('Source mailbox, e.g. INBOX'),

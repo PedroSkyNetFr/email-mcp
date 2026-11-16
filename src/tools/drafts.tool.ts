@@ -227,13 +227,23 @@ export default function registerDraftTools(
 
         const warningBlock =
           result.warnings.length > 0 ? `\n⚠️ ${result.warnings.join('\n⚠️ ')}` : '';
+        // Objet et destinataires rappelés : ils dépendent du Reply-To et de
+        // replyAll, et l'appelant doit pouvoir les vérifier sans relire le brouillon.
+        const recap = [
+          result.subject ? `Subject: ${result.subject}` : undefined,
+          result.to && result.to.length > 0 ? `To: ${result.to.join(', ')}` : undefined,
+          result.cc && result.cc.length > 0 ? `Cc: ${result.cc.join(', ')}` : undefined,
+        ]
+          .filter(Boolean)
+          .join('\n');
         return {
           content: [
             {
               type: 'text' as const,
               text:
                 `📝 Reply saved as a draft — NOT sent (ID: ${result.id}, folder: ${result.mailbox}). ` +
-                `Send it with send_draft, or rewrite it with update_draft.${warningBlock}`,
+                `Send it with send_draft, or rewrite it with update_draft.` +
+                `${recap ? `\n${recap}` : ''}${warningBlock}`,
             },
           ],
         };

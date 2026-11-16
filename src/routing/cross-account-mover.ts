@@ -56,6 +56,22 @@ import type { MoveWarning, SourceCleanup } from './error-kinds.js';
 import { ERROR_KIND, MoveError, WARNING_KIND } from './error-kinds.js';
 import type { MoveLogRepository } from './log-repository.js';
 
+/**
+ * Peut-on retirer UN message de sa boîte sans risquer d'en effacer d'autres ?
+ *
+ * - `MOVE` (RFC 6851) : `UID MOVE`, atomique.
+ * - sans MOVE mais avec `UIDPLUS` (RFC 4315) : imapflow émule le déplacement
+ *   par COPY + `\Deleted` + `UID EXPUNGE <uid>`, qui n'efface QUE ce message.
+ *   C'est le cas d'OVH (constaté le 2026-11-16 : MOVE absent, UIDPLUS présent),
+ *   où le déplacement était jusqu'ici refusé alors qu'il était sûr.
+ * - ni l'un ni l'autre : l'émulation finirait par un `EXPUNGE` général, qui
+ *   efface aussi les messages que l'utilisateur a lui-même marqués supprimés.
+ *   Refusé. (La réserve de wgs4 sur Gmail visait ce chemin ; Gmail annonce MOVE.)
+ */
+export function canMoveSafely(capabilities: Map<string, unknown>): boolean {
+  return capabilities.has('MOVE') || capabilities.has('UIDPLUS');
+}
+
 // Réexportés pour les appelants historiques ; la définition vit dans le module partagé.
 export { classifyImapError, formatFrom, toDate } from './cross-account-transfer.js';
 
@@ -91,7 +107,8 @@ export type MoveResult =
        * source conservée). Absent quand le nettoyage a abouti.
        */
       source_cleanup_error?: { kind: string; message: string };
-      move_log_id: number;
+      /** Absent quand aucune base n'est configurée (déplacement non journalisé). */
+      move_log_id?: number;
       warnings: MoveWarning[];
     }
   | {
@@ -206,70 +223,99 @@ export class CrossAccountMover {
         { requireUid: true, routedKeyword: true, warnings },
       );
 
-      // 5. Synchronous audit INSERT (D-Premise-2 — part of the move contract).
-      // claim() throws a typed MoveError on DB-down/misconfig (→ outer catch);
-      // returns ok:false when a concurrent move won the unique-index race.
+      // 5. Journal d'audit (D-Premise-2).
+      // Sans base configurée, le déplacement n'est pas journalisé : il reste sûr
+      // contre les doublons grâce au contrôle du Message-ID à destination fait
+      // avant l'APPEND ; seule manque la protection contre deux déplacements
+      // SIMULTANÉS du même message, que donne l'index unique de la base. Avant,
+      // l'absence de base faisait échouer le déplacement APRÈS l'APPEND : une
+      // copie restait à destination derrière un « Move failed ».
       const status: 'success' | 'duplicate_skipped' = dedupHit ? 'duplicate_skipped' : 'success';
-      const claimed = await this.logRepo.claim({
-        source_account: sourceAccount,
-        source_mailbox: sourceMailbox,
-        // Source Graph (id opaque) : 0, identifiée par son Message-ID — même
-        // convention que le journal des copies.
-        source_uid: uid,
-        dest_account: destAccount,
-        dest_mailbox: destMailbox,
-        dest_uid: destUid,
-        message_id: src.messageId,
-        subject: src.subject,
-        from_addr: src.from,
-        email_date: null,
-        size_bytes: src.sizeBytes,
-        status,
-        manual: true,
-      });
-      if (!claimed.ok) {
-        // A concurrent move won the race after our pre-flight dedup passed.
-        // Remove our just-appended duplicate; report duplicate_skipped.
-        if (!dedupHit && destUid !== null) {
-          await this.discardDestDuplicate(destAccount, destMailbox, destUid).catch(() => {});
+      let moveLogId: number | undefined;
+      if (!this.logRepo.isConfigured()) {
+        warnings.push({
+          kind: WARNING_KIND.AUDIT_LOG_SKIPPED,
+          message:
+            'no [database].url configured: the move is not journaled (duplicates are still ' +
+            'prevented by the Message-ID check at the destination)',
+        });
+      } else {
+        // Base configurée : « pas de journal, pas de déplacement ». claim()
+        // lève une MoveError typée si la base est en panne ; on retire d'abord
+        // la copie que l'on vient de déposer, pour qu'un échec ne laisse rien.
+        let claimed: Awaited<ReturnType<MoveLogRepository['claim']>>;
+        try {
+          claimed = await this.logRepo.claim({
+            source_account: sourceAccount,
+            source_mailbox: sourceMailbox,
+            // Source Graph (id opaque) : 0, identifiée par son Message-ID — même
+            // convention que le journal des copies.
+            source_uid: uid,
+            dest_account: destAccount,
+            dest_mailbox: destMailbox,
+            dest_uid: destUid,
+            message_id: src.messageId,
+            subject: src.subject,
+            from_addr: src.from,
+            email_date: null,
+            size_bytes: src.sizeBytes,
+            status,
+            manual: true,
+          });
+        } catch (claimErr) {
+          // Journal en panne : la source n'a pas été touchée ; on retire la
+          // copie déposée (sauf si elle était déjà là avant nous).
+          if (!dedupHit && destUid !== null) {
+            await this.discardDestDuplicate(destAccount, destMailbox, destUid).catch(() => {});
+          }
+          throw claimErr;
         }
-        if (!claimed.existing) {
-          throw new MoveError(
-            ERROR_KIND.AUDIT_LOG_INSERT_FAILED,
-            'duplicate detected but winner row not found',
-          );
+        if (!claimed.ok) {
+          // A concurrent move won the race after our pre-flight dedup passed.
+          // Remove our just-appended duplicate; report duplicate_skipped.
+          if (!dedupHit && destUid !== null) {
+            await this.discardDestDuplicate(destAccount, destMailbox, destUid).catch(() => {});
+          }
+          if (!claimed.existing) {
+            throw new MoveError(
+              ERROR_KIND.AUDIT_LOG_INSERT_FAILED,
+              'duplicate detected but winner row not found',
+            );
+          }
+          return {
+            success: true,
+            status: 'duplicate_skipped',
+            source_account: sourceAccount,
+            source_mailbox: sourceMailbox,
+            source_uid: sourceUid,
+            source_id: emailId,
+            dest_account: destAccount,
+            dest_mailbox: destMailbox,
+            dest_uid: claimed.existing.dest_uid,
+            message_id: src.messageId,
+            subject: src.subject,
+            from: src.from,
+            size_bytes: src.sizeBytes,
+            source_cleanup: 'skipped_unsafe',
+            move_log_id: claimed.existing.id,
+            warnings,
+          };
         }
-        return {
-          success: true,
-          status: 'duplicate_skipped',
-          source_account: sourceAccount,
-          source_mailbox: sourceMailbox,
-          source_uid: sourceUid,
-          source_id: emailId,
-          dest_account: destAccount,
-          dest_mailbox: destMailbox,
-          dest_uid: claimed.existing.dest_uid,
-          message_id: src.messageId,
-          subject: src.subject,
-          from: src.from,
-          size_bytes: src.sizeBytes,
-          source_cleanup: 'skipped_unsafe',
-          move_log_id: claimed.existing.id,
-          warnings,
-        };
+        moveLogId = claimed.id;
       }
-      const moveLogId = claimed.id;
 
       // 6-8. Source cleanup, capability-gated UID MOVE to source Trash.
       const cleanup = sourceIsGraph
         ? await this.cleanupGraphSource(sourceAccount, sourceMailbox, emailId)
         : await this.cleanupSource(sourceAccount, sourceMailbox, uid, src.uidValidity);
-      await this.logRepo.recordSourceCleanup(moveLogId, {
-        source_deleted: cleanup.deleted,
-        source_cleanup: cleanup.kind,
-        error_kind: cleanup.errorKind ?? null,
-        error_message: cleanup.errorMessage ?? null,
-      });
+      if (moveLogId !== undefined) {
+        await this.logRepo.recordSourceCleanup(moveLogId, {
+          source_deleted: cleanup.deleted,
+          source_cleanup: cleanup.kind,
+          error_kind: cleanup.errorKind ?? null,
+          error_message: cleanup.errorMessage ?? null,
+        });
+      }
       if (cleanup.warning) {
         warnings.push(cleanup.warning);
       }
@@ -395,17 +441,30 @@ export class CrossAccountMover {
         };
       }
 
-      // 8. Capability-gated. UID MOVE only (proven safe on every current
-      // account incl. Gmail). No MOVE → fail closed; never risk EXPUNGE.
-      if (!client.capabilities.has('MOVE')) {
+      // 8. Capability-gated (voir canMoveSafely). UID MOVE, ou, sans MOVE mais
+      // avec UIDPLUS, l'émulation d'imapflow limitée à ce seul UID. Sans les
+      // deux → fail closed : un EXPUNGE général effacerait d'autres messages.
+      if (!canMoveSafely(client.capabilities)) {
         return {
           deleted: false,
           kind: 'skipped_unsafe',
           errorKind: ERROR_KIND.SOURCE_CLEANUP_UNSAFE,
-          errorMessage: `source "${account}" does not advertise MOVE; refusing unsafe EXPUNGE (fail closed)`,
+          errorMessage:
+            `source "${account}" advertises neither MOVE nor UIDPLUS; refusing an ` +
+            'unscoped EXPUNGE (fail closed)',
         };
       }
-      await client.messageMove(String(uid), trashPath, { uid: true });
+      // imapflow signale un échec par `false`, sans lever : sans ce contrôle, un
+      // déplacement raté était rapporté « moved_to_trash ».
+      const moved = await client.messageMove(String(uid), trashPath, { uid: true });
+      if (!moved) {
+        return {
+          deleted: false,
+          kind: 'skipped_unsafe',
+          errorKind: ERROR_KIND.SOURCE_CLEANUP_FAILED,
+          errorMessage: `the server refused to move the source to "${trashPath}"`,
+        };
+      }
       return { deleted: true, kind: 'moved_to_trash' };
     } catch (err) {
       return {
@@ -464,10 +523,10 @@ export class CrossAccountMover {
     const trashPath = mailboxes.find((mb) => mb.specialUse === '\\Trash')?.path;
     const lock = await client.getMailboxLock(destMailbox);
     try {
-      if (trashPath && client.capabilities.has('MOVE')) {
+      if (trashPath && canMoveSafely(client.capabilities)) {
         await client.messageMove(String(destUid), trashPath, { uid: true });
       }
-      // No MOVE/Trash: leave the dup; the orphan is logged by the caller.
+      // No safe move / no Trash: leave the dup; the orphan is logged by the caller.
     } finally {
       lock.release();
     }

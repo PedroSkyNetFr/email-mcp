@@ -615,7 +615,7 @@ Microsoft Graph does not serve message headers in a listing.
 | `add_label` / `remove_label` | Label a message / remove the label. | both | — |
 | `create_label` / `delete_label` | Create / delete a label. | both | — |
 | `create_mailbox` / `rename_mailbox` / `delete_mailbox` | Folder management (`delete_mailbox` deletes the content too). | both | — |
-| `cross_account_move` | Move messages to another account, keeping headers, flags and date. Needs Postgres. | source: both · destination: IMAP | — |
+| `cross_account_move` | Move messages to another account, keeping headers, flags and date. Postgres log optional. | source: both · destination: IMAP | — |
 | `cross_account_copy` | Copy messages to another account, keeping headers, flags and date; the source is never touched. No database needed. | source: both · destination: IMAP | — |
 | `list_mail_rules` | Server-side inbox rules. | Graph | — |
 | `create_mail_rule` / `delete_mail_rule` | Create / delete a server-side rule. | Graph | — |
@@ -1318,8 +1318,12 @@ fetches the raw message, appends it to the destination with its flags and
 original date (it looks natively delivered), records the move, then moves the
 source copy to the source account's Trash. A message already present at the
 destination (same `Message-ID`) is not appended twice. The move log lives in
-**PostgreSQL**; without a database, this tool refuses and every other tool works
-normally.
+**PostgreSQL** and is optional. With `[database]` set, every move is logged and
+a move that cannot be logged does not happen (its destination copy is removed
+again, the source is untouched). Without a database, moves still run, unlogged
+(warning `audit_log_skipped`): the `Message-ID` check still prevents
+duplicates; only two *simultaneous* moves of the same message are no longer
+guarded.
 
 - **IMAP source**: `UID MOVE` into the `\Trash` folder (SPECIAL-USE), only if
   the server advertises `MOVE` and the folder's UIDVALIDITY has not changed —

@@ -22,7 +22,7 @@
  *     l'issue est inconnue, le brouillon est gardé (voir sendViaDraft).
  */
 
-import type { AccountConfig, SendResult } from '../../types/index.js';
+import type { AccountConfig, ReplyDraftResult, SendResult } from '../../types/index.js';
 import type { ResolvedAttachment } from '../attachment-resolver.js';
 import { uniqueAttachmentNames } from '../attachment-select.js';
 import { assertMessageSize, estimateEncodedMessageSize } from '../send-limit.js';
@@ -497,7 +497,7 @@ export default class GraphSendService {
       attachments?: ResolvedAttachment[];
       bcc?: string[];
     },
-  ): Promise<{ id: number | string; mailbox: string; warnings: string[] }> {
+  ): Promise<ReplyDraftResult> {
     const account = this.getAccount(accountName);
     const client = this.client(accountName);
     const signed = await applyAccountSignature(
@@ -516,11 +516,23 @@ export default class GraphSendService {
     const bcc = toRecipients(options.bcc);
 
     const createVerb = options.replyAll ? 'createReplyAll' : 'createReply';
-    const draft = await client.request<{ id: string }>(
+    // createReply / createReplyAll rendent le brouillon créé par Exchange, avec
+    // l'objet et les destinataires qu'il a calculés (Reply-To compris).
+    interface Recipient {
+      emailAddress?: { address?: string };
+    }
+    const draft = await client.request<{
+      id: string;
+      subject?: string;
+      toRecipients?: Recipient[];
+      ccRecipients?: Recipient[];
+    }>(
       'POST',
       `/me/messages/${options.emailId}/${createVerb}`,
       quote ? { comment: signed.body } : {},
     );
+    const addresses = (list?: Recipient[]): string[] =>
+      (list ?? []).map((r) => r.emailAddress?.address).filter((a): a is string => !!a);
     try {
       const patch: Record<string, unknown> = {
         ...(quote
@@ -536,7 +548,14 @@ export default class GraphSendService {
       await GraphSendService.discardDraft(client, draft.id);
       throw err;
     }
-    return { id: draft.id, mailbox: 'Drafts', warnings: [] };
+    return {
+      id: draft.id,
+      mailbox: 'Drafts',
+      subject: draft.subject,
+      to: addresses(draft.toRecipients),
+      cc: addresses(draft.ccRecipients),
+      warnings: [],
+    };
   }
 
   // -------------------------------------------------------------------------

@@ -12,7 +12,7 @@ import type ConnectionManager from '../connections/manager.js';
 import { GraphError } from '../services/graph/graph.client.js';
 import type { IMailService } from '../services/mail-service.types.js';
 import { CrossAccountMover } from './cross-account-mover.js';
-import { ERROR_KIND, WARNING_KIND } from './error-kinds.js';
+import { ERROR_KIND, MoveError, WARNING_KIND } from './error-kinds.js';
 import type { MoveLogRepository } from './log-repository.js';
 
 const RAW = Buffer.from(
@@ -52,7 +52,7 @@ function imapClient() {
 
 type FakeClient = ReturnType<typeof imapClient>;
 
-function setup(options: { graph?: string[] } = {}) {
+function setup(options: { graph?: string[]; journal?: boolean } = {}) {
   const clients: Record<string, FakeClient> = {
     perso: imapClient(),
     pro: imapClient(),
@@ -76,6 +76,7 @@ function setup(options: { graph?: string[] } = {}) {
     deleteEmail: vi.fn().mockResolvedValue(undefined),
   };
   const logRepo = {
+    isConfigured: vi.fn().mockReturnValue(options.journal ?? true),
     claim: vi.fn().mockResolvedValue({ ok: true, id: 11 }),
     recordSourceCleanup: vi.fn().mockResolvedValue(undefined),
   };
@@ -235,7 +236,7 @@ describe('CrossAccountMover — IMAP → IMAP (non-régression)', () => {
     expect(clients.perso.messageMove).not.toHaveBeenCalled();
   });
 
-  it('fails closed without MOVE, and says the source was kept', async () => {
+  it('fails closed without MOVE nor UIDPLUS, and says the source was kept', async () => {
     const { mover, clients } = setup();
     clients.perso.capabilities = new Map();
 
@@ -249,6 +250,32 @@ describe('CrossAccountMover — IMAP → IMAP (non-régression)', () => {
     expect(r.success && r.warnings.map((w) => w.kind)).toEqual([WARNING_KIND.SOURCE_NOT_REMOVED]);
     expect(clients.perso.messageMove).not.toHaveBeenCalled();
     expect(clients.perso.expunge).not.toHaveBeenCalled();
+  });
+
+  // Cas OVH constaté le 2026-11-16 : pas de MOVE, mais UIDPLUS. L'émulation
+  // d'imapflow (COPY + \Deleted + UID EXPUNGE <uid>) ne touche que ce message.
+  it('moves the source with UIDPLUS when MOVE is absent (OVH)', async () => {
+    const { mover, clients } = setup();
+    clients.perso.capabilities = new Map([['UIDPLUS', true]]);
+
+    const r = await mover.moveOne(base);
+
+    expect(r).toMatchObject({ success: true, source_cleanup: 'moved_to_trash' });
+    expect(clients.perso.messageMove).toHaveBeenCalledWith('42', 'Trash', { uid: true });
+  });
+
+  it('reports a source move the server refused instead of claiming success', async () => {
+    const { mover, clients } = setup();
+    clients.perso.messageMove.mockResolvedValue(false);
+
+    const r = await mover.moveOne(base);
+
+    expect(r).toMatchObject({
+      success: true,
+      source_cleanup: 'skipped_unsafe',
+      source_cleanup_error: { kind: ERROR_KIND.SOURCE_CLEANUP_FAILED },
+    });
+    expect(r.success && r.warnings.map((w) => w.kind)).toContain(WARNING_KIND.SOURCE_NOT_REMOVED);
   });
 });
 
@@ -329,5 +356,42 @@ describe('CrossAccountMover — Graph → IMAP', () => {
     expect(!r.success && r.error_kind).toBe(ERROR_KIND.SOURCE_NOT_FOUND);
     expect(logRepo.claim).not.toHaveBeenCalled();
     expect(mailService.deleteEmail).not.toHaveBeenCalled();
+  });
+});
+
+// Régression constatée en conditions réelles (2026-11-16) : sans
+// `[database].url`, le déplacement échouait APRÈS avoir déposé le message à
+// destination — une copie restait chez le destinataire derrière « Move failed ».
+describe('CrossAccountMover — journal d’audit', () => {
+  it('moves without a journal when no database is configured, with a warning', async () => {
+    const { mover, clients, logRepo } = setup({ journal: false });
+
+    const r = await mover.moveOne(base);
+
+    expect(r.success).toBe(true);
+    expect(r.success && r.move_log_id).toBeUndefined();
+    expect(r.success && r.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: WARNING_KIND.AUDIT_LOG_SKIPPED })]),
+    );
+    expect(logRepo.claim).not.toHaveBeenCalled();
+    expect(logRepo.recordSourceCleanup).not.toHaveBeenCalled();
+    // Dépôt à destination puis source à la corbeille, comme avec journal.
+    expect(clients.pro?.append).toHaveBeenCalled();
+    expect(clients.perso?.messageMove).toHaveBeenCalledWith('42', 'Trash', { uid: true });
+  });
+
+  it('removes its destination copy and leaves the source when a configured journal is down', async () => {
+    const { mover, clients, logRepo } = setup();
+    logRepo.claim.mockRejectedValue(
+      new MoveError(ERROR_KIND.DATABASE_UNAVAILABLE, 'Postgres unreachable (ECONNREFUSED)'),
+    );
+
+    const r = await mover.moveOne(base);
+
+    expect(!r.success && r.error_kind).toBe(ERROR_KIND.DATABASE_UNAVAILABLE);
+    // La copie déposée (uid 900) part à la corbeille de la destination…
+    expect(clients.pro?.messageMove).toHaveBeenCalledWith('900', 'Trash', { uid: true });
+    // …et la source n'est pas touchée.
+    expect(clients.perso?.messageMove).not.toHaveBeenCalled();
   });
 });
