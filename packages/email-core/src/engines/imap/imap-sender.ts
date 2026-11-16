@@ -23,16 +23,8 @@ import { MailError } from '../../contract/errors.js';
 import type { ResolvedAttachment } from '../../services/attachment-resolver.js';
 import type ImapService from '../../services/imap.service.js';
 import type SmtpService from '../../services/smtp.service.js';
-import { computeReplyRecipients } from '../../services/smtp.service.js';
 import type { SendResult } from '../../types/index.js';
-import {
-  DEFAULT_REPLY_LANGUAGE,
-  forwardAsHtml,
-  forwardAsText,
-  quoteOriginalAsHtml,
-  quoteOriginalAsText,
-} from '../../utils/quote.js';
-import { forwardSubject, replySubject } from '../../utils/subject-prefix.js';
+import { forwardedParts, prepareForwardFrom, prepareReplyFrom } from '../shared/compose.js';
 import type ImapMutator from './imap-mutator.js';
 import type ImapReader from './imap-reader.js';
 import { messageIdOf, stripAngles, toMailError } from './imap-reader.js';
@@ -192,18 +184,13 @@ export default class ImapSender {
   async prepareReply(id: MessageId, options: { all?: boolean } = {}): Promise<OutgoingMessage> {
     const { path, uid } = await this.reader.locate(id);
     try {
-      const account = this.connections.getAccount(this.account);
       const original = await this.imap.getEmail(this.account, String(uid), path);
-      const lang = account.replyLanguage ?? DEFAULT_REPLY_LANGUAGE;
-      const { to, cc } = computeReplyRecipients(original, [account.email], options.all === true);
-      return {
-        to,
-        ...(cc.length > 0 ? { cc } : {}),
-        subject: replySubject(original.subject),
-        text: `\n\n${quoteOriginalAsText(original, lang)}`,
-        html: `<p><br></p>${quoteOriginalAsHtml(original, lang)}`,
-        replyTo: { id },
-      };
+      return prepareReplyFrom(
+        id,
+        original,
+        this.connections.getAccount(this.account),
+        options.all === true,
+      );
     } catch (err) {
       throw toMailError(err);
     }
@@ -215,34 +202,27 @@ export default class ImapSender {
   ): Promise<OutgoingMessage> {
     const { path, uid } = await this.reader.locate(id);
     try {
-      const account = this.connections.getAccount(this.account);
       const original = await this.imap.getEmail(this.account, String(uid), path);
-      const lang = account.replyLanguage ?? DEFAULT_REPLY_LANGUAGE;
       const full = await this.reader.getMessage(id);
-      // Inline images go with the HTML that references them; real attachments
-      // unless the host asked to leave them out.
-      const wanted = full.attachments.filter(
-        (a) => Boolean(a.inline && a.contentId) || options.withAttachments !== false,
-      );
       const attachments = await Promise.all(
-        wanted.map(async (a): Promise<OutgoingAttachment> => {
-          const file = await this.reader.getAttachment(id, a.partId);
-          return {
-            filename: file.filename,
-            contentType: file.contentType,
-            content: file.content,
-            ...(a.inline && a.contentId ? { contentId: a.contentId } : {}),
-          };
-        }),
+        forwardedParts(full.attachments, options.withAttachments).map(
+          async (a): Promise<OutgoingAttachment> => {
+            const file = await this.reader.getAttachment(id, a.partId);
+            return {
+              filename: file.filename,
+              contentType: file.contentType,
+              content: file.content,
+              ...(a.inline && a.contentId ? { contentId: a.contentId } : {}),
+            };
+          },
+        ),
       );
-      return {
-        to: [],
-        subject: forwardSubject(original.subject),
-        text: forwardAsText(undefined, original, lang),
-        ...(original.bodyHtml ? { html: forwardAsHtml(undefined, original, false, lang) } : {}),
-        ...(attachments.length > 0 ? { attachments } : {}),
-        forward: { id },
-      };
+      return prepareForwardFrom(
+        id,
+        original,
+        this.connections.getAccount(this.account),
+        attachments,
+      );
     } catch (err) {
       throw toMailError(err);
     }

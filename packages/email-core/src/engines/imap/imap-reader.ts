@@ -12,6 +12,13 @@
  * - folders carry their role, what decided it, and the competing candidates.
  *
  * Folders are opened read-only (EXAMINE): listing never changes a flag.
+ *
+ * Known gap (found in review): getMessage, getRaw and getAttachment check the
+ * UIDVALIDITY under one lock, then read through ImapService under another. A
+ * renumbering in that window — milliseconds on the same connection — would go
+ * unseen. Closing it means passing the expected UIDVALIDITY down into the
+ * ImapService methods the MCP server shares; not done yet. The mutator, which
+ * changes mail, checks and acts under the same lock.
  */
 
 import type { FetchMessageObject, ImapFlow } from 'imapflow';
@@ -276,8 +283,11 @@ export default class ImapReader {
         const found = await client.search(before ? { uid: `1:${before - 1}` } : { all: true }, {
           uid: true,
         });
-        // imapflow answers `false` (or nothing) when the search failed: nothing to list.
-        const uids = (Array.isArray(found) ? found : []).sort((a, b) => b - a);
+        // `false` is a refused search: an empty page would pass for an empty folder.
+        if (!Array.isArray(found)) {
+          throw new MailError('transient', `The server refused to list "${path}": try again`);
+        }
+        const uids = found.sort((a, b) => b - a);
         const pageUids = uids.slice(0, size);
         if (pageUids.length === 0) return { items: [] };
 

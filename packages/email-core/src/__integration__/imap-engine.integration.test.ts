@@ -29,7 +29,9 @@ class CapturingConnections extends ConnectionManager {
       sendMail: async (mail: { envelope: Sent['envelope']; raw: Buffer }) => {
         const raw = mail.raw.toString();
         sent.push({ envelope: mail.envelope, raw });
-        return { messageId: /^Message-ID: (.*)$/im.exec(raw)?.[1]?.trim() };
+        // Like nodemailer with `raw`: a random id, not the one in the bytes
+        // (an earlier version echoed the real one and hid a defect).
+        return { messageId: `<random-${randomUUID()}@nodemailer>` };
       },
     } as unknown as Transporter;
   }
@@ -211,6 +213,31 @@ describe('changes', () => {
     expect(done).toEqual({ succeeded: [message.id], failed: [] });
     expect(stale.failed[0]?.error).toMatch(/stale-id/);
     expect(after?.flags).toMatchObject({ seen: true, flagged: true, keywords: ['Chantier'] });
+  });
+
+  it('reports a keyword the server refuses as a failure, not a success', async () => {
+    // Found in review: imapflow answers `false` and the id was listed as succeeded.
+    const { engine, other } = await setup();
+    await other.append('INBOX', mail(1));
+    const [message] = (await engine.listMessages(inbox)).items;
+    if (!message) throw new Error('seeded message missing');
+
+    const result = await engine.setFlags([message.id], { addKeywords: ['bad keyword'] });
+
+    expect(result.succeeded).toEqual([]);
+    expect(result.failed[0]?.error).toMatch(/refused/);
+  });
+
+  it('reports a malformed id in the batch instead of failing it all', async () => {
+    const { engine, other } = await setup();
+    await other.append('INBOX', mail(1));
+    const [message] = (await engine.listMessages(inbox)).items;
+    if (!message) throw new Error('seeded message missing');
+
+    const result = await engine.setFlags([message.id, '42'], { seen: true });
+
+    expect(result.succeeded).toEqual([message.id]);
+    expect(result.failed).toMatchObject([{ id: '42' }]);
   });
 
   it('moves with the new id, copies, and deletes to the trash or for good', async () => {

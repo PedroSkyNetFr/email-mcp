@@ -73,6 +73,20 @@ function bodyParts(body: string, html: boolean): { html: string; text: string } 
  * No-op when there is no Bcc header. Original line endings and body bytes are
  * preserved exactly. Exported for unit testing.
  */
+/**
+ * The Message-ID a raw message actually carries. nodemailer does not parse a
+ * `raw` message it is handed: the `messageId` it reports for one is a fresh
+ * random id, not the one transmitted (found in review), so a host looking the
+ * sent message up by it would never find it.
+ */
+export function messageIdOfRaw(raw: Buffer): string | undefined {
+  const text = raw.toString('latin1');
+  const end = text.search(/\r?\n\r?\n/);
+  // Header section only, folded lines unfolded.
+  const headers = (end === -1 ? text : text.slice(0, end)).replace(/\r?\n[ \t]+/g, ' ');
+  return /^Message-ID:[ \t]*(<[^>\r\n]+>)/im.exec(headers)?.[1];
+}
+
 export function stripBccHeader(raw: Buffer): Buffer {
   const text = raw.toString('binary');
 
@@ -704,7 +718,7 @@ export default class SmtpService {
     const sentCopy = await this.appendToSentFolder(accountName, storedRaw);
 
     return {
-      messageId: result.messageId ?? '',
+      messageId: messageIdOfRaw(storedRaw) ?? result.messageId ?? '',
       status: 'sent',
       sentCopy,
     };
@@ -869,7 +883,7 @@ export default class SmtpService {
     }
 
     return {
-      messageId: result.messageId ?? '',
+      messageId: messageIdOfRaw(rawBuffer) ?? result.messageId ?? '',
       status: 'sent',
       sentCopy,
       draftCleanup,

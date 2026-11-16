@@ -8,6 +8,9 @@
  * A move or copy returns the new ids when the server gives them (UIDPLUS: OVH
  * and Dovecot do); a server without MOVE gets imapflow's copy + delete, whose
  * new ids come the same way.
+ *
+ * Gmail: a "folder" other than INBOX is a label. Deleting from one, even for
+ * good, removes that label only: the message stays in All Mail.
  */
 
 import type { ImapFlow } from 'imapflow';
@@ -31,16 +34,36 @@ interface Group {
   entries: { id: MessageId; uid: number }[];
 }
 
-function groupByFolder(ids: MessageId[]): Group[] {
+/** Groups ids by folder; a malformed id is reported, never thrown (one bad id must not sink the batch). */
+function groupByFolder(ids: MessageId[]): {
+  groups: Group[];
+  malformed: { id: MessageId; error: string }[];
+} {
   const groups = new Map<string, Group>();
+  const malformed: { id: MessageId; error: string }[] = [];
   ids.forEach((id) => {
-    const { path, uidValidity, uid } = parseMessageId(id);
+    let parsed: ReturnType<typeof parseMessageId>;
+    try {
+      parsed = parseMessageId(id);
+    } catch (err) {
+      malformed.push({ id, error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    const { path, uidValidity, uid } = parsed;
     const key = `${path}\u0000${uidValidity}`;
     const group = groups.get(key) ?? { path, uidValidity, entries: [] };
     group.entries.push({ id, uid });
     groups.set(key, group);
   });
-  return [...groups.values()];
+  return { groups: [...groups.values()], malformed };
+}
+
+/**
+ * imapflow answers `false` when the server refused a STORE or EXPUNGE, or
+ * when a keyword is not in the folder's PERMANENTFLAGS: never a success.
+ */
+function refusedUnless(ok: boolean, what: string): void {
+  if (!ok) throw new Error(`The server refused to ${what}`);
 }
 
 const emptyBatch = (): BatchResult => ({ succeeded: [], failed: [] });
@@ -77,9 +100,12 @@ export default class ImapMutator {
     work: (client: ImapFlow, group: Group, result: T) => Promise<void>,
   ): Promise<T> {
     const result = empty;
+    const { groups, malformed } = groupByFolder(ids);
+    result.failed.push(...malformed);
+    if (groups.length === 0) return result;
     const client = await this.connections.getImapClient(this.account);
     // Sequential: one connection, one selected folder at a time.
-    await groupByFolder(ids).reduce(async (previous, group) => {
+    await groups.reduce(async (previous, group) => {
       await previous;
       const fail = (error: string): void => {
         group.entries.forEach(({ id }) => {
@@ -137,14 +163,24 @@ export default class ImapMutator {
 
     return this.perFolder(ids, emptyBatch(), async (c, group, result) => {
       const range = group.entries.map((e) => e.uid).join(',');
-      if (add.length > 0) await c.messageFlagsAdd(range, add, { uid: true });
-      if (remove.length > 0) await c.messageFlagsRemove(range, remove, { uid: true });
+      if (add.length > 0) {
+        refusedUnless(await c.messageFlagsAdd(range, add, { uid: true }), 'set the flags');
+      }
+      if (remove.length > 0) {
+        refusedUnless(await c.messageFlagsRemove(range, remove, { uid: true }), 'clear the flags');
+      }
       // Gmail stores keywords as labels (X-GM-LABELS); other servers as IMAP keywords.
       if (addKeywords.length > 0) {
-        await c.messageFlagsAdd(range, addKeywords, { uid: true, useLabels: labels });
+        refusedUnless(
+          await c.messageFlagsAdd(range, addKeywords, { uid: true, useLabels: labels }),
+          `add the keywords (${addKeywords.join(', ')})`,
+        );
       }
       if (removeKeywords.length > 0) {
-        await c.messageFlagsRemove(range, removeKeywords, { uid: true, useLabels: labels });
+        refusedUnless(
+          await c.messageFlagsRemove(range, removeKeywords, { uid: true, useLabels: labels }),
+          `remove the keywords (${removeKeywords.join(', ')})`,
+        );
       }
       result.succeeded.push(...group.entries.map((e) => e.id));
     });
@@ -201,7 +237,7 @@ export default class ImapMutator {
     return this.perFolder(ids, emptyBatch(), async (client, group, result) => {
       const range = group.entries.map((e) => e.uid).join(',');
       if (trashPath === undefined || group.path === trashPath) {
-        await client.messageDelete(range, { uid: true });
+        refusedUnless(await client.messageDelete(range, { uid: true }), 'delete the messages');
       } else {
         const moved = await client.messageMove(range, trashPath, { uid: true });
         if (!moved) throw new Error('The server refused to move the messages to the trash');

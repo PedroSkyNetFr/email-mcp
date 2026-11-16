@@ -27,6 +27,9 @@ const CHANGE_EVENTS = ['exists', 'expunge', 'flags'] as const;
 export default class ImapWatch {
   private readonly clients = new Map<string, ImapFlow>();
 
+  /** Connections being opened: two waits at once share one instead of leaking one. */
+  private readonly opening = new Map<string, Promise<ImapFlow>>();
+
   constructor(
     readonly account: string,
     private readonly connections: IConnectionManager,
@@ -36,12 +39,27 @@ export default class ImapWatch {
   private async watcher(path: string): Promise<ImapFlow> {
     const existing = this.clients.get(path);
     if (existing?.usable) return existing;
-    const client = await this.connections.createEphemeralImapClient(this.account);
-    // Opened read-only, and kept open: imapflow idles on the selected folder.
-    const lock = await client.getMailboxLock(path, { readOnly: true });
-    lock.release();
-    this.clients.set(path, client);
-    return client;
+    const pending = this.opening.get(path);
+    if (pending) return pending;
+    const open = (async () => {
+      const client = await this.connections.createEphemeralImapClient(this.account);
+      try {
+        // Opened read-only, and kept open: imapflow idles on the selected folder.
+        const lock = await client.getMailboxLock(path, { readOnly: true });
+        lock.release();
+      } catch (err) {
+        await client.logout().catch(() => client.close());
+        throw err;
+      }
+      this.clients.set(path, client);
+      return client;
+    })();
+    this.opening.set(path, open);
+    try {
+      return await open;
+    } finally {
+      this.opening.delete(path);
+    }
   }
 
   async waitForChange(options: {

@@ -130,6 +130,14 @@ async function withinBytes(client: ImapFlow, uids: number[], maxBytes: number): 
 export default class ImapSync {
   private client: ImapFlow | undefined;
 
+  /**
+   * Calls run one after the other on the sync connection. Two at once on the
+   * same connection raced (found in review, reproduced on Dovecot): the CLOSE
+   * of one landed between the other's SELECT and SEARCH, the search answered
+   * `false`, and a capped batch passed for a complete one, skipping mail.
+   */
+  private queue: Promise<unknown> = Promise.resolve();
+
   constructor(
     readonly account: string,
     private readonly connections: IConnectionManager,
@@ -157,6 +165,16 @@ export default class ImapSync {
     folderId: FolderId,
     cursor: SyncCursor | null,
     options: ListChangesOptions = {},
+  ): Promise<ChangeBatch> {
+    const run = this.queue.then(async () => this.changes(folderId, cursor, options));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async changes(
+    folderId: FolderId,
+    cursor: SyncCursor | null,
+    options: ListChangesOptions,
   ): Promise<ChangeBatch> {
     const path = pathOf(folderId);
     const previous = cursor === null ? undefined : decodeCursor(cursor, path);
@@ -210,7 +228,12 @@ export default class ImapSync {
         const from = lastUid + 1;
         const found = await client.search({ uid: `${from}:*` }, { uid: true });
         // `n:*` always matches the last message, even below n: keep only real news.
-        const fresh = (Array.isArray(found) ? found : []).filter((uid) => uid >= from);
+        // `false` is a refused search, not an empty folder: taking it for "no
+        // new mail" would move the cursor past messages never delivered.
+        if (!Array.isArray(found)) {
+          throw new MailError('transient', `The server refused to search "${path}": try again`);
+        }
+        const fresh = found.filter((uid) => uid >= from);
         fresh.sort((a, b) => a - b);
         const take = includeRaw
           ? await withinBytes(client, fresh.slice(0, max), maxBytes)
@@ -250,12 +273,13 @@ export default class ImapSync {
           fidelity,
         };
       } finally {
-        lock.release();
         // Leave no folder selected between calls: a server answers STATUS on
         // the selected folder with this session's frozen view of it (measured
         // on Dovecot), so the next call would miss new mail, flag changes and
         // even a renumbering. Opened read-only: closing it expunges nothing.
+        // Closed while the lock is held, so no other command can land between.
         await client.mailboxClose().catch(() => undefined);
+        lock.release();
       }
     } catch (err) {
       throw toMailError(err);

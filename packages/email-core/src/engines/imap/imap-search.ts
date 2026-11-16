@@ -86,7 +86,11 @@ export default class ImapSearch {
     query: SearchQuery,
   ): Promise<{ uids: number[]; truncated: boolean; dates: Map<number, number> }> {
     const found = await client.search(toCriteria(query), { uid: true });
-    const uids = (Array.isArray(found) ? found : []).sort((a, b) => b - a);
+    // `false` is a refused search: no result would pass for "nothing matches".
+    if (!Array.isArray(found)) {
+      throw new MailError('transient', 'The server refused the search: try again or narrow it');
+    }
+    const uids = found.sort((a, b) => b - a);
     const dates = new Map<number, number>();
     if (query.hasAttachments === undefined) return { uids, truncated: false, dates };
     const scanned = uids.slice(0, MAX_SCANNED);
@@ -195,7 +199,9 @@ export default class ImapSearch {
       offset = pageOffset;
     }
     const folders = (await this.reader.listFolders()).filter(
-      (f) => f.selectable && f.role !== 'junk' && f.role !== 'trash',
+      // Junk and trash are not searched; nor Gmail's All Mail, which holds every
+      // message again and would list each one twice.
+      (f) => f.selectable && f.role !== 'junk' && f.role !== 'trash' && f.role !== 'all',
     );
     const client = await this.connections.getImapClient(this.account);
     const hits: Hit[] = [];
@@ -208,7 +214,10 @@ export default class ImapSearch {
       try {
         const uidValidity = client.mailbox ? client.mailbox.uidValidity : 0n;
         const found = await ImapSearch.matching(client, query);
-        truncated ||= found.truncated;
+        // Dates are read for the newest MAX_SCANNED only: beyond, the merged
+        // order would be wrong, so the rest is left out and said so.
+        if (found.uids.length > MAX_SCANNED) found.uids = found.uids.slice(0, MAX_SCANNED);
+        truncated ||= found.truncated || found.uids.length === MAX_SCANNED;
         const dated = await ImapSearch.dates(client, found.uids, found.dates);
         found.uids.forEach((uid) => {
           hits.push({ path, uidValidity, uid, receivedAt: dated.get(uid) ?? 0 });
@@ -220,7 +229,14 @@ export default class ImapSearch {
 
     hits.sort((a, b) => b.receivedAt - a.receivedAt);
     const pageHits = hits.slice(offset, offset + size);
-    const items = await ImapSearch.summariesOf(client, pageHits);
+    // A message filed in two folders (Gmail labels) appears once per page.
+    const seen = new Set<string>();
+    const items = (await ImapSearch.summariesOf(client, pageHits)).filter((m) => {
+      if (!m.messageIdHeader) return true;
+      if (seen.has(m.messageIdHeader)) return false;
+      seen.add(m.messageIdHeader);
+      return true;
+    });
     return {
       items,
       ...(hits.length > offset + size
@@ -302,7 +318,7 @@ export default class ImapSearch {
    */
   async getThread(id: MessageId): Promise<MessageSummary[]> {
     const { path, uidValidity } = parseMessageId(id);
-    await this.reader.getRaw(id); // validates the id (stale, missing) before any work
+    await this.reader.locate(id); // validates the id (stale, missing) before any work
     try {
       const { uid } = parseMessageId(id);
       const thread = await this.imap.getThread(this.account, String(uid), path);

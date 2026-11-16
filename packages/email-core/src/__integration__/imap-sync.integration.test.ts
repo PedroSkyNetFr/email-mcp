@@ -213,6 +213,23 @@ describe('ImapSync.listChanges against Dovecot', () => {
     expect(sizes).toEqual([['Message 1', 'Message 2'], ['Message 3'], ['Message 4']]);
   });
 
+  it('serves two concurrent calls one after the other, never as a complete empty batch', async () => {
+    // Found in review: two calls at once raced on the sync connection, one
+    // answered "complete, nothing new" and its cursor skipped messages 5 and 6.
+    const { sync, other, folderId } = await setup(2);
+    const { cursor } = await drain(sync, folderId, null);
+    for (let n = 3; n <= 6; n++) await other.append('INBOX', mail(n));
+
+    const [a, b] = await Promise.all([
+      sync.listChanges(folderId, cursor, { maxMessages: 2 }),
+      sync.listChanges(folderId, cursor, { maxMessages: 2 }),
+    ]);
+
+    expect(subjects(a)).toEqual(['Message 3', 'Message 4']);
+    expect(subjects(b)).toEqual(['Message 3', 'Message 4']);
+    expect([a.complete, b.complete]).toEqual([false, false]);
+  });
+
   it('leaves the source out on request', async () => {
     const { sync, folderId } = await setup(1);
 
