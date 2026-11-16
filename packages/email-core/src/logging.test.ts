@@ -1,6 +1,6 @@
 import type { MockInstance } from 'vitest';
 
-import { mcpLog } from './logging.js';
+import { mcpLog, setLogSink } from './logging.js';
 
 // ---------------------------------------------------------------------------
 // mcpLog écrit sur stderr, une ligne horodatée par message, jamais sur stdout.
@@ -73,5 +73,36 @@ describe('mcpLog', () => {
     });
 
     await expect(mcpLog('error', 'test', 'lost')).resolves.toBeUndefined();
+  });
+});
+
+describe('setLogSink', () => {
+  afterEach(() => {
+    setLogSink(undefined);
+  });
+
+  it('sends lines to the host logger instead of stderr, and back to stderr when unset', async () => {
+    const lines: string[] = [];
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    setLogSink((level, logger, message) => {
+      lines.push(`${level} ${logger} ${message}`);
+    });
+
+    await mcpLog('info', 'imap', 'connected\nagain');
+    setLogSink(undefined);
+    await mcpLog('info', 'imap', 'back');
+
+    // Newlines escaped as for stderr: one message, one line.
+    expect(lines).toEqual(['info imap connected\\nagain']);
+    expect(stderr).toHaveBeenCalledTimes(1);
+    stderr.mockRestore();
+  });
+
+  it('never lets a failing host logger break the caller', async () => {
+    setLogSink(() => {
+      throw new Error('logger down');
+    });
+
+    await expect(mcpLog('error', 'smtp', 'x')).resolves.toBeUndefined();
   });
 });

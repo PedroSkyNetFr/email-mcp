@@ -28,6 +28,7 @@ export type * from './contract/engine.types.js';
 export { MailError, type MailErrorCode } from './contract/errors.js';
 export { default as createGraphEngine } from './engines/graph/graph-engine.js';
 export { default as createImapEngine } from './engines/imap/imap-engine.js';
+export { type LogLevel, type LogSink, setLogSink } from './logging.js';
 export { detectProvider, PROVIDERS } from './providers.js';
 export { default as RateLimiter } from './safety/rate-limiter.js';
 export { default as GraphClient, GraphError } from './services/graph/graph.client.js';
