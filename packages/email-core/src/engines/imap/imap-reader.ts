@@ -45,7 +45,7 @@ const MAX_PAGE_SIZE = 200;
 /** Same cap as the cross-backend attachment rebuild (REBUILD_ATTACHMENT_CAP_BYTES). */
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
-const SUMMARY_FIELDS = {
+export const SUMMARY_FIELDS = {
   uid: true,
   flags: true,
   envelope: true,
@@ -106,7 +106,11 @@ function toAddresses(list: { name?: string; address?: string }[] | undefined): E
 const toIso = (date: Date | string | undefined): string | undefined =>
   date === undefined ? undefined : new Date(date).toISOString();
 
-function toSummary(path: string, uidValidity: bigint, msg: FetchMessageObject): MessageSummary {
+export function toSummary(
+  path: string,
+  uidValidity: bigint,
+  msg: FetchMessageObject,
+): MessageSummary {
   const env = msg.envelope;
   return {
     id: messageIdOf(path, uidValidity, msg.uid),
@@ -192,10 +196,8 @@ export default class ImapReader {
     }
   }
 
-  /** Checks a message id against the server; returns where it lives. */
-  private async locate(
-    id: MessageId,
-  ): Promise<{ path: string; uid: number; meta: FetchMessageObject }> {
+  /** Checks a message id against the server (stale, missing); returns where it lives. */
+  async locate(id: MessageId): Promise<{ path: string; uid: number; meta: FetchMessageObject }> {
     const { path, uidValidity, uid } = parseMessageId(id);
     return guard(async () =>
       this.inFolder(path, uidValidity, async (client) => {

@@ -165,6 +165,12 @@ export interface Message extends MessageSummary {
 export interface Page<T> {
   items: T[];
   next?: PageToken;
+  /**
+   * True when the engine stopped scanning before the end: a filter the server
+   * cannot evaluate (IMAP has no "has attachments" search) was applied to the
+   * most recent messages only. The results are then not exhaustive.
+   */
+  truncated?: boolean;
 }
 
 export interface ListOptions {
@@ -243,12 +249,17 @@ export interface OutgoingMessage {
   html?: string;
   attachments?: OutgoingAttachment[];
   /**
-   * Reply to this message: the engine sets In-Reply-To / References and the
-   * recipients (`all`: reply-all), and quotes the original.
+   * This message answers `id`: the engine sets In-Reply-To / References from
+   * it, and marks it answered once sent. Recipients, subject and quote are
+   * what the message says: a GUI shows them to the user before sending, so
+   * nothing is added behind their back. `prepareReply` fills them in.
    */
-  replyTo?: { id: MessageId; all?: boolean };
-  /** Forward this message, with its attachments unless told otherwise. */
-  forward?: { id: MessageId; withAttachments?: boolean };
+  replyTo?: { id: MessageId };
+  /**
+   * This message forwards `id`: marked `$Forwarded` once sent. Body and
+   * attachments are what the message carries; `prepareForward` fills them in.
+   */
+  forward?: { id: MessageId };
   /** Append the account signature; the account default otherwise. */
   signature?: boolean;
 }
@@ -393,8 +404,24 @@ export interface DraftStore {
 }
 
 export interface MailSender {
+  /** Sends the message exactly as given (plus the account signature if asked). */
   send: (message: OutgoingMessage) => Promise<SendOutcome>;
   sendDraft: (id: MessageId) => Promise<SendOutcome>;
+  /**
+   * A reply ready for the composer: recipients (Reply-To honoured; `all`:
+   * everyone but the account itself), "Re:" subject, original quoted in the
+   * account's reply language, `replyTo` set. Sends nothing.
+   */
+  prepareReply: (id: MessageId, options?: { all?: boolean }) => Promise<OutgoingMessage>;
+  /**
+   * A forward ready for the composer: "Fwd:" subject, original quoted with
+   * its header block, its real attachments carried over unless
+   * `withAttachments: false`, `forward` set. Sends nothing.
+   */
+  prepareForward: (
+    id: MessageId,
+    options?: { withAttachments?: boolean },
+  ) => Promise<OutgoingMessage>;
 }
 
 export interface MailSync {

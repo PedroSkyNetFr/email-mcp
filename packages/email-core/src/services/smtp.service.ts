@@ -212,6 +212,12 @@ export default class SmtpService {
       inReplyTo?: string;
       /** Chaîne References du fil ; défaut : `[inReplyTo]`. */
       references?: string[];
+      /**
+       * Keep the Bcc header in the copy filed in Sent (never in the bytes
+       * transmitted), so the sender can see whom they Bcc'd. Off by default:
+       * the MCP tools keep their behaviour; the MailEngine contract asks for it.
+       */
+      bccInSentCopy?: boolean;
     },
   ): Promise<SendResult> {
     this.checkRateLimit(accountName);
@@ -239,6 +245,7 @@ export default class SmtpService {
       from: fromAddress(account),
       to: toAddrs.join(', '),
       cc: ccAddrs.length > 0 ? ccAddrs.join(', ') : undefined,
+      ...(options.bccInSentCopy && bccAddrs.length > 0 ? { bcc: bccAddrs.join(', ') } : {}),
       subject: options.subject,
       ...(options.inReplyTo
         ? {
@@ -255,6 +262,7 @@ export default class SmtpService {
       recipients: [...toAddrs, ...ccAddrs, ...bccAddrs],
       attachments: signed.attachments,
       what: 'email',
+      keepBccInSentCopy: Boolean(options.bccInSentCopy) && bccAddrs.length > 0,
     });
   }
 
@@ -658,6 +666,8 @@ export default class SmtpService {
       recipients: string[];
       attachments: ResolvedAttachment[];
       what: 'email' | 'reply' | 'forward';
+      /** The Sent copy keeps the Bcc header (mailOptions carries bcc). */
+      keepBccInSentCopy?: boolean;
     },
   ): Promise<SendResult> {
     // Build the SMTP envelope explicitly — nodemailer cannot derive it from the
@@ -675,7 +685,13 @@ export default class SmtpService {
 
     // Les noms de fichiers longs ne sont plus pliés au milieu des guillemets
     // (composeMessage → refoldParamHeaders).
-    const rawMessage = await composeMessage(params.mailOptions);
+    // Composed once: with keepBccInSentCopy, the Bcc header is kept for the
+    // Sent copy and stripped from the transmitted bytes — same Message-ID,
+    // same body, so the two cannot drift apart.
+    const storedRaw = await composeMessage(params.mailOptions, {
+      keepBcc: params.keepBccInSentCopy === true,
+    });
+    const rawMessage = params.keepBccInSentCopy ? stripBccHeader(storedRaw) : storedRaw;
     assertMessageSize(account, rawMessage.length, params.attachments);
 
     const result = await transport
@@ -685,7 +701,7 @@ export default class SmtpService {
       });
 
     // Append the SAME raw bytes to Sent — "one raw message, sent and stored".
-    const sentCopy = await this.appendToSentFolder(accountName, rawMessage);
+    const sentCopy = await this.appendToSentFolder(accountName, storedRaw);
 
     return {
       messageId: result.messageId ?? '',
@@ -770,6 +786,8 @@ export default class SmtpService {
     accountName: string,
     draftIdInput: number | string,
     mailbox?: string,
+    /** See sendEmail: file the draft as written, Bcc header included, in Sent. */
+    options: { bccInSentCopy?: boolean } = {},
   ): Promise<SendResult> {
     const draftId =
       typeof draftIdInput === 'number' ? draftIdInput : Number.parseInt(draftIdInput, 10);
@@ -830,7 +848,10 @@ export default class SmtpService {
 
     // Append the SAME sanitized bytes to Sent BEFORE deleting the draft —
     // "one raw message, sent and stored".
-    const sentCopy = await this.appendToSentFolder(accountName, sanitizedRaw);
+    const sentCopy = await this.appendToSentFolder(
+      accountName,
+      options.bccInSentCopy ? rawBuffer : sanitizedRaw,
+    );
 
     let draftCleanup: DraftCleanupResult;
     if (sentCopy.kind === 'failed') {

@@ -387,6 +387,29 @@ describe('SmtpService', () => {
       expect(appendedStr).not.toMatch(/^Bcc:/im);
       expect(appendedStr).not.toContain('secret@example.com');
     });
+
+    it('with bccInSentCopy, files the Bcc in Sent and still never transmits it', async () => {
+      await service.sendEmail('test', {
+        to: ['recipient@example.com'],
+        subject: 'Blind copy kept',
+        body: 'Body',
+        bcc: ['secret@example.com'],
+        bccInSentCopy: true,
+      });
+
+      const call = transport.sendMail.mock.calls[0][0];
+      const sent = (call.raw as Buffer).toString('utf-8');
+      const [[, appended]] = vi.mocked(imapService.appendToSent).mock.calls;
+      const stored = (appended as Buffer).toString('utf-8');
+      const messageId = (raw: string) => /^Message-ID: (.*)$/im.exec(raw)?.[1];
+
+      expect(call.envelope.to).toEqual(['recipient@example.com', 'secret@example.com']);
+      expect(sent).not.toContain('secret@example.com');
+      expect(stored).toMatch(/^Bcc: secret@example\.com\r?$/im);
+      // One message, not two: same Message-ID and same body in both.
+      expect(messageId(stored)).toBe(messageId(sent));
+      expect(stored.replace(/^Bcc: .*\r\n/im, '')).toBe(sent);
+    });
   });
 
   describe('replyToEmail', () => {

@@ -17,6 +17,8 @@ export type MailErrorCode =
   | 'too-large'
   /** Mailbox full. */
   | 'quota'
+  /** The request itself is wrong (empty folder name, no recipient): fix it, do not retry. */
+  | 'invalid'
   /** Transient (network, throttling): retrying later may work. */
   | 'transient';
 
