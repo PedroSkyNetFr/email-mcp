@@ -16,7 +16,7 @@
     "dev": "tsx watch --conditions=email-core-source src/main.ts",
     "build": "pnpm --filter @pedroskynet/email-core build && tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && pnpm --filter @pedroskynet/email-core typecheck",
     "lint": "eslint src/ packages/email-core/src/",
     "lint:fix": "eslint src/ packages/email-core/src/ --fix",
     "format": "biome format --write src/ packages/email-core/src/",

@@ -18,7 +18,9 @@ pre-commit:
       run: npx eslint --fix {staged_files}
       stage_fixed: true
     typecheck:
-      run: npx tsc --noEmit
+      # The server's tsc only reaches the package files it imports: the engines,
+      # the contract and the package's tests are checked by the package's own.
+      run: npx tsc --noEmit && npx tsc --noEmit -p packages/email-core/tsconfig.json
     actionlint:
       glob: '.github/workflows/*.{yml,yaml}'
       run: actionlint {staged_files}
