@@ -3,10 +3,9 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import { z } from 'zod';
 import audit from '../safety/audit.js';
-
-import type { IMailService } from '../services/mail-service.types.js';
 
 export default function registerFolderTools(server: McpServer, imapService: IMailService): void {
   // ---------------------------------------------------------------------------

@@ -12,8 +12,13 @@ dockers_v2:
     dockerfile: Dockerfile
     extra_files:
       - src/
+      - packages/email-core/src/
+      - packages/email-core/package.json
+      - packages/email-core/tsconfig.json
+      - packages/email-core/tsconfig.build.json
       - package.json
       - pnpm-lock.yaml
+      - pnpm-workspace.yaml
       - tsconfig.build.json
       - tsconfig.json
       - biome.json
@@ -56,8 +61,13 @@ dockers_v2:
     dockerfile: Dockerfile.alpine
     extra_files:
       - src/
+      - packages/email-core/src/
+      - packages/email-core/package.json
+      - packages/email-core/tsconfig.json
+      - packages/email-core/tsconfig.build.json
       - package.json
       - pnpm-lock.yaml
+      - pnpm-workspace.yaml
       - tsconfig.build.json
       - tsconfig.json
       - biome.json

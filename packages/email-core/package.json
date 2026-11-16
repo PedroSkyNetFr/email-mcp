@@ -1,0 +1,78 @@
+{
+  "name": "@pedroskynet/email-core",
+  "version": "0.1.0",
+  "description": "Mail engines behind email-mcp: IMAP + SMTP, Microsoft Graph, OAuth2 (XOAUTH2), per-account routing and label strategies",
+  "type": "module",
+  "exports": {
+    ".": {
+      "email-core-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./*.js": {
+      "email-core-source": "./src/*.ts",
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "tsc -p tsconfig.build.json"
+  },
+  "keywords": [
+    "email",
+    "imap",
+    "smtp",
+    "microsoft-graph",
+    "oauth2",
+    "xoauth2"
+  ],
+  "author": {
+    "name": "codefuturist",
+    "url": "https://github.com/codefuturist"
+  },
+  "contributors": [
+    {
+      "name": "David Young",
+      "url": "https://github.com/wgs4"
+    },
+    {
+      "name": "PedroSkyNetFr",
+      "url": "https://github.com/PedroSkyNetFr"
+    }
+  ],
+  "license": "LGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PedroSkyNetFr/email-mcp.git",
+    "directory": "packages/email-core"
+  },
+  "homepage": "https://github.com/PedroSkyNetFr/email-mcp/tree/main/packages/email-core#readme",
+  "bugs": {
+    "url": "https://github.com/PedroSkyNetFr/email-mcp/issues"
+  },
+  "dependencies": {
+    "html-to-text": "^10.0.1",
+    "imapflow": "^2.11.0",
+    "mailparser": "^3.14.3",
+    "nodemailer": "^10.5.0"
+  },
+  "devDependencies": {
+    "@types/html-to-text": "^9.0.4",
+    "@types/mailparser": "^3.9.0",
+    "@types/node": "^26.6.6",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.12"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

@@ -1,5 +1,9 @@
+import {
+  analyzeHeaders,
+  groupHeaders,
+  parseHeaderBlock,
+} from '@pedroskynet/email-core/utils/headers.js';
 import type { EmailHeaderDump } from '../types/index.js';
-import { analyzeHeaders, groupHeaders, parseHeaderBlock } from '../utils/headers.js';
 import { formatHeaderDump } from './headers.tool.js';
 
 /** Construit un relevé complet à partir d'un bloc d'en-têtes brut. */

@@ -4,11 +4,22 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import type ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import {
+  describeAttachments,
+  realAttachments,
+} from '@pedroskynet/email-core/services/attachment-select.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
+import {
+  applyBodyFormat,
+  DEFAULT_MULTI_BODY_MAX,
+  DEFAULT_SINGLE_BODY_MAX,
+} from '@pedroskynet/email-core/utils/body-format.js';
+import {
+  classifyFromHeaders,
+  formatClassification,
+} from '@pedroskynet/email-core/utils/mail-classification.js';
 import { z } from 'zod';
-
-import type ConnectionManager from '../connections/manager.js';
-import { describeAttachments, realAttachments } from '../services/attachment-select.js';
-import type { IMailService } from '../services/mail-service.types.js';
 import type {
   Email,
   EmailMeta,
@@ -16,12 +27,6 @@ import type {
   PaginatedResult,
   SearchStatus,
 } from '../types/index.js';
-import {
-  applyBodyFormat,
-  DEFAULT_MULTI_BODY_MAX,
-  DEFAULT_SINGLE_BODY_MAX,
-} from '../utils/body-format.js';
-import { classifyFromHeaders, formatClassification } from '../utils/mail-classification.js';
 import { bodyFormatParam, maxLengthParam, resolveMaxLength } from './body-params.js';
 import { numeric } from './numeric-param.js';
 import {

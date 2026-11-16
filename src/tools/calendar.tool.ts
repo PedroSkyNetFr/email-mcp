@@ -14,13 +14,12 @@
 import { join } from 'node:path';
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import { realAttachments } from '@pedroskynet/email-core/services/attachment-select.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import { z } from 'zod';
-
 import { CALENDAR_ATTACHMENTS_DIR } from '../config/xdg.js';
-import { realAttachments } from '../services/attachment-select.js';
 import type CalendarService from '../services/calendar.service.js';
 import type LocalCalendarService from '../services/local-calendar.service.js';
-import type { IMailService } from '../services/mail-service.types.js';
 import type RemindersService from '../services/reminders.service.js';
 import { buildCalendarNotes } from '../utils/calendar-notes.js';
 import { extractConferenceDetails } from '../utils/conference-details.js';

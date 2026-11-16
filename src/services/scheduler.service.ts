@@ -19,12 +19,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-
+import { mcpLog } from '@pedroskynet/email-core/logging.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
+import type { ISendService } from '@pedroskynet/email-core/services/send-service.types.js';
 import { SCHEDULED_DIR, SCHEDULED_SENT_DIR } from '../config/xdg.js';
-import { mcpLog } from '../logging.js';
 import type { ScheduledEmail, SendResult } from '../types/index.js';
-import type { IMailService } from './mail-service.types.js';
-import type { ISendService } from './send-service.types.js';
 
 /**
  * How long a send may hold its claim before it counts as interrupted. A stuck

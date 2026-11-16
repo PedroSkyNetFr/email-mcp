@@ -8,10 +8,9 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import type GraphService from '@pedroskynet/email-core/services/graph/graph.service.js';
 import { z } from 'zod';
-
 import audit from '../safety/audit.js';
-import type GraphService from '../services/graph/graph.service.js';
 import type { AppConfig } from '../types/index.js';
 import { numeric } from './numeric-param.js';
 

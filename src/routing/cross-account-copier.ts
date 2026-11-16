@@ -32,8 +32,8 @@
  * (cross-account-transfer.ts) : les deux outils ne peuvent pas diverger.
  */
 
-import type ConnectionManager from '../connections/manager.js';
-import type { IMailService } from '../services/mail-service.types.js';
+import type ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import type { SourceMessage } from './cross-account-transfer.js';
 import {
   appendAtDestination,

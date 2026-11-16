@@ -12,7 +12,7 @@
 
 import ConnectionManager from '../connections/manager.js';
 import RateLimiter from '../safety/rate-limiter.js';
-import type { AccountConfig, AppConfig } from '../types/index.js';
+import type { AccountConfig } from '../types/index.js';
 import GraphClient from './graph/graph.client.js';
 import GraphService from './graph/graph.service.js';
 import GraphSendService from './graph/graph-send.service.js';
@@ -39,7 +39,20 @@ export interface MailBackends {
   oauthService: OAuthService;
 }
 
-export default function createMailBackends(config: AppConfig): MailBackends {
+/**
+ * What the engines need from an application configuration. Kept structural so
+ * that a host application passes its own config object as is (the MCP server
+ * passes its AppConfig) without this package knowing the rest of it.
+ */
+export interface MailBackendsConfig {
+  accounts: AccountConfig[];
+  settings: {
+    /** Outgoing messages allowed per minute and per account (see RateLimiter). */
+    rateLimit: number;
+  };
+}
+
+export default function createMailBackends(config: MailBackendsConfig): MailBackends {
   const oauthService = new OAuthService();
   const connections = new ConnectionManager(config.accounts, oauthService);
   const rateLimiter = new RateLimiter(config.settings.rateLimit);

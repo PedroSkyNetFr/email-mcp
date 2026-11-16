@@ -19,7 +19,8 @@ import {
   select,
   text,
 } from '@clack/prompts';
-
+import { detectProvider } from '@pedroskynet/email-core/providers.js';
+import OAuthService from '@pedroskynet/email-core/services/oauth.service.js';
 import {
   CONFIG_FILE,
   configExists,
@@ -30,10 +31,8 @@ import {
 import type { RawAccountConfig, RawAppConfig } from '../config/schema.js';
 import { AppConfigFileSchema } from '../config/schema.js';
 import { resolveSecretCommands } from '../config/secret-command.js';
-import OAuthService from '../services/oauth.service.js';
 import type { AccountConfig } from '../types/index.js';
 import ensureInteractive from './guard.js';
-import { detectProvider } from './providers.js';
 import { testAccount as probeAccount } from './test.js';
 
 // ---------------------------------------------------------------------------

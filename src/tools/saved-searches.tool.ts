@@ -6,11 +6,10 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import type ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import type { SearchOptions } from '@pedroskynet/email-core/services/imap.service.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import { z } from 'zod';
-
-import type ConnectionManager from '../connections/manager.js';
-import type { SearchOptions } from '../services/imap.service.js';
-import type { IMailService } from '../services/mail-service.types.js';
 import type { SearchPresetRegistry } from '../services/search-presets.js';
 import type { SearchPreset } from '../types/index.js';
 import { formatSearchResult } from './emails.tool.js';

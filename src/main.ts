@@ -11,16 +11,15 @@
  */
 
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
-
+import { mcpLog } from '@pedroskynet/email-core/logging.js';
+import createMailBackends from '@pedroskynet/email-core/services/mail-backends.js';
 import { loadConfig } from './config/loader.js';
-import { mcpLog } from './logging.js';
 import registerAllPrompts from './prompts/register.js';
 import registerAllResources from './resources/register.js';
 import createServer, { PKG_VERSION } from './server.js';
 import CalendarService from './services/calendar.service.js';
 import HooksService from './services/hooks.service.js';
 import LocalCalendarService from './services/local-calendar.service.js';
-import createMailBackends from './services/mail-backends.js';
 import RemindersService from './services/reminders.service.js';
 import SchedulerService from './services/scheduler.service.js';
 import {

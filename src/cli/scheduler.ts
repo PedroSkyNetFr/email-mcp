@@ -11,9 +11,8 @@ import { execSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-
+import createMailBackends from '@pedroskynet/email-core/services/mail-backends.js';
 import { loadConfig } from '../config/loader.js';
-import createMailBackends from '../services/mail-backends.js';
 import SchedulerService from '../services/scheduler.service.js';
 import { DEFAULT_SENT_RETENTION_DAYS, pruneSentHistory } from '../services/scheduler-retention.js';
 import {

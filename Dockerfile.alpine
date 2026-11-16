@@ -6,17 +6,23 @@ WORKDIR /app
 # Enable pnpm via corepack
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
 
-# Install dependencies (layer cached unless lock changes)
-COPY package.json pnpm-lock.yaml ./
+# Install dependencies (layer cached unless lock changes). The workspace
+# manifests come first: pnpm links the engine package from them.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/email-core/package.json packages/email-core/
 RUN pnpm install --frozen-lockfile
 
 # Build TypeScript
 COPY tsconfig.json tsconfig.build.json ./
+COPY packages/email-core/tsconfig.json packages/email-core/tsconfig.build.json packages/email-core/
+COPY packages/email-core/src/ packages/email-core/src/
 COPY src/ src/
 RUN pnpm build
 
-# Remove dev dependencies
-RUN pnpm prune --prod
+# Remove dev dependencies. In a workspace pnpm asks before purging the
+# package's node_modules and, with no terminal, silently skips the prune
+# (exit code 0): the image then ships the whole toolchain. Hence the flag.
+RUN pnpm prune --prod --config.confirmModulesPurge=false
 
 # ── Production stage ──────────────────────────────────────────────────────────
 FROM node:24-alpine AS production
@@ -34,6 +40,10 @@ WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
+# The engine package: node_modules/@pedroskynet/email-core links to it
+COPY --from=builder /app/packages/email-core/package.json ./packages/email-core/
+COPY --from=builder /app/packages/email-core/dist ./packages/email-core/dist
+COPY --from=builder /app/packages/email-core/node_modules ./packages/email-core/node_modules
 
 # Create config directory for volume mount
 RUN mkdir -p /home/node/.config/email-mcp && chown -R node:node /home/node/.config

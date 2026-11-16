@@ -6,7 +6,7 @@
 
 import type { McpServer } from '@modelcontextprotocol/server';
 
-import type ConnectionManager from '../connections/manager.js';
+import type ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
 
 export default function registerAccountsResource(
   server: McpServer,

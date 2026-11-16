@@ -8,12 +8,11 @@
  */
 
 import { intro, log, outro, spinner as p_spinner } from '@clack/prompts';
-
+import ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import GraphClient from '@pedroskynet/email-core/services/graph/graph.client.js';
+import GraphService from '@pedroskynet/email-core/services/graph/graph.service.js';
+import OAuthService from '@pedroskynet/email-core/services/oauth.service.js';
 import { loadConfig } from '../config/loader.js';
-import ConnectionManager from '../connections/manager.js';
-import GraphClient from '../services/graph/graph.client.js';
-import GraphService from '../services/graph/graph.service.js';
-import OAuthService from '../services/oauth.service.js';
 
 import type { AccountConfig } from '../types/index.js';
 

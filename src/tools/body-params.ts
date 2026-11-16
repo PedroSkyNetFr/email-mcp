@@ -6,9 +6,8 @@
  * présent sur un outil seulement, défauts différents d'un outil à l'autre).
  */
 
+import type { BodyFormat } from '@pedroskynet/email-core/utils/body-format.js';
 import { z } from 'zod';
-
-import type { BodyFormat } from '../utils/body-format.js';
 import { numeric } from './numeric-param.js';
 
 /** Formats de corps proposés par les trois outils de lecture. */

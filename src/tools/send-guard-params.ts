@@ -8,9 +8,8 @@
  * Graph, puisque la garde vit au-dessus du routeur de backends.
  */
 
+import { mcpLog } from '@pedroskynet/email-core/logging.js';
 import { z } from 'zod';
-
-import { mcpLog } from '../logging.js';
 import type SendGuard from '../services/send-guard.js';
 import type { GuardTicket, SendRecord } from '../services/send-guard.js';
 import { formatClock } from '../services/send-guard.js';

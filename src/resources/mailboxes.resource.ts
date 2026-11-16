@@ -7,8 +7,8 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { ResourceTemplate } from '@modelcontextprotocol/server';
 
-import type ConnectionManager from '../connections/manager.js';
-import type { IMailService } from '../services/mail-service.types.js';
+import type ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 
 export default function registerMailboxesResource(
   server: McpServer,

@@ -64,25 +64,49 @@ test: add rate limiter unit tests
 
 ## Project Structure
 
+The repository is a pnpm workspace. The mail engines live in their own package,
+`packages/email-core/` (`@pedroskynet/email-core`, LGPL-3.0), so that other
+applications can use them without the MCP server; `src/` is the MCP server
+built on top of it.
+
 ```
-src/
-├── main.ts              # CLI entry point
-├── server.ts            # MCP server factory
-├── logging.ts           # Structured logging to stderr (never stdout)
-├── cli/                 # CLI commands (setup, test, config)
-├── config/              # Config loading + validation
-├── connections/         # IMAP/SMTP connection management
-├── services/            # Business logic (IMAP, Graph, SMTP, calendar, etc.)
-│   └── graph/           # Microsoft Graph backend (Exchange / Outlook.com)
-├── routing/             # Cross-account move logic
-├── tools/               # MCP tool definitions
-├── resources/           # MCP resource definitions
-├── prompts/             # MCP prompt definitions
-├── safety/              # Rate limiter + audit logging
-├── utils/               # Pure helpers (body formatting, header parsing, dates)
-├── types/               # TypeScript type definitions
-└── __integration__/     # Integration tests (GreenMail via testcontainers)
+packages/email-core/src/   # The engine package (no MCP, no TOML, no database)
+├── index.ts               # Public entry point
+├── services/              # Contract, per-account routing, IMAP, SMTP, OAuth2,
+│   │                      #   search, label strategies, attachments, signatures
+│   └── graph/             # Microsoft Graph backend (Exchange / Outlook.com)
+├── connections/           # IConnectionManager + the default ConnectionManager
+├── safety/                # Send rate limiter, input validation
+├── types/                 # Mail domain types (accounts, messages, results)
+├── utils/                 # Body formatting, headers, MIME, quoting, dates
+├── providers.ts           # Provider presets (Gmail, Outlook, …)
+└── logging.ts             # Structured logging to stderr (never stdout)
+
+src/                       # The MCP server
+├── main.ts                # CLI entry point
+├── server.ts              # MCP server factory
+├── cli/                   # CLI commands (setup, test, config)
+├── config/                # Config loading + validation
+├── services/              # Server features: watcher, hooks, scheduler,
+│                          #   calendar, templates, notifier
+├── routing/               # Cross-account move logic
+├── tools/                 # MCP tool definitions
+├── resources/             # MCP resource definitions
+├── prompts/               # MCP prompt definitions
+├── safety/                # Audit logging
+├── utils/                 # Server-only helpers (calendar, build info)
+├── types/                 # App types; re-exports the engine types
+└── __integration__/       # Integration tests (GreenMail via testcontainers)
 ```
+
+The server imports the engines through package subpaths
+(`@pedroskynet/email-core/services/imap.service.js`). An export condition,
+`email-core-source`, makes `tsc --noEmit`, Vitest, ESLint and `tsx` read the
+package sources, so editing an engine needs no intermediate build; the
+production build (`pnpm build`) compiles the package first, then the server,
+and `node dist/main.js` loads `packages/email-core/dist`. `pnpm test` runs
+the tests of both; `pnpm --filter @pedroskynet/email-core test` runs the
+package alone.
 
 Two backends serve accounts side by side: `ImapService` by default, `GraphService`
 for accounts declared with `backend = "graph"`. `services/mail-router.ts` dispatches
@@ -97,7 +121,7 @@ An MCP server over stdio is a process the client spawns at startup. Two things
 therefore stand between an edit and a tool an assistant can call:
 
 1. **The build.** MCP clients are usually configured to run `dist/main.js`, so a
-   change under `src/` is invisible until `pnpm build`. The pre-push hook runs
+   change under `src/` or `packages/email-core/src/` is invisible until `pnpm build`. The pre-push hook runs
    the build for this reason, but between commits it is on you.
 2. **The client restart.** Even with a fresh `dist/`, the already-running server
    process keeps serving the code it started with. Restart the client (or
@@ -117,6 +141,7 @@ client at the sources instead of the compiled output:
   "command": "node",
   "args": [
     "<repo>/node_modules/tsx/dist/cli.mjs",
+    "--conditions=email-core-source",
     "<repo>/src/main.ts",
     "stdio"
   ]
@@ -124,7 +149,9 @@ client at the sources instead of the compiled output:
 ```
 
 The client restart is still required, but `dist/` can no longer go stale
-underneath you.
+underneath you. Keep `--conditions=email-core-source`: without it the server
+loads the engine package from `packages/email-core/dist` — missing, or worse,
+left over from an older build.
 
 ## Adding a New MCP Tool
 
@@ -139,7 +166,7 @@ underneath you.
 6. Implement that method on **both** backends (`ImapService` and `GraphService`),
    or accept that Graph accounts will get the router's "not supported yet" error
 7. If the method does not take the account name as its first argument, declare its
-   shape in `ACCOUNTS_IN_ARGS` (`src/services/mail-router.ts`) — otherwise calls
+   shape in `ACCOUNTS_IN_ARGS` (`packages/email-core/src/services/mail-router.ts`) — otherwise calls
    for Graph accounts are silently routed to IMAP
 8. Register it in `src/tools/register.ts` (read tools are always registered; write
    tools go inside the `if (!readOnly)` block) and add it to the mock list in

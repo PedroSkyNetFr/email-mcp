@@ -9,16 +9,14 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-
+import { mcpLog } from '@pedroskynet/email-core/logging.js';
+import { UncertainSendError } from '@pedroskynet/email-core/services/graph/graph-send.service.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
+import type { ISendService } from '@pedroskynet/email-core/services/send-service.types.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
 import { SCHEDULED_DIR, SCHEDULED_SENT_DIR } from '../config/xdg.js';
-import { mcpLog } from '../logging.js';
 import type { ScheduledEmail } from '../types/index.js';
-import { UncertainSendError } from './graph/graph-send.service.js';
-import type { IMailService } from './mail-service.types.js';
 import SchedulerService from './scheduler.service.js';
-import type { ISendService } from './send-service.types.js';
 
 // Point the queue at a throwaway directory instead of ~/.local/state.
 vi.mock('../config/xdg.js', async () => {
@@ -32,7 +30,7 @@ vi.mock('../config/xdg.js', async () => {
   };
 });
 
-vi.mock('../logging.js', () => ({
+vi.mock('@pedroskynet/email-core/logging.js', () => ({
   mcpLog: vi.fn().mockResolvedValue(undefined),
 }));
 

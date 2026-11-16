@@ -56,7 +56,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createInterface } from 'node:readline/promises';
 
-import OAuthService from '../src/services/oauth.service.js';
+import OAuthService from '@pedroskynet/email-core/services/oauth.service.js';
 import type { OAuth2Config } from '../src/types/index.js';
 
 /** Minimal `--flag value` parser (no dependency, mirrors the other scripts). */
@@ -241,7 +241,9 @@ async function waitForCode(port: number, timeoutMs: number): Promise<string> {
 
     setTimeout(() => {
       server.close();
-      reject(new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s waiting for the redirect`));
+      reject(
+        new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s waiting for the redirect`),
+      );
     }, timeoutMs).unref();
   });
 }

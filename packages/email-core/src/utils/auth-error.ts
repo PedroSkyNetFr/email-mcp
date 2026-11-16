@@ -10,7 +10,7 @@
  * dans la table `cli/providers.ts` ; ce module y rattache l'échec.
  */
 
-import { detectProvider, PROVIDERS } from '../cli/providers.js';
+import { detectProvider, PROVIDERS } from '../providers.js';
 import type { AccountConfig, ProviderConfig } from '../types/index.js';
 
 /** Codes d'erreur des deux protocoles pour « identifiants refusés ». */

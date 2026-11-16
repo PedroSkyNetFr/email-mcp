@@ -5,9 +5,8 @@
  * lisible.
  */
 
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import type { z } from 'zod';
-
-import type { IMailService } from '../services/mail-service.types.js';
 import type { Email } from '../types/index.js';
 import registerAttachmentTools from './attachments.tool.js';
 import registerEmailsTools from './emails.tool.js';

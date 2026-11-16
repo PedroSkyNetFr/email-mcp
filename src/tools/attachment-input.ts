@@ -8,8 +8,8 @@
  * {@link AttachmentInput} type stay identical across them.
  */
 
+import type { AttachmentInput } from '@pedroskynet/email-core/services/attachment-resolver.js';
 import { z } from 'zod';
-import type { AttachmentInput } from '../services/attachment-resolver.js';
 
 // Shared field: marks an attachment as an inline "cid" image. Any attachment
 // carrying a `cid` is treated as inline (Content-Disposition: inline) and

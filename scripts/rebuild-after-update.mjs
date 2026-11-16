@@ -90,21 +90,30 @@ if (!existsSync(tsc)) {
 }
 
 const started = Date.now();
-// tsc directement, sans passer par pnpm : le hook ne dépend pas du PATH.
-const result = spawnSync(process.execPath, [tsc, '-p', 'tsconfig.build.json'], {
-  cwd: root,
-  stdio: 'inherit',
-});
-const seconds = ((Date.now() - started) / 1000).toFixed(1);
-
-if (result.status !== 0) {
-  // Sans noEmitOnError, tsc écrit dist/ malgré les erreurs de type : dist/ a
-  // bien changé, mais ne correspond pas forcément à ce que src/ décrit.
-  console.error(
-    `\n❌ dist/ rebuilt with TypeScript errors (${seconds} s): fix them, then run pnpm build.`,
-  );
-  process.exit(result.status ?? 1);
+// The engine package first: the server is compiled against its dist/ typings,
+// and at runtime dist/main.js loads packages/email-core/dist. Rebuilding the
+// server alone would leave the previous engine running after a pull, silently.
+const builds = [
+  { label: 'packages/email-core/dist/', cwd: path.join(root, 'packages', 'email-core') },
+  { label: 'dist/', cwd: root },
+];
+for (const build of builds) {
+  // tsc directement, sans passer par pnpm : le hook ne dépend pas du PATH.
+  const result = spawnSync(process.execPath, [tsc, '-p', 'tsconfig.build.json'], {
+    cwd: build.cwd,
+    stdio: 'inherit',
+  });
+  if (result.status !== 0) {
+    const seconds = ((Date.now() - started) / 1000).toFixed(1);
+    // Sans noEmitOnError, tsc écrit dist/ malgré les erreurs de type : dist/ a
+    // bien changé, mais ne correspond pas forcément à ce que src/ décrit.
+    console.error(
+      `\n❌ ${build.label} rebuilt with TypeScript errors (${seconds} s): fix them, then run pnpm build.`,
+    );
+    process.exit(result.status ?? 1);
+  }
 }
+const seconds = ((Date.now() - started) / 1000).toFixed(1);
 
 console.log(
   `✅ dist/ rebuilt (${seconds} s). Restart your MCP clients to load it: ` +

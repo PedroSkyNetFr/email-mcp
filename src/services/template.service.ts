@@ -8,11 +8,9 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-
+import { sanitizeTemplateVariable } from '@pedroskynet/email-core/safety/validation.js';
 import { parse as parseTOML } from 'smol-toml';
-
 import { TEMPLATES_DIR } from '../config/xdg.js';
-import { sanitizeTemplateVariable } from '../safety/validation.js';
 
 import type { EmailTemplate } from '../types/index.js';
 

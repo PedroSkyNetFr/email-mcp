@@ -5,7 +5,7 @@
 import type { AlertsConfig } from '../types/index.js';
 import NotifierService from './notifier.service.js';
 
-vi.mock('../logging.js', () => ({
+vi.mock('@pedroskynet/email-core/logging.js', () => ({
   mcpLog: vi.fn().mockResolvedValue(undefined),
 }));
 

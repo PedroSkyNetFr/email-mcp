@@ -7,10 +7,12 @@
  * leur schéma (défauts compris), puis gestionnaire appelé.
  */
 
+import {
+  DEFAULT_MULTI_BODY_MAX,
+  DEFAULT_SINGLE_BODY_MAX,
+} from '@pedroskynet/email-core/utils/body-format.js';
 import type { z } from 'zod';
-
 import type { Email, EmailMeta, PaginatedResult } from '../types/index.js';
-import { DEFAULT_MULTI_BODY_MAX, DEFAULT_SINGLE_BODY_MAX } from '../utils/body-format.js';
 import registerEmailsTools, { hasSearchCriterion } from './emails.tool.js';
 import registerThreadTools from './thread.tool.js';
 

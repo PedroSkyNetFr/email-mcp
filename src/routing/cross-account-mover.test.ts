@@ -8,9 +8,9 @@
  *     nettoyage), et refus d'une destination Graph sans toucher la source.
  */
 
-import type ConnectionManager from '../connections/manager.js';
-import { GraphError } from '../services/graph/graph.client.js';
-import type { IMailService } from '../services/mail-service.types.js';
+import type ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import { GraphError } from '@pedroskynet/email-core/services/graph/graph.client.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import { CrossAccountMover } from './cross-account-mover.js';
 import { ERROR_KIND, MoveError, WARNING_KIND } from './error-kinds.js';
 import type { MoveLogRepository } from './log-repository.js';

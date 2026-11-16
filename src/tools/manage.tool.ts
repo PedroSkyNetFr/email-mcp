@@ -3,11 +3,10 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import { sanitizeMailboxName } from '@pedroskynet/email-core/safety/validation.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import { z } from 'zod';
 import audit from '../safety/audit.js';
-import { sanitizeMailboxName } from '../safety/validation.js';
-
-import type { IMailService } from '../services/mail-service.types.js';
 
 /**
  * `copy_email` ne copie qu'à l'intérieur d'UN compte. Il accepte un
