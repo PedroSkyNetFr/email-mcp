@@ -70,12 +70,18 @@ function toSendError(err: unknown): unknown {
   if (/too large/i.test(message)) return new MailError('too-large', message, { cause: err });
   if (/rate limit/i.test(message)) return new MailError('transient', message, { cause: err });
   if (/no recipients/i.test(message)) return new MailError('invalid', message, { cause: err });
-  // A connection lost after it was opened may have delivered the message
-  // (nodemailer: command other than CONN): uncertain, never retried blindly.
-  const smtp = err as { code?: string; command?: string };
+  // A lost connection may have delivered the message. nodemailer marks every
+  // loss `command: 'CONN'`, whatever the phase (found in review), so a loss
+  // is uncertain unless it plainly happened before any exchange: server
+  // unreachable, name unknown, greeting never received.
+  const smtp = err as { code?: string; originalCode?: string };
+  const neverConnected =
+    ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH'].includes(
+      smtp.originalCode ?? smtp.code ?? '',
+    ) || /greeting never received|connection timeout/i.test(message);
   if (
-    ['ETIMEDOUT', 'ECONNRESET', 'ESOCKET', 'EPROTOCOL'].includes(smtp.code ?? '') &&
-    smtp.command !== 'CONN'
+    ['ECONNECTION', 'ESOCKET', 'ETIMEDOUT', 'EPROTOCOL', 'ECONNRESET'].includes(smtp.code ?? '') &&
+    !neverConnected
   ) {
     return new MailError(
       'uncertain',

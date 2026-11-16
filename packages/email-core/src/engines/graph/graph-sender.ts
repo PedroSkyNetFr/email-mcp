@@ -52,11 +52,13 @@ const bodyOf = (message: OutgoingMessage): { body: string; html: boolean } =>
 function toSendError(err: unknown): unknown {
   if (err instanceof MailError) return err;
   const message = err instanceof Error ? err.message : String(err);
-  if (
-    err instanceof UncertainSendError ||
-    (err instanceof GraphError && err.status >= 500) ||
-    err instanceof TypeError
-  ) {
+  // Only the send request itself is uncertain: a 5xx while creating a draft
+  // or adding attachments means nothing went out (found in review).
+  const onSendCall =
+    err instanceof GraphError &&
+    /POST \/me\/(sendMail|messages\/[^/ ]+\/send)\b/.test(err.message) &&
+    (err.status >= 500 || err.status === 408);
+  if (err instanceof UncertainSendError || onSendCall || err instanceof TypeError) {
     return new MailError(
       'uncertain',
       `${message} — the message may have been sent: check Sent Items before sending again`,

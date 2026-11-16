@@ -107,10 +107,12 @@ export default class GraphSync {
     // A replayed page brings the messages already delivered back with their
     // current state: one read or flagged since then is a flag change, which
     // the deltaLink would otherwise count as synchronised (found in review).
+    // Deleted since it was delivered: a removal (found in review).
     page.value
-      .filter((m) => delivered.has(m.id) && !m['@removed'])
+      .filter((m) => delivered.has(m.id))
       .forEach((m) => {
-        flagsChanged.push({ id: messageIdOf(m.id), flags: toFlags(m) });
+        if (m['@removed']) removed.push(messageIdOf(m.id));
+        else flagsChanged.push({ id: messageIdOf(m.id), flags: toFlags(m) });
       });
     const pending = page.value.filter((m) => !delivered.has(m.id));
     // Sequential: a size cap needs each source's size before the next download.
@@ -139,7 +141,9 @@ export default class GraphSync {
           }
           // Any other failure leaves the source out instead of blocking the
           // folder for good: the host fetches it later with getRaw.
-          if (!(err instanceof GraphError) || err.status >= 500 || err.status === 429) {
+          // Only a refusal of this one message is left out; an expired token,
+          // a throttle or an outage stops the batch, which the host retries.
+          if (!(err instanceof GraphError) || ![400, 406, 413, 415, 422].includes(err.status)) {
             throw toMailError(err);
           }
           raw = undefined;

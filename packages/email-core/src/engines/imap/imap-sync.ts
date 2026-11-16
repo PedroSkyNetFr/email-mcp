@@ -155,7 +155,12 @@ export default class ImapSync {
     return this.client;
   }
 
+  private closed = false;
+
+  /** Waits for the call in progress; later calls are refused, nothing reopens. */
   async close(): Promise<void> {
+    this.closed = true;
+    await this.queue;
     const { client } = this;
     this.client = undefined;
     await client?.logout().catch(() => client.close());
@@ -166,6 +171,7 @@ export default class ImapSync {
     cursor: SyncCursor | null,
     options: ListChangesOptions = {},
   ): Promise<ChangeBatch> {
+    if (this.closed) throw new MailError('invalid', 'This engine is closed');
     const run = this.queue.then(async () => this.changes(folderId, cursor, options));
     this.queue = run.catch(() => undefined);
     return run;

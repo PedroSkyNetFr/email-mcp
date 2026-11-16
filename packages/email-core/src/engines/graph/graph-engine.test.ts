@@ -319,7 +319,9 @@ describe('Graph engine: review fixes', () => {
 
   it('reports a send that failed after reaching Graph as uncertain, never transient', async () => {
     const { engine, send } = fakeGraph(() => undefined);
-    send.sendEmail.mockRejectedValueOnce(new GraphError('Service unavailable', 503, ''));
+    send.sendEmail.mockRejectedValueOnce(
+      new GraphError('Graph POST /me/sendMail failed (503)', 503, ''),
+    );
     send.sendEmail.mockRejectedValueOnce(new UncertainSendError('draft sent, state unknown'));
     const outgoing = { to: ['bob@example.test'], subject: 's', text: 't' };
 
@@ -387,5 +389,47 @@ describe('Graph engine: review fixes', () => {
 
     const first = await engine.search({ subject: 'x', seen: undefined });
     await expect(engine.search({ subject: 'x' }, { page: first.next })).resolves.toBeDefined();
+  });
+
+  it('does not call a failure before the send request uncertain: nothing went out', async () => {
+    const { engine, send } = fakeGraph(() => undefined);
+    send.sendEmail.mockRejectedValueOnce(
+      new GraphError('Graph POST /me/messages failed (503)', 503, ''),
+    );
+
+    await expect(
+      engine.send({ to: ['bob@example.test'], subject: 's', text: 't' }),
+    ).rejects.toMatchObject({ code: 'transient' });
+  });
+
+  it('reports a message deleted between two replays of a capped page as removed', async () => {
+    let deleted = false;
+    const { engine } = fakeGraph(() => ({
+      value: [
+        deleted
+          ? { id: 'A', '@removed': { reason: 'deleted' } }
+          : message('A', '2026-11-16T10:00:00Z'),
+        message('B', '2026-11-16T10:00:00Z'),
+      ],
+      '@odata.deltaLink': 'DELTA',
+    }));
+    const folder = folderIdOf('F');
+
+    const first = await engine.listChanges(folder, null, { maxBytes: 50 });
+    deleted = true;
+    const second = await engine.listChanges(folder, first.nextCursor, { maxBytes: 50 });
+
+    expect(second.removed).toEqual([messageIdOf('A')]);
+    expect(second.flagsChanged).toEqual([]);
+  });
+
+  it('stops on an expired token while downloading sources, instead of delivering them empty', async () => {
+    const { engine, client } = fakeGraph(() => ({
+      value: [message('A', '2026-11-16T10:00:00Z')],
+      '@odata.deltaLink': 'DELTA',
+    }));
+    client.getBinary.mockRejectedValueOnce(new GraphError('Unauthorized', 401, ''));
+
+    await expect(engine.listChanges(folderIdOf('F'), null)).rejects.toMatchObject({ code: 'auth' });
   });
 });

@@ -9,6 +9,7 @@ import type { ResolvedAttachment } from './attachment-resolver.js';
 import type ImapService from './imap.service.js';
 import SmtpService, {
   computeReplyRecipients,
+  messageIdOfRaw,
   normalizeEnvelopeRecipients,
   stripBccHeader,
 } from './smtp.service.js';
@@ -1542,5 +1543,18 @@ describe('SmtpService — envoi et brouillons', () => {
       );
       expect(raw).not.toMatch(/filename="[^"]*\r\n/);
     });
+  });
+});
+
+describe('messageIdOfRaw', () => {
+  it('reads the Message-ID of the header section, folded or lowercase, and nothing else', () => {
+    const raw = (text: string) => Buffer.from(text.replace(/\n/g, '\r\n'));
+
+    expect(messageIdOfRaw(raw('Subject: x\nMessage-ID:\n <a@b.test>\n\nbody'))).toBe('<a@b.test>');
+    expect(messageIdOfRaw(raw('message-id: <c@d.test>\n\nbody'))).toBe('<c@d.test>');
+    expect(
+      messageIdOfRaw(raw('X-Original-Message-ID: <x@y.test>\n\nMessage-ID: <z@y.test>')),
+    ).toBeUndefined();
+    expect(messageIdOfRaw(raw('Subject: none\n\nbody'))).toBeUndefined();
   });
 });

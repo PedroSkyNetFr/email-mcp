@@ -708,17 +708,16 @@ export default class SmtpService {
     const rawMessage = params.keepBccInSentCopy ? stripBccHeader(storedRaw) : storedRaw;
     assertMessageSize(account, rawMessage.length, params.attachments);
 
-    const result = await transport
-      .sendMail({ envelope, raw: rawMessage })
-      .catch((error: unknown) => {
-        throw explainSmtpSizeRejection(error, account, rawMessage.length);
-      });
+    await transport.sendMail({ envelope, raw: rawMessage }).catch((error: unknown) => {
+      throw explainSmtpSizeRejection(error, account, rawMessage.length);
+    });
 
     // Append the SAME raw bytes to Sent — "one raw message, sent and stored".
     const sentCopy = await this.appendToSentFolder(accountName, storedRaw);
 
     return {
-      messageId: messageIdOfRaw(storedRaw) ?? result.messageId ?? '',
+      // Empty rather than nodemailer's random id when the message has none.
+      messageId: messageIdOfRaw(storedRaw) ?? '',
       status: 'sent',
       sentCopy,
     };
@@ -854,11 +853,9 @@ export default class SmtpService {
     // When sending pre-composed raw bytes, nodemailer cannot derive the SMTP
     // envelope from the opaque message — pass it explicitly (mirrors
     // replyToEmail) so the RCPT TO list covers every To + Cc + Bcc recipient.
-    const result = await transport
-      .sendMail({ envelope, raw: sanitizedRaw })
-      .catch((error: unknown) => {
-        throw explainSmtpSizeRejection(error, account, sanitizedRaw.length);
-      });
+    await transport.sendMail({ envelope, raw: sanitizedRaw }).catch((error: unknown) => {
+      throw explainSmtpSizeRejection(error, account, sanitizedRaw.length);
+    });
 
     // Append the SAME sanitized bytes to Sent BEFORE deleting the draft —
     // "one raw message, sent and stored".
@@ -883,7 +880,8 @@ export default class SmtpService {
     }
 
     return {
-      messageId: messageIdOfRaw(rawBuffer) ?? result.messageId ?? '',
+      // Empty rather than nodemailer's random id when the message has none.
+      messageId: messageIdOfRaw(rawBuffer) ?? '',
       status: 'sent',
       sentCopy,
       draftCleanup,
