@@ -10,7 +10,9 @@ RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
 # manifests come first: pnpm links the engine package from them.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/email-core/package.json packages/email-core/
-RUN pnpm install --frozen-lockfile
+# --ignore-scripts: the package's prepare script compiles its sources, which
+# are not copied yet; pnpm build below compiles everything.
+RUN pnpm install --frozen-lockfile --ignore-scripts
 
 # Build TypeScript
 COPY tsconfig.json tsconfig.build.json ./
@@ -22,7 +24,7 @@ RUN pnpm build
 # Remove dev dependencies. In a workspace pnpm asks before purging the
 # package's node_modules and, with no terminal, silently skips the prune
 # (exit code 0): the image then ships the whole toolchain. Hence the flag.
-RUN pnpm prune --prod --config.confirmModulesPurge=false
+RUN pnpm prune --prod --config.confirmModulesPurge=false --ignore-scripts
 
 # ── Production stage ──────────────────────────────────────────────────────────
 FROM node:24-alpine AS production

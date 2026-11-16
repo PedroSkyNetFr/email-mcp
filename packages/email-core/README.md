@@ -20,6 +20,20 @@ The engine is chosen per account (`backend = "imap"` or `"graph"` in
 > to mimic IMAP; an explicit, provider-neutral contract is being designed.
 > Until then, expect breaking changes between minor versions.
 
+## Installation
+
+Not on npm yet: install it from Git, pinned to a commit, with pnpm (tested
+with pnpm 10.22):
+
+```bash
+pnpm add "github:PedroSkyNetFr/email-mcp#<commit>&path:/packages/email-core"
+```
+
+The compiled code is not committed, so pnpm builds the package on install
+(`prepare` script). To do so it first installs the development dependencies
+of the whole email-mcp workspace: the first install takes a while; the
+application itself keeps only the package and its four runtime dependencies.
+
 ## Usage
 
 ```ts
