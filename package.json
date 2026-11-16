@@ -95,30 +95,30 @@
     "@clack/prompts": "^1.8.1",
     "@modelcontextprotocol/server": "^2.4.0",
     "html-to-text": "^10.0.1",
-    "imapflow": "^2.5.2",
-    "mailparser": "^3.9.40",
+    "imapflow": "^2.11.0",
+    "mailparser": "^3.14.3",
     "node-ical": "^0.27.3",
-    "nodemailer": "^10.1.4",
+    "nodemailer": "^10.5.0",
     "postgres": "^3.4.9",
     "smol-toml": "^1.9.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.6.2",
+    "@biomejs/biome": "^2.6.8",
     "@eslint/compat": "^2.1.1",
     "@eslint/js": "^9.39.5",
     "@types/html-to-text": "^9.0.4",
     "@types/mailparser": "^3.9.0",
-    "@types/node": "^26.6.5",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@types/node": "^26.6.6",
+    "@vitest/coverage-v8": "^4.1.12",
     "eslint": "^9.39.5",
     "eslint-config-airbnb-extended": "^3.3.0",
     "lefthook": "^2.2.2",
     "testcontainers": "^12.2.1",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "vite": "^8.3.4",
-    "vitest": "^4.1.11"
+    "vite": "^8.3.8",
+    "vitest": "^4.1.12"
   },
   "engines": {
     "node": ">=24.0.0"
