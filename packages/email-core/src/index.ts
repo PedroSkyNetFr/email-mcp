@@ -2,6 +2,8 @@
  * @pedroskynet/email-core — the mail engines behind email-mcp.
  *
  * This entry point is the public face of the package:
+ * - the provider-neutral engine contract (MailEngine, MailError), which new
+ *   hosts should target — not implemented yet by the engines below;
  * - the contract a host application talks to: IMailService, ISendService and
  *   the mail domain types;
  * - the per-account wiring that picks an engine: createMailBackends and the
@@ -20,6 +22,8 @@
 
 export { default as ConnectionManager } from './connections/manager.js';
 export type { IConnectionManager } from './connections/types.js';
+export type * from './contract/engine.types.js';
+export { MailError, type MailErrorCode } from './contract/errors.js';
 export { detectProvider, PROVIDERS } from './providers.js';
 export { default as RateLimiter } from './safety/rate-limiter.js';
 export { default as GraphClient, GraphError } from './services/graph/graph.client.js';
