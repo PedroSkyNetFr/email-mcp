@@ -333,7 +333,10 @@ export interface ListChangesOptions {
    * Cap of the raw sources of one batch, in bytes (default 50 MB). A count
    * alone does not bound memory: on a mailbox measured on OVH, 20 sent
    * messages weighed 25 MB. A batch always holds at least one message, even
-   * a larger one, so synchronisation never stalls.
+   * a larger one, so synchronisation never stalls. IMAP reads the sizes
+   * first and stays under the cap; Graph's delta gives no size, so a Graph
+   * batch stops after the message that crosses it (measured on Outlook.com: a
+   * 2 MB cap, a 22 MB batch ending on a large message).
    */
   maxBytes?: number;
   /**

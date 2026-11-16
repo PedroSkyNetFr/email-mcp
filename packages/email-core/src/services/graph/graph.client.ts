@@ -75,7 +75,17 @@ export default class GraphClient {
    * which Graph uses liberally; anything else surfaces as a {@link GraphError}
    * carrying the response body, since Graph explains failures in it.
    */
-  async request<T>(method: string, pathOrUrl: string, body?: unknown): Promise<T> {
+  /**
+   * `headers`: extra request headers, e.g. `Prefer: IdType="ImmutableId"` for
+   * the MailEngine adapter. The MCP tools send none, so their requests are
+   * unchanged.
+   */
+  async request<T>(
+    method: string,
+    pathOrUrl: string,
+    body?: unknown,
+    headers: Record<string, string> = {},
+  ): Promise<T> {
     const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${GRAPH_ROOT}${pathOrUrl}`;
 
     const send = async (): Promise<Response> => {
@@ -84,6 +94,7 @@ export default class GraphClient {
         method,
         headers: {
           Authorization: `Bearer ${accessToken}`,
+          ...headers,
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -198,10 +209,10 @@ export default class GraphClient {
   }
 
   /** GET raw bytes (attachment content, MIME source). */
-  async getBinary(path: string): Promise<Buffer> {
+  async getBinary(path: string, headers: Record<string, string> = {}): Promise<Buffer> {
     const accessToken = await this.token();
     const response = await fetch(`${GRAPH_ROOT}${path}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: { Authorization: `Bearer ${accessToken}`, ...headers },
     });
     if (!response.ok) {
       throw new GraphError(
