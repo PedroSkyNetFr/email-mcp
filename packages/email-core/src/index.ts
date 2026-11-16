@@ -3,7 +3,9 @@
  *
  * This entry point is the public face of the package:
  * - the provider-neutral engine contract (MailEngine, MailError), which new
- *   hosts should target — not implemented yet by the engines below;
+ *   hosts should target: `createMailBackends(config).engine(account)` picks
+ *   IMAP + SMTP or Microsoft Graph per account; `createImapEngine` builds one
+ *   over a host's own IConnectionManager (its credentials, host checks, TLS);
  * - the contract a host application talks to: IMailService, ISendService and
  *   the mail domain types;
  * - the per-account wiring that picks an engine: createMailBackends and the
@@ -24,6 +26,8 @@ export { default as ConnectionManager } from './connections/manager.js';
 export type { IConnectionManager } from './connections/types.js';
 export type * from './contract/engine.types.js';
 export { MailError, type MailErrorCode } from './contract/errors.js';
+export { default as createGraphEngine } from './engines/graph/graph-engine.js';
+export { default as createImapEngine } from './engines/imap/imap-engine.js';
 export { detectProvider, PROVIDERS } from './providers.js';
 export { default as RateLimiter } from './safety/rate-limiter.js';
 export { default as GraphClient, GraphError } from './services/graph/graph.client.js';

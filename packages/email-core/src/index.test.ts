@@ -51,4 +51,15 @@ describe('public entry point', () => {
     expect(backends.connections.getAccountNames()).toEqual(['work']);
     await backends.connections.closeAll();
   });
+
+  it('gives one MailEngine per account, IMAP for an IMAP account, cached', async () => {
+    const backends = createMailBackends({ accounts: [imapAccount], settings: { rateLimit: 10 } });
+    const engine = backends.engine('work');
+
+    expect(engine.account).toBe('work');
+    expect(backends.engine('work')).toBe(engine);
+    await expect(engine.waitForChange({ folderIds: [], maxMs: 1 })).resolves.toBe('timeout');
+    expect(() => backends.engine('nope')).toThrow(/Unknown account/);
+    await backends.close();
+  });
 });

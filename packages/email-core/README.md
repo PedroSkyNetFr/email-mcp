@@ -14,15 +14,17 @@ account.
 The engine is chosen per account (`backend = "imap"` or `"graph"` in
 `AccountConfig`); callers only see `IMailService` and `ISendService`.
 
-> **Status: 0.1.0, not published.** The package was extracted from the email-mcp
-> server without changing its behaviour; the server still uses the contract
-> *derived* from the IMAP class (`IMailService`). A provider-neutral contract,
-> `MailEngine` (`src/contract/`), is meant for new hosts: one engine per
-> account, opaque ids, folder roles, UID-anchored pages, `listChanges` for
-> synchronisation. It is being implemented: so far the IMAP **reading** half
-> (`src/engines/imap/imap-reader.ts`) — listing folders and messages, reading a
-> message, its source and its attachments, capabilities. Expect breaking
-> changes between minor versions.
+> **Status: 0.1.0, not published.** Two contracts live side by side:
+>
+> - `MailEngine` (`src/contract/`), provider-neutral, for new hosts: one
+>   engine per account, opaque ids, folder roles, UID- or date-anchored pages,
+>   `listChanges` for synchronisation, `waitForChange` for real time.
+>   Implemented for IMAP + SMTP (`src/engines/imap/`) and Microsoft Graph
+>   (`src/engines/graph/`).
+> - `IMailService` / `ISendService`, derived from the IMAP classes, used by the
+>   email-mcp server; unchanged.
+>
+> Expect breaking changes between minor versions.
 
 ## Installation
 
@@ -43,15 +45,33 @@ application itself keeps only the package and its four runtime dependencies.
 ```ts
 import { createMailBackends } from '@pedroskynet/email-core';
 
-const { mailService, sendService, connections } = createMailBackends({
-  accounts: [myAccount], // AccountConfig[]
+const backends = createMailBackends({
+  accounts: [myAccount], // AccountConfig[]: backend "imap" (default) or "graph"
   settings: { rateLimit: 10 }, // outgoing messages per minute and account
 });
+const engine = backends.engine('work'); // IMAP + SMTP or Graph, same contract
 
-const page = await mailService.listEmails('work', { mailbox: 'INBOX', pageSize: 20 });
-await sendService.sendEmail('work', { to: ['someone@example.org'], subject: 'Hi', body: 'Hello' });
+const folders = await engine.listFolders(); // each with its role: inbox, sent…
+const inbox = folders.find((f) => f.role === 'inbox')!;
+const page = await engine.listMessages(inbox.id, { pageSize: 50 });
+const more = await engine.listMessages(inbox.id, { page: page.next });
 
-await connections.closeAll();
+// Synchronisation: store each batch, then its cursor.
+let cursor = null; // or the cursor stored last time
+for (;;) {
+  const batch = await engine.listChanges(inbox.id, cursor);
+  // batch.added (raw source included), batch.flagsChanged, batch.removed,
+  // batch.reset (resynchronise from null)
+  cursor = batch.nextCursor;
+  if (batch.complete) break;
+}
+
+// Replying: the composer is pre-filled, the user edits, send() sends that.
+const reply = await engine.prepareReply(page.items[0].id, { all: true });
+await engine.send({ ...reply, text: `OK.
+${reply.text}` });
+
+await backends.close();
 ```
 
 ### Bringing your own connections
@@ -60,7 +80,7 @@ await connections.closeAll();
 SMTP connections from the credentials in each `AccountConfig`. An application
 with its own credentials store, host checks or TLS policy implements
 `IConnectionManager` (`getAccount`, `getImapClient`, `getSmtpTransport`, …) and
-passes it to `ImapService` and `SmtpService` directly.
+builds the engine with `createImapEngine(account, connections, imap, smtp)`.
 
 ### Entry points
 

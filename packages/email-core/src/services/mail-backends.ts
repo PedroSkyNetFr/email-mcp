@@ -11,6 +11,9 @@
  */
 
 import ConnectionManager from '../connections/manager.js';
+import type { MailEngine } from '../contract/engine.types.js';
+import createGraphEngine from '../engines/graph/graph-engine.js';
+import createImapEngine from '../engines/imap/imap-engine.js';
 import RateLimiter from '../safety/rate-limiter.js';
 import type { AccountConfig } from '../types/index.js';
 import GraphClient from './graph/graph.client.js';
@@ -37,6 +40,14 @@ export interface MailBackends {
    * pour qu'un seul rafraîchissement serve toutes les connexions d'un compte.
    */
   oauthService: OAuthService;
+  /**
+   * The provider-neutral engine of an account (MailEngine contract): IMAP +
+   * SMTP or Microsoft Graph, as the account's `backend` says. One instance per
+   * account, created on first use. The host only ever talks to this.
+   */
+  engine: (accountName: string) => MailEngine;
+  /** Closes the engines' own connections (sync, watch), then every connection. */
+  close: () => Promise<void>;
 }
 
 /**
@@ -78,5 +89,35 @@ export default function createMailBackends(config: MailBackendsConfig): MailBack
   const graphSendService = new GraphSendService(graphClients, requireAccount);
   const sendService = createSendRouter(smtpService, graphSendService, findAccount);
 
-  return { connections, imapService, graphService, mailService, sendService, oauthService };
+  const engines = new Map<string, MailEngine>();
+  const engine = (accountName: string): MailEngine => {
+    const existing = engines.get(accountName);
+    if (existing) return existing;
+    const account = requireAccount(accountName);
+    const client = graphClients.get(accountName);
+    const created =
+      account.backend === 'graph' && client
+        ? createGraphEngine(accountName, client, graphService, graphSendService, () =>
+            requireAccount(accountName),
+          )
+        : createImapEngine(accountName, connections, imapService, smtpService);
+    engines.set(accountName, created);
+    return created;
+  };
+  const close = async (): Promise<void> => {
+    await Promise.all([...engines.values()].map(async (e) => e.close()));
+    engines.clear();
+    await connections.closeAll();
+  };
+
+  return {
+    connections,
+    imapService,
+    graphService,
+    mailService,
+    sendService,
+    oauthService,
+    engine,
+    close,
+  };
 }
