@@ -24,9 +24,9 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import GraphClient from '../src/services/graph/graph.client.js';
-import GraphService from '../src/services/graph/graph.service.js';
-import OAuthService from '../src/services/oauth.service.js';
+import GraphClient from '@pedroskynet/email-core/services/graph/graph.client.js';
+import GraphService from '@pedroskynet/email-core/services/graph/graph.service.js';
+import OAuthService from '@pedroskynet/email-core/services/oauth.service.js';
 import type { AccountConfig } from '../src/types/index.js';
 
 function parseArgs(argv: string[]): Record<string, string> {
@@ -89,7 +89,9 @@ async function main(): Promise<void> {
   console.log(`listMailboxes -> ${mailboxes.length} folders`);
   mailboxes.forEach((box) => {
     const special = box.specialUse ? `  ${box.specialUse}` : '';
-    console.log(`   ${box.path.padEnd(44)} ${box.totalMessages} msgs, ${box.unseenMessages} unread${special}`);
+    console.log(
+      `   ${box.path.padEnd(44)} ${box.totalMessages} msgs, ${box.unseenMessages} unread${special}`,
+    );
   });
 
   const mailbox = args.mailbox ?? 'INBOX';
@@ -113,6 +115,8 @@ async function main(): Promise<void> {
 
 main().catch((err: unknown) => {
   // eslint-disable-next-line no-console
-  console.error(`\nGraph backend check failed: ${err instanceof Error ? err.message : String(err)}\n`);
+  console.error(
+    `\nGraph backend check failed: ${err instanceof Error ? err.message : String(err)}\n`,
+  );
   process.exitCode = 1;
 });

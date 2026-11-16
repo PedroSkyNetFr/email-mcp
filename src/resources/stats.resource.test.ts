@@ -4,11 +4,11 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
-import type ConnectionManager from '../connections/manager.js';
-import type GraphClient from '../services/graph/graph.client.js';
-import GraphService from '../services/graph/graph.service.js';
-import type ImapService from '../services/imap.service.js';
-import { createMailRouter } from '../services/mail-router.js';
+import type ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import type GraphClient from '@pedroskynet/email-core/services/graph/graph.client.js';
+import GraphService from '@pedroskynet/email-core/services/graph/graph.service.js';
+import type ImapService from '@pedroskynet/email-core/services/imap.service.js';
+import { createMailRouter } from '@pedroskynet/email-core/services/mail-router.js';
 import type { AccountConfig } from '../types/index.js';
 import registerStatsResource from './stats.resource.js';
 

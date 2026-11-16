@@ -12,13 +12,12 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import type ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import { realAttachments } from '@pedroskynet/email-core/services/attachment-select.js';
+import { assertSafeDestination } from '@pedroskynet/email-core/services/file-paths.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import { z } from 'zod';
-
-import type ConnectionManager from '../connections/manager.js';
-import { realAttachments } from '../services/attachment-select.js';
 import { toCsvRow } from '../services/csv.js';
-import { assertSafeDestination } from '../services/file-paths.js';
-import type { IMailService } from '../services/mail-service.types.js';
 import type { EmailMeta } from '../types/index.js';
 import { numeric } from './numeric-param.js';
 import {

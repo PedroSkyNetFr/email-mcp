@@ -18,11 +18,10 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
+import type { AuthMethodResult, ReceivedHop } from '@pedroskynet/email-core/utils/headers.js';
 import { z } from 'zod';
-
-import type { IMailService } from '../services/mail-service.types.js';
 import type { EmailHeaderDump } from '../types/index.js';
-import type { AuthMethodResult, ReceivedHop } from '../utils/headers.js';
 
 /** `120` → `2m 0s`, pour que les temps d'attente d'un relais se lisent d'un œil. */
 function formatDuration(seconds: number): string {

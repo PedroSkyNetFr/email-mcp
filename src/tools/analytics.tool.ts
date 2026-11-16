@@ -5,9 +5,8 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import { z } from 'zod';
-
-import type { IMailService } from '../services/mail-service.types.js';
 
 export default function registerAnalyticsTools(server: McpServer, imapService: IMailService): void {
   server.registerTool(

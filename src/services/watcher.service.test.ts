@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { mcpLog } from '../logging.js';
+import { mcpLog } from '@pedroskynet/email-core/logging.js';
 import type { AccountConfig, WatcherConfig } from '../types/index.js';
 import eventBus from './event-bus.js';
 import WatcherService from './watcher.service.js';
@@ -84,7 +84,7 @@ vi.mock('imapflow', () => {
 });
 
 // Mock logging to prevent side effects
-vi.mock('../logging.js', () => ({
+vi.mock('@pedroskynet/email-core/logging.js', () => ({
   mcpLog: vi.fn().mockResolvedValue(undefined),
 }));
 

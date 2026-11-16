@@ -3,7 +3,7 @@
  * The resulting string is stored in the calendar event's description/notes field.
  */
 
-import { htmlToPlainText } from './body-format.js';
+import { htmlToPlainText } from '@pedroskynet/email-core/utils/body-format.js';
 
 export interface CalendarNotesInput {
   emailFrom?: string;

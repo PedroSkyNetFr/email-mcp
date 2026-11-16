@@ -11,8 +11,11 @@
  */
 
 import ConnectionManager from '../connections/manager.js';
+import type { MailEngine } from '../contract/engine.types.js';
+import createGraphEngine from '../engines/graph/graph-engine.js';
+import createImapEngine from '../engines/imap/imap-engine.js';
 import RateLimiter from '../safety/rate-limiter.js';
-import type { AccountConfig, AppConfig } from '../types/index.js';
+import type { AccountConfig } from '../types/index.js';
 import GraphClient from './graph/graph.client.js';
 import GraphService from './graph/graph.service.js';
 import GraphSendService from './graph/graph-send.service.js';
@@ -37,9 +40,30 @@ export interface MailBackends {
    * pour qu'un seul rafraîchissement serve toutes les connexions d'un compte.
    */
   oauthService: OAuthService;
+  /**
+   * The provider-neutral engine of an account (MailEngine contract): IMAP +
+   * SMTP or Microsoft Graph, as the account's `backend` says. One instance per
+   * account, created on first use. The host only ever talks to this.
+   */
+  engine: (accountName: string) => MailEngine;
+  /** Closes the engines' own connections (sync, watch), then every connection. */
+  close: () => Promise<void>;
 }
 
-export default function createMailBackends(config: AppConfig): MailBackends {
+/**
+ * What the engines need from an application configuration. Kept structural so
+ * that a host application passes its own config object as is (the MCP server
+ * passes its AppConfig) without this package knowing the rest of it.
+ */
+export interface MailBackendsConfig {
+  accounts: AccountConfig[];
+  settings: {
+    /** Outgoing messages allowed per minute and per account (see RateLimiter). */
+    rateLimit: number;
+  };
+}
+
+export default function createMailBackends(config: MailBackendsConfig): MailBackends {
   const oauthService = new OAuthService();
   const connections = new ConnectionManager(config.accounts, oauthService);
   const rateLimiter = new RateLimiter(config.settings.rateLimit);
@@ -65,5 +89,35 @@ export default function createMailBackends(config: AppConfig): MailBackends {
   const graphSendService = new GraphSendService(graphClients, requireAccount);
   const sendService = createSendRouter(smtpService, graphSendService, findAccount);
 
-  return { connections, imapService, graphService, mailService, sendService, oauthService };
+  const engines = new Map<string, MailEngine>();
+  const engine = (accountName: string): MailEngine => {
+    const existing = engines.get(accountName);
+    if (existing) return existing;
+    const account = requireAccount(accountName);
+    const client = graphClients.get(accountName);
+    const created =
+      account.backend === 'graph' && client
+        ? createGraphEngine(accountName, client, graphService, graphSendService, () =>
+            requireAccount(accountName),
+          )
+        : createImapEngine(accountName, connections, imapService, smtpService);
+    engines.set(accountName, created);
+    return created;
+  };
+  const close = async (): Promise<void> => {
+    await Promise.all([...engines.values()].map(async (e) => e.close()));
+    engines.clear();
+    await connections.closeAll();
+  };
+
+  return {
+    connections,
+    imapService,
+    graphService,
+    mailService,
+    sendService,
+    oauthService,
+    engine,
+    close,
+  };
 }

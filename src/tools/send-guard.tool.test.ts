@@ -9,12 +9,10 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-
+import UncertainSendError from '@pedroskynet/email-core/services/graph/uncertain-send-error.js';
+import { createSendRouter } from '@pedroskynet/email-core/services/mail-router.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import type { z } from 'zod';
-
-import UncertainSendError from '../services/graph/uncertain-send-error.js';
-import { createSendRouter } from '../services/mail-router.js';
-import type { IMailService } from '../services/mail-service.types.js';
 import type SchedulerService from '../services/scheduler.service.js';
 import SendGuard from '../services/send-guard.js';
 import type { AccountConfig } from '../types/index.js';

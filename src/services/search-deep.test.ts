@@ -5,13 +5,15 @@
  * Défaut inchangé : sujet / expéditeur / corps.
  */
 
-import type { IConnectionManager } from '../connections/types.js';
+import type { IConnectionManager } from '@pedroskynet/email-core/connections/types.js';
+import type GraphClient from '@pedroskynet/email-core/services/graph/graph.client.js';
+import GraphService, {
+  headerOnlyKql,
+} from '@pedroskynet/email-core/services/graph/graph.service.js';
+import ImapService from '@pedroskynet/email-core/services/imap.service.js';
+import { buildSearchCriteria } from '@pedroskynet/email-core/services/search-criteria.js';
 import { hasSearchCriterion } from '../tools/emails.tool.js';
 import type { AccountConfig } from '../types/index.js';
-import type GraphClient from './graph/graph.client.js';
-import GraphService, { headerOnlyKql } from './graph/graph.service.js';
-import ImapService from './imap.service.js';
-import { buildSearchCriteria } from './search-criteria.js';
 
 describe('buildSearchCriteria — deep', () => {
   it('keeps the deep default (subject / from / body) and flags a body scan', () => {

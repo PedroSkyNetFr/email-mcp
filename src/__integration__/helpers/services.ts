@@ -1,7 +1,7 @@
-import ConnectionManager from '../../connections/manager.js';
-import RateLimiter from '../../safety/rate-limiter.js';
-import ImapService from '../../services/imap.service.js';
-import SmtpService from '../../services/smtp.service.js';
+import ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import RateLimiter from '@pedroskynet/email-core/safety/rate-limiter.js';
+import ImapService from '@pedroskynet/email-core/services/imap.service.js';
+import SmtpService from '@pedroskynet/email-core/services/smtp.service.js';
 import type { AccountConfig } from '../../types/index.js';
 
 export interface TestServices {

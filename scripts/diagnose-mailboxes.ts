@@ -25,10 +25,9 @@
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-
+import ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import OAuthService from '@pedroskynet/email-core/services/oauth.service.js';
 import { loadConfig } from '../src/config/loader.js';
-import ConnectionManager from '../src/connections/manager.js';
-import OAuthService from '../src/services/oauth.service.js';
 
 function parseArgs(argv: string[]): Record<string, string> {
   const out: Record<string, string> = {};
@@ -50,8 +49,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
   const configPath =
-    args.config ??
-    path.join(process.env.APPDATA ?? '', 'Claude', 'claude_desktop_config.json');
+    args.config ?? path.join(process.env.APPDATA ?? '', 'Claude', 'claude_desktop_config.json');
   const raw = JSON.parse(readFileSync(configPath, 'utf-8')) as McpConfig;
   const servers = raw.mcpServers ?? {};
 
@@ -126,7 +124,7 @@ async function main(): Promise<void> {
       const pattern = `*${args.probe}*`;
       const wildcard = await internal.run('LIST', '', pattern, { listOnly: true });
       console.log(`  LIST "" "${pattern}" -> ${wildcard.length} match(es)`);
-      wildcard.forEach((entry) => console.log(`     ${entry.path}`));
+      for (const entry of wildcard) console.log(`     ${entry.path}`);
       console.log('');
       // Sequential on purpose: a failed STATUS on some servers drops the socket.
       /* eslint-disable no-await-in-loop */

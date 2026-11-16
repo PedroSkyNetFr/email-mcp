@@ -10,11 +10,11 @@
  */
 
 import type { Server } from '@modelcontextprotocol/server';
-import { mcpLog } from '../logging.js';
+import { mcpLog } from '@pedroskynet/email-core/logging.js';
+import type ImapService from '@pedroskynet/email-core/services/imap.service.js';
 import type { EmailMeta, HookRule, HooksConfig } from '../types/index.js';
 import type { NewEmailEvent } from './event-bus.js';
 import eventBus from './event-bus.js';
-import type ImapService from './imap.service.js';
 import LocalCalendarService from './local-calendar.service.js';
 import type { AlertPayload, UrgencyLevel } from './notifier.service.js';
 import NotifierService from './notifier.service.js';

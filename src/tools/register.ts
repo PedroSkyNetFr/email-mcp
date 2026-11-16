@@ -6,17 +6,17 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
-import type ConnectionManager from '../connections/manager.js';
+import type ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import type GraphService from '@pedroskynet/email-core/services/graph/graph.service.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
+import type { ISendService } from '@pedroskynet/email-core/services/send-service.types.js';
 import type CalendarService from '../services/calendar.service.js';
-import type GraphService from '../services/graph/graph.service.js';
 import type HooksService from '../services/hooks.service.js';
 import type LocalCalendarService from '../services/local-calendar.service.js';
-import type { IMailService } from '../services/mail-service.types.js';
 import type RemindersService from '../services/reminders.service.js';
 import type SchedulerService from '../services/scheduler.service.js';
 import type { SearchPresetRegistry } from '../services/search-presets.js';
 import SendGuard, { DEFAULT_DUPLICATE_WINDOW_MINUTES } from '../services/send-guard.js';
-import type { ISendService } from '../services/send-service.types.js';
 import type TemplateService from '../services/template.service.js';
 import type WatcherService from '../services/watcher.service.js';
 import type { AppConfig } from '../types/index.js';

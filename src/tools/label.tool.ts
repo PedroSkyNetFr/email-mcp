@@ -7,11 +7,10 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import { validateLabelName } from '@pedroskynet/email-core/safety/validation.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import { z } from 'zod';
 import audit from '../safety/audit.js';
-import { validateLabelName } from '../safety/validation.js';
-
-import type { IMailService } from '../services/mail-service.types.js';
 
 export default function registerLabelTools(server: McpServer, imapService: IMailService): void {
   // ---------------------------------------------------------------------------

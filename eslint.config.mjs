@@ -4,6 +4,8 @@ import { includeIgnoreFile } from "@eslint/compat";
 import js from "@eslint/js";
 import { defineConfig } from "eslint/config";
 import { configs, plugins, rules } from "eslint-config-airbnb-extended";
+import { createNodeResolver } from "eslint-plugin-import-x";
+import { createTypeScriptImportResolver } from "eslint-import-resolver-typescript";
 
 const gitignorePath = path.resolve(import.meta.dirname, ".gitignore");
 
@@ -38,6 +40,20 @@ export default defineConfig([
   ...jsConfig,
   ...nodeConfig,
   ...typescriptConfig,
+  {
+    // The engine package is resolved from its sources (export condition
+    // "email-core-source", as tsc and vitest do), so linting never depends on
+    // packages/email-core/dist having been built.
+    name: "workspace/email-core-resolution",
+    settings: {
+      "import-x/resolver-next": [
+        createNodeResolver(),
+        createTypeScriptImportResolver({
+          conditionNames: ["email-core-source", "types", "import", "node", "default"],
+        }),
+      ],
+    },
+  },
   {
     name: "biome-compat/disable-formatting-rules",
     rules: {
@@ -80,8 +96,18 @@ export default defineConfig([
     },
   },
   {
+    // Engine tests against a Dovecot container: test tooling (testcontainers)
+    // is a dev dependency by nature, and seeding a mailbox is sequential.
+    name: "integration/engine-tests",
+    files: ["packages/*/src/__integration__/**/*.ts"],
+    rules: {
+      "import-x/no-extraneous-dependencies": "off",
+      "no-await-in-loop": "off",
+    },
+  },
+  {
     name: "test/relaxed-rules",
-    files: ["src/**/*.test.ts"],
+    files: ["src/**/*.test.ts", "packages/*/src/**/*.test.ts"],
     rules: {
       "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/no-unsafe-argument": "off",

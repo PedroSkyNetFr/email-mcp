@@ -9,10 +9,9 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-
+import ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import ImapService from '@pedroskynet/email-core/services/imap.service.js';
 import { loadConfig } from '../config/loader.js';
-import ConnectionManager from '../connections/manager.js';
-import ImapService from '../services/imap.service.js';
 import { SearchPresetRegistry } from '../services/search-presets.js';
 import {
   buildSecondTestAccount,

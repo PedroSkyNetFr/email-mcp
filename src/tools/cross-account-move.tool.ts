@@ -18,15 +18,14 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import type ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import { sanitizeMailboxName } from '@pedroskynet/email-core/safety/validation.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import { z } from 'zod';
-
-import type ConnectionManager from '../connections/manager.js';
 import type { MoveResult } from '../routing/cross-account-mover.js';
 import { CrossAccountMover } from '../routing/cross-account-mover.js';
 import { MoveLogRepository } from '../routing/log-repository.js';
 import audit from '../safety/audit.js';
-import { sanitizeMailboxName } from '../safety/validation.js';
-import type { IMailService } from '../services/mail-service.types.js';
 import type { AppConfig } from '../types/index.js';
 
 function summarize(results: MoveResult[]): string {

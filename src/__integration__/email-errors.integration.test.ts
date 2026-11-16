@@ -1,5 +1,5 @@
-import ConnectionManager from '../connections/manager.js';
-import ImapService from '../services/imap.service.js';
+import ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import ImapService from '@pedroskynet/email-core/services/imap.service.js';
 import type { AccountConfig } from '../types/index.js';
 import { getGreenMailPorts } from './helpers/config.js';
 import type { TestServices } from './helpers/index.js';

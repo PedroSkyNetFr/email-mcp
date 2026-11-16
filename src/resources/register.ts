@@ -5,8 +5,8 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
-import type ConnectionManager from '../connections/manager.js';
-import type { IMailService } from '../services/mail-service.types.js';
+import type ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import type SchedulerService from '../services/scheduler.service.js';
 import type TemplateService from '../services/template.service.js';
 import registerAccountsResource from './accounts.resource.js';

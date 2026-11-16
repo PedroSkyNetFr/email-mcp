@@ -9,6 +9,7 @@ import type { ResolvedAttachment } from './attachment-resolver.js';
 import type ImapService from './imap.service.js';
 import SmtpService, {
   computeReplyRecipients,
+  messageIdOfRaw,
   normalizeEnvelopeRecipients,
   stripBccHeader,
 } from './smtp.service.js';
@@ -111,13 +112,14 @@ describe('SmtpService', () => {
         body: 'World',
       });
 
+      const call = transport.sendMail.mock.calls[0][0];
       expect(result).toEqual({
-        messageId: '<test@example.com>',
+        // The Message-ID of the bytes sent, not the transport's report.
+        messageId: /^Message-ID: (<[^>]+>)/im.exec((call.raw as Buffer).toString())?.[1],
         status: 'sent',
         // La copie Envoyés est désormais rapportée, plus avalée.
         sentCopy: { kind: 'filed' },
       });
-      const call = transport.sendMail.mock.calls[0][0];
       // Compose-once → raw: nodemailer receives opaque bytes + explicit envelope.
       expect(call.raw).toBeInstanceOf(Buffer);
       expect(call.envelope).toEqual({
@@ -386,6 +388,44 @@ describe('SmtpService', () => {
       const appendedStr = (appended as Buffer).toString('utf-8');
       expect(appendedStr).not.toMatch(/^Bcc:/im);
       expect(appendedStr).not.toContain('secret@example.com');
+    });
+
+    it('reports the Message-ID actually transmitted, not the one nodemailer invents for raw', async () => {
+      // nodemailer does not parse a raw message: its reported id is random.
+      transport.sendMail.mockResolvedValueOnce({ messageId: '<random-by-nodemailer@x.test>' });
+
+      const result = await service.sendEmail('test', {
+        to: ['recipient@example.com'],
+        subject: 'Which id',
+        body: 'Body',
+      });
+      const raw = (transport.sendMail.mock.calls[0][0].raw as Buffer).toString('utf-8');
+
+      expect(result.messageId).toBe(/^Message-ID: (<[^>]+>)/im.exec(raw)?.[1]);
+      expect(result.messageId).not.toBe('<random-by-nodemailer@x.test>');
+    });
+
+    it('with bccInSentCopy, files the Bcc in Sent and still never transmits it', async () => {
+      await service.sendEmail('test', {
+        to: ['recipient@example.com'],
+        subject: 'Blind copy kept',
+        body: 'Body',
+        bcc: ['secret@example.com'],
+        bccInSentCopy: true,
+      });
+
+      const call = transport.sendMail.mock.calls[0][0];
+      const sent = (call.raw as Buffer).toString('utf-8');
+      const [[, appended]] = vi.mocked(imapService.appendToSent).mock.calls;
+      const stored = (appended as Buffer).toString('utf-8');
+      const messageId = (raw: string) => /^Message-ID: (.*)$/im.exec(raw)?.[1];
+
+      expect(call.envelope.to).toEqual(['recipient@example.com', 'secret@example.com']);
+      expect(sent).not.toContain('secret@example.com');
+      expect(stored).toMatch(/^Bcc: secret@example\.com\r?$/im);
+      // One message, not two: same Message-ID and same body in both.
+      expect(messageId(stored)).toBe(messageId(sent));
+      expect(stored.replace(/^Bcc: .*\r\n/im, '')).toBe(sent);
     });
   });
 
@@ -1503,5 +1543,18 @@ describe('SmtpService — envoi et brouillons', () => {
       );
       expect(raw).not.toMatch(/filename="[^"]*\r\n/);
     });
+  });
+});
+
+describe('messageIdOfRaw', () => {
+  it('reads the Message-ID of the header section, folded or lowercase, and nothing else', () => {
+    const raw = (text: string) => Buffer.from(text.replace(/\n/g, '\r\n'));
+
+    expect(messageIdOfRaw(raw('Subject: x\nMessage-ID:\n <a@b.test>\n\nbody'))).toBe('<a@b.test>');
+    expect(messageIdOfRaw(raw('message-id: <c@d.test>\n\nbody'))).toBe('<c@d.test>');
+    expect(
+      messageIdOfRaw(raw('X-Original-Message-ID: <x@y.test>\n\nMessage-ID: <z@y.test>')),
+    ).toBeUndefined();
+    expect(messageIdOfRaw(raw('Subject: none\n\nbody'))).toBeUndefined();
   });
 });

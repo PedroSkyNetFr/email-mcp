@@ -3,12 +3,12 @@
  * sur IMAP (COPY serveur) et sur Graph (`POST /me/messages/{id}/copy`).
  */
 
-import type { IConnectionManager } from '../connections/types.js';
+import type { IConnectionManager } from '@pedroskynet/email-core/connections/types.js';
+import type GraphClient from '@pedroskynet/email-core/services/graph/graph.client.js';
+import GraphService from '@pedroskynet/email-core/services/graph/graph.service.js';
+import ImapService from '@pedroskynet/email-core/services/imap.service.js';
 import { crossAccountCopyRefusal } from '../tools/manage.tool.js';
 import type { AccountConfig } from '../types/index.js';
-import type GraphClient from './graph/graph.client.js';
-import GraphService from './graph/graph.service.js';
-import ImapService from './imap.service.js';
 
 function imapSetup() {
   const release = vi.fn();

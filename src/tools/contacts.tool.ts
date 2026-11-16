@@ -3,9 +3,8 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
 import { z } from 'zod';
-
-import type { IMailService } from '../services/mail-service.types.js';
 import { numeric } from './numeric-param.js';
 
 export default function registerContactsTools(server: McpServer, imapService: IMailService): void {

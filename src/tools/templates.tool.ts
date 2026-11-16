@@ -5,12 +5,11 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
+import type { ISendService } from '@pedroskynet/email-core/services/send-service.types.js';
 import { z } from 'zod';
 import audit from '../safety/audit.js';
-
-import type { IMailService } from '../services/mail-service.types.js';
 import SendGuard, { sendFingerprint } from '../services/send-guard.js';
-import type { ISendService } from '../services/send-service.types.js';
 import type TemplateService from '../services/template.service.js';
 import { runGuardedSend, sendGuardParams } from './send-guard-params.js';
 

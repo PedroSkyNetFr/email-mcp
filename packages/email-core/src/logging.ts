@@ -45,8 +45,29 @@ function formatData(data: unknown): string {
  * sont échappés pour qu'un message reste une ligne. Un échec d'écriture
  * (stderr fermé) est avalé : la journalisation ne doit jamais casser un outil.
  */
+/**
+ * Where log lines go when the host routes them itself (ONYX sends them to its
+ * NestJS logger). Unset: stderr, as the MCP server needs.
+ */
+export type LogSink = (level: LogLevel, logger: string, message: string) => void;
+
+let sink: LogSink | undefined;
+
+/** Routes the package's log lines to `next`; `undefined` restores stderr. */
+export function setLogSink(next: LogSink | undefined): void {
+  sink = next;
+}
+
 export async function mcpLog(level: LogLevel, logger: string, data: unknown): Promise<void> {
   const message = formatData(data).replace(/\r?\n/g, '\\n');
+  if (sink) {
+    try {
+      sink(level, logger, message);
+    } catch {
+      // A failing host logger must not break a mail operation either.
+    }
+    return;
+  }
   try {
     process.stderr.write(
       `${new Date().toISOString()} ${level.toUpperCase()} [${logger}] ${message}\n`,

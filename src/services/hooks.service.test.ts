@@ -4,13 +4,13 @@
  */
 
 import type { Server } from '@modelcontextprotocol/server';
+import type ImapService from '@pedroskynet/email-core/services/imap.service.js';
 import type { EmailMeta, HooksConfig } from '../types/index.js';
 import eventBus from './event-bus.js';
 import HooksService from './hooks.service.js';
-import type ImapService from './imap.service.js';
 import NotifierService from './notifier.service.js';
 
-vi.mock('../logging.js', () => ({
+vi.mock('@pedroskynet/email-core/logging.js', () => ({
   mcpLog: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -103,7 +103,7 @@ describe('HooksService static rules', () => {
   });
 
   it('logs the cause when a flag action fails instead of swallowing it', async () => {
-    const { mcpLog } = await import('../logging.js');
+    const { mcpLog } = await import('@pedroskynet/email-core/logging.js');
     const imap = fakeImap();
     imap.setFlags.mockRejectedValue(new Error('NO [CANNOT] read-only folder'));
     hooks = new HooksService(hooksConfig(), imap as unknown as ImapService);

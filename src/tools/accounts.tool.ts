@@ -3,9 +3,8 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import type ConnectionManager from '@pedroskynet/email-core/connections/manager.js';
 import { z } from 'zod';
-
-import type ConnectionManager from '../connections/manager.js';
 
 export default function registerAccountsTools(
   server: McpServer,

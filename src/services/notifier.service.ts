@@ -11,8 +11,8 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mcpLog } from '../logging.js';
-import { validateWebhookUrl } from '../safety/validation.js';
+import { mcpLog } from '@pedroskynet/email-core/logging.js';
+import { validateWebhookUrl } from '@pedroskynet/email-core/safety/validation.js';
 
 import type { AlertsConfig } from '../types/index.js';
 

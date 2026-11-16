@@ -14,13 +14,19 @@
  * - IMAP-only: Graph-backed accounts are skipped (no IDLE session there)
  */
 
+import {
+  buildImapFlowOptions,
+  resolveImapAuth,
+} from '@pedroskynet/email-core/connections/manager.js';
+import { mcpLog } from '@pedroskynet/email-core/logging.js';
+import {
+  hasAttachments as hasAttachmentsLenient,
+  safeIsoDate,
+} from '@pedroskynet/email-core/services/imap.service.js';
+import type OAuthService from '@pedroskynet/email-core/services/oauth.service.js';
 import { ImapFlow } from 'imapflow';
-import { buildImapFlowOptions, resolveImapAuth } from '../connections/manager.js';
-import { mcpLog } from '../logging.js';
 import type { AccountConfig, EmailMeta, WatcherConfig } from '../types/index.js';
 import eventBus from './event-bus.js';
-import { hasAttachments as hasAttachmentsLenient, safeIsoDate } from './imap.service.js';
-import type OAuthService from './oauth.service.js';
 import {
   CATCH_UP_LIMIT,
   readWatermark,

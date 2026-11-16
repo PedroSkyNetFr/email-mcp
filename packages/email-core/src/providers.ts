@@ -4,7 +4,7 @@
  * Maps common email domains to their IMAP/SMTP server settings.
  */
 
-import type { ProviderConfig } from '../types/index.js';
+import type { ProviderConfig } from './types/index.js';
 
 export const PROVIDERS: ProviderConfig[] = [
   {

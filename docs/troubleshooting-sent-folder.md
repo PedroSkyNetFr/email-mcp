@@ -92,7 +92,7 @@ Look for the folder that Mac Mail shows with the paper airplane icon and use its
 
 ## email-mcp Sent Folder Resolution Order
 
-For reference, `resolveSentFolder()` in `src/services/imap.service.ts` tries
+For reference, `resolveSentFolder()` in `packages/email-core/src/services/imap.service.ts` tries
 these in order:
 
 1. **Config override** — if `sent_folder` is set in `config.toml`, use it

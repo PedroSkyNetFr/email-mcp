@@ -5,6 +5,7 @@
     "lib": ["ES2022"],
     "types": ["node"],
     "moduleResolution": "bundler",
+    "customConditions": ["email-core-source"],
     "outDir": "./dist",
     "rootDir": "./src",
     "declaration": true,

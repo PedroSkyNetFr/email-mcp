@@ -6,11 +6,13 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
+import { describeAttachments } from '@pedroskynet/email-core/services/attachment-select.js';
+import type { IMailService } from '@pedroskynet/email-core/services/mail-service.types.js';
+import {
+  applyBodyFormat,
+  DEFAULT_MULTI_BODY_MAX,
+} from '@pedroskynet/email-core/utils/body-format.js';
 import { z } from 'zod';
-
-import { describeAttachments } from '../services/attachment-select.js';
-import type { IMailService } from '../services/mail-service.types.js';
-import { applyBodyFormat, DEFAULT_MULTI_BODY_MAX } from '../utils/body-format.js';
 import { bodyFormatParam, maxLengthParam, resolveMaxLength } from './body-params.js';
 
 export default function registerThreadTools(server: McpServer, imapService: IMailService): void {

@@ -9,10 +9,14 @@
  *   est en cause.
  */
 
-import type { IConnectionManager } from '../connections/types.js';
+import type { IConnectionManager } from '@pedroskynet/email-core/connections/types.js';
+import ImapService from '@pedroskynet/email-core/services/imap.service.js';
+import {
+  hasDateNarrowing,
+  RECENCY_WINDOW_DAYS,
+  withRecencyWindow,
+} from '@pedroskynet/email-core/services/search-criteria.js';
 import { formatSearchFailure, formatSearchResult } from '../tools/emails.tool.js';
-import ImapService from './imap.service.js';
-import { hasDateNarrowing, RECENCY_WINDOW_DAYS, withRecencyWindow } from './search-criteria.js';
 
 function hit(uid: number, subject: string) {
   return {

@@ -2593,3 +2593,17 @@ describe('ImapService', () => {
     });
   });
 });
+
+describe('ImapService.getCapabilities', () => {
+  it('returns capability names, not the [name, value] entries of imapflow’s Map', async () => {
+    const client = createMockImapClient();
+    client.capabilities = new Map<string, boolean>([
+      ['IMAP4rev1', true],
+      ['CONDSTORE', true],
+      ['QRESYNC', true],
+    ]);
+    const service = new ImapService(createMockConnectionManager(client));
+
+    expect(await service.getCapabilities('test')).toEqual(['IMAP4rev1', 'CONDSTORE', 'QRESYNC']);
+  });
+});

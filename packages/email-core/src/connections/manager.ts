@@ -17,7 +17,7 @@ import type OAuthService from '../services/oauth.service.js';
 import type { AccountConfig } from '../types/index.js';
 import { authFailureHint, withAuthGuidance } from '../utils/auth-error.js';
 import { isLoopbackHost } from '../utils/host.js';
-import type { IConnectionManager } from './types.js';
+import type { EphemeralImapOptions, IConnectionManager } from './types.js';
 
 /**
  * Rappel de nodemailer pour obtenir un jeton OAuth2 : `renew` vaut vrai quand
@@ -205,10 +205,13 @@ export default class ConnectionManager implements IConnectionManager {
    * cached `getImapClient` and the throwaway `createEphemeralImapClient` (D3
    * infra: do NOT reimplement auth elsewhere).
    */
-  private async buildImapClient(accountName: string): Promise<ImapFlow> {
+  private async buildImapClient(
+    accountName: string,
+    extra: Partial<ImapFlowOptions> = {},
+  ): Promise<ImapFlow> {
     const account = this.getAccount(accountName);
     const auth = await resolveImapAuth(account, this.oauthService);
-    return new ImapFlow(buildImapFlowOptions(account, auth));
+    return new ImapFlow(buildImapFlowOptions(account, auth, extra));
   }
 
   async getImapClient(accountName: string): Promise<ImapFlow> {
@@ -303,9 +306,15 @@ export default class ConnectionManager implements IConnectionManager {
    * ephemeral socket cannot crash the process (F2), but — unlike the cached
    * client's handler — it does NOT touch the shared-client map.
    */
-  async createEphemeralImapClient(accountName: string): Promise<ImapFlow> {
+  async createEphemeralImapClient(
+    accountName: string,
+    options: EphemeralImapOptions = {},
+  ): Promise<ImapFlow> {
     const account = this.getAccount(accountName);
-    const client = await this.buildImapClient(accountName);
+    const client = await this.buildImapClient(
+      accountName,
+      options.qresync ? { qresync: true } : {},
+    );
 
     client.on('error', (err: Error) => {
       const detail = redactSecrets(err instanceof Error ? err.message : String(err), [
