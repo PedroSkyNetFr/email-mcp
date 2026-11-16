@@ -29,31 +29,58 @@ import {
   guard,
   IMMUTABLE,
   SUMMARY_QUERY,
+  seg,
   toSummary,
 } from './graph-reader.js';
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
 
-/** A KQL value, quoted: spaces and quotes survive. */
-const kql = (value: string): string => `"${value.replace(/"/g, '\\"')}"`;
-const day = (iso: string): string => new Date(iso).toISOString().slice(0, 10);
+/**
+ * KQL in the form the MCP server's search uses on Outlook.com (measured): the
+ * whole query goes inside one pair of quotes in $search, so values carry no
+ * quotes of their own; a multi-word value becomes one term per word.
+ */
+const words = (value: string): string[] =>
+  value.replace(/["\\]/g, ' ').split(/\s+/).filter(Boolean);
+const property = (name: string, value: string): string | undefined => {
+  const list = words(value);
+  if (list.length === 0) return undefined;
+  return list.length === 1
+    ? `${name}:${list[0]}`
+    : `(${list.map((w) => `${name}:${w}`).join(' AND ')})`;
+};
+const DAY_MS = 24 * 60 * 60 * 1000;
+const day = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
 function kqlQuery(query: SearchQuery): string {
-  const terms: string[] = [];
-  if (query.text) terms.push(kql(query.text));
-  if (query.from) terms.push(`from:${kql(query.from)}`);
-  if (query.to) terms.push(`to:${kql(query.to)}`);
-  if (query.subject) terms.push(`subject:${kql(query.subject)}`);
-  if (query.since) terms.push(`received>=${day(query.since)}`);
-  if (query.before) terms.push(`received<${day(query.before)}`);
-  if (query.hasAttachments !== undefined) terms.push(`hasattachments:${query.hasAttachments}`);
-  return terms.join(' AND ');
+  const terms: (string | undefined)[] = [
+    query.text ? words(query.text).join(' ') : undefined,
+    query.from ? property('from', query.from) : undefined,
+    query.to ? property('to', query.to) : undefined,
+    query.subject ? property('subject', query.subject) : undefined,
+    // KQL dates are whole days in the mailbox's zone: widened by a day each
+    // side, the exact bounds are applied to the results (see inBounds).
+    query.since ? `received>=${day(Date.parse(query.since) - DAY_MS)}` : undefined,
+    query.before ? `received<${day(Date.parse(query.before) + 2 * DAY_MS)}` : undefined,
+    query.hasAttachments === undefined ? undefined : `hasattachments:${query.hasAttachments}`,
+  ];
+  return terms.filter((t): t is string => Boolean(t)).join(' AND ');
 }
 
+const inBounds = (query: SearchQuery, received: string | undefined): boolean => {
+  const t = received ? Date.parse(received) : Number.NaN;
+  if (query.since && !(t >= Date.parse(query.since))) return false;
+  if (query.before && !(t < Date.parse(query.before))) return false;
+  return true;
+};
+
 function odataFilter(query: SearchQuery): string {
-  const clauses: string[] = [];
-  if (query.since) clauses.push(`receivedDateTime ge ${new Date(query.since).toISOString()}`);
+  // Graph requires the $orderby property (receivedDateTime) first in $filter,
+  // or answers InefficientFilter (found in review): a lower bound always leads.
+  const clauses: string[] = [
+    `receivedDateTime ge ${query.since ? new Date(query.since).toISOString() : '1900-01-01T00:00:00Z'}`,
+  ];
   if (query.before) clauses.push(`receivedDateTime lt ${new Date(query.before).toISOString()}`);
   if (query.seen !== undefined) clauses.push(`isRead eq ${query.seen}`);
   if (query.flagged !== undefined) {
@@ -63,8 +90,12 @@ function odataFilter(query: SearchQuery): string {
   return clauses.join(' and ');
 }
 
+/** Binds a page token to its query; a field left undefined is no criterion. */
+
 function queryKey(query: SearchQuery): string {
-  const sorted = Object.entries(query).sort(([a], [b]) => a.localeCompare(b));
+  const sorted = Object.entries(query)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b));
   return createHash('sha256').update(JSON.stringify(sorted)).digest('base64url').slice(0, 16);
 }
 
@@ -87,11 +118,11 @@ export default class GraphSearch {
       url = link;
     } else {
       const scope = query.folderId
-        ? `/me/mailFolders/${graphFolderId(query.folderId)}/messages`
+        ? `/me/mailFolders/${seg(graphFolderId(query.folderId))}/messages`
         : '/me/messages';
       const filter = odataFilter(query);
       url = textual
-        ? `${scope}?$search=${encodeURIComponent(kqlQuery(query))}&$top=${size}&${SUMMARY_QUERY}`
+        ? `${scope}?$search=${encodeURIComponent(`"${kqlQuery(query)}"`)}&$top=${size}&${SUMMARY_QUERY}`
         : `${scope}?$top=${size}&$orderby=receivedDateTime desc${filter ? `&$filter=${encodeURIComponent(filter)}` : ''}&${SUMMARY_QUERY}`;
     }
     return guard(async () => {
@@ -105,6 +136,7 @@ export default class GraphSearch {
       const kept = textual
         ? page.value.filter(
             (m) =>
+              inBounds(query, m.receivedDateTime) &&
               (query.seen === undefined || (m.isRead ?? false) === query.seen) &&
               (query.flagged === undefined || (m.flag?.flagStatus === 'flagged') === query.flagged),
           )

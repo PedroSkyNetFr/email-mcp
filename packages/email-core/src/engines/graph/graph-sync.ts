@@ -32,6 +32,7 @@ import {
   GRAPH_ENGINE,
   graphFolderId,
   messageIdOf,
+  seg,
   stripAngles,
   toFlags,
   toMailError,
@@ -45,7 +46,7 @@ const DELTA_SELECT =
 const FIDELITY: ChangeBatch['fidelity'] = { flags: 'exact', removals: 'exact' };
 
 const firstLink = (folder: string): string =>
-  `/me/mailFolders/${folder}/messages/delta?$select=${DELTA_SELECT}`;
+  `/me/mailFolders/${seg(folder)}/messages/delta?$select=${DELTA_SELECT}`;
 
 const encodeCursor = (folder: string, link: string, delivered: string[]): SyncCursor =>
   encodeId('cursor', GRAPH_ENGINE, [folder, link, ...delivered]);
@@ -100,8 +101,17 @@ export default class GraphSync {
 
     const added: AddedMessage[] = [];
     const removed: string[] = [];
+    const flagsChanged: ChangeBatch['flagsChanged'] = [];
     let bytes = 0;
     let stoppedEarly = false;
+    // A replayed page brings the messages already delivered back with their
+    // current state: one read or flagged since then is a flag change, which
+    // the deltaLink would otherwise count as synchronised (found in review).
+    page.value
+      .filter((m) => delivered.has(m.id) && !m['@removed'])
+      .forEach((m) => {
+        flagsChanged.push({ id: messageIdOf(m.id), flags: toFlags(m) });
+      });
     const pending = page.value.filter((m) => !delivered.has(m.id));
     // Sequential: a size cap needs each source's size before the next download.
     await pending.reduce(async (previous, message) => {
@@ -116,11 +126,25 @@ export default class GraphSync {
         stoppedEarly = true;
         return;
       }
-      const raw = includeRaw
-        ? await this.client.getBinary(`/me/messages/${message.id}/$value`).catch((err: unknown) => {
+      let raw: Buffer | undefined;
+      if (includeRaw) {
+        try {
+          raw = await this.client.getBinary(`/me/messages/${seg(message.id)}/$value`);
+        } catch (err) {
+          // Gone between the delta and the download: a removal.
+          if (err instanceof GraphError && err.status === 404) {
+            removed.push(messageIdOf(message.id));
+            delivered.add(message.id);
+            return;
+          }
+          // Any other failure leaves the source out instead of blocking the
+          // folder for good: the host fetches it later with getRaw.
+          if (!(err instanceof GraphError) || err.status >= 500 || err.status === 429) {
             throw toMailError(err);
-          })
-        : undefined;
+          }
+          raw = undefined;
+        }
+      }
       bytes += raw?.length ?? 0;
       added.push({
         id: messageIdOf(message.id),
@@ -150,7 +174,7 @@ export default class GraphSync {
 
     return {
       added,
-      flagsChanged: [],
+      flagsChanged,
       removed,
       reset: false,
       complete,

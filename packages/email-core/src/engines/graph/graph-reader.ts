@@ -8,7 +8,7 @@
  * existing GraphService methods (body, raw source, attachments) are reused
  * with them unchanged.
  *
- * Pages are anchored on the arrival date (`receivedDateTime le …`, the ids
+ * Pages are anchored on the arrival date (`receivedDateTime lt …`, the ids
  * already shown at that instant skipped), not on `$skip`, so mail arriving
  * while the user scrolls neither repeats nor hides a message.
  */
@@ -39,6 +39,11 @@ export const IMMUTABLE = { Prefer: 'IdType="ImmutableId"' } as const;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+/** Graph refuses a $top above 1000 on message lists. */
+const GRAPH_MAX_TOP = 1000;
+
+/** An instant as Graph shows it: ISO 8601 to the second, UTC. */
+const toSecond = (ms: number): string => `${new Date(ms).toISOString().slice(0, 19)}Z`;
 
 /** MAPI properties read along: last verb (answered / forwarded), message size. */
 const VERB = 'Integer 0x1081';
@@ -60,11 +65,27 @@ export const folderIdOf = (graphId: string): FolderId =>
 export const messageIdOf = (graphId: string): MessageId =>
   encodeId('message', GRAPH_ENGINE, [graphId]);
 
+/**
+ * A Graph id decoded from a contract id. Ids are only ever path segments: a
+ * forged one such as "../mailFolders/X" would otherwise turn a message
+ * deletion into a folder deletion (found in review). URLs encode them too.
+ */
 function single(id: string, kind: 'folder' | 'message'): string {
   const [graphId] = decodeId(id, kind, GRAPH_ENGINE);
-  if (typeof graphId !== 'string') throw new MailError('not-found', `Malformed ${kind} id`);
+  if (
+    typeof graphId !== 'string' ||
+    graphId === '' ||
+    graphId === '.' ||
+    graphId === '..' ||
+    /[/\\?#%\s]/.test(graphId)
+  ) {
+    throw new MailError('not-found', `Malformed ${kind} id`);
+  }
   return graphId;
 }
+
+/** A Graph id as a URL path segment. */
+export const seg = (graphId: string): string => encodeURIComponent(graphId);
 export const graphFolderId = (id: FolderId): string => single(id, 'folder');
 export const graphMessageId = (id: MessageId): string => single(id, 'message');
 
@@ -154,6 +175,9 @@ export function toMailError(err: unknown): unknown {
   if (err instanceof MailError) return err;
   const message = err instanceof Error ? err.message : String(err);
   if (err instanceof GraphError) {
+    if ([500, 502, 504].includes(err.status)) {
+      return new MailError('transient', message, { cause: err });
+    }
     const code = (
       {
         404: 'not-found',
@@ -167,7 +191,13 @@ export function toMailError(err: unknown): unknown {
     if (code) return new MailError(code, message, { cause: err });
     if (err.status === 400) return new MailError('invalid', message, { cause: err });
   }
-  if (/oauth|token|consent/i.test(message)) return new MailError('auth', message, { cause: err });
+  // Only a non-Graph error is read by its text: a Graph message quotes the
+  // URL, whose $skiptoken / $deltatoken would read as an auth failure.
+  if (err instanceof GraphError) return err;
+  if (err instanceof TypeError) return new MailError('transient', message, { cause: err }); // fetch failed
+  if (/oauth|refresh token|consent|invalid_grant/i.test(message)) {
+    return new MailError('auth', message, { cause: err });
+  }
   return err;
 }
 
@@ -240,7 +270,7 @@ export default class GraphReader {
         await Promise.all(
           level
             .filter((f) => (f.childFolderCount ?? 0) > 0)
-            .map(async (f) => walk(`/me/mailFolders/${f.id}/childFolders?${select}`)),
+            .map(async (f) => walk(`/me/mailFolders/${seg(f.id)}/childFolders?${select}`)),
         );
       };
       await walk(`/me/mailFolders?${select}`);
@@ -270,7 +300,7 @@ export default class GraphReader {
   /** The Graph id of a well-known folder ("deleteditems", "drafts"…). */
   async wellKnown(name: string): Promise<string> {
     const folder = await guard(async () =>
-      this.client.request<{ id: string }>('GET', `/me/mailFolders/${name}?$select=id`),
+      this.client.request<{ id: string }>('GET', `/me/mailFolders/${seg(name)}?$select=id`),
     );
     return folder.id;
   }
@@ -285,17 +315,25 @@ export default class GraphReader {
       if (kind !== 'list' || pageFolder !== folder || typeof pageAnchor !== 'string') {
         throw new MailError('invalid', 'Page token of another folder');
       }
-      anchor = pageAnchor;
+      // Re-serialised: the token is host-held text, never put in a $filter as is.
+      const parsed = Date.parse(pageAnchor);
+      if (Number.isNaN(parsed)) throw new MailError('invalid', 'Malformed page token');
+      anchor = toSecond(parsed);
       shown = ids.filter((i): i is string => typeof i === 'string');
     }
     return guard(async () => {
-      const filter = anchor ? `&$filter=receivedDateTime le ${anchor}` : '';
-      // One more than needed tells whether a next page exists; the ids already
-      // shown at the anchor instant come back too and are skipped.
-      const top = size + shown.length + 1;
+      // Graph shows receivedDateTime to the second while Exchange keeps more:
+      // `le 10:00:00Z` would drop a message at 10:00:00.437 not shown yet. So
+      // the page takes everything before the next second and skips the ids
+      // already shown within this one.
+      const filter = anchor
+        ? `&$filter=receivedDateTime lt ${toSecond(Date.parse(anchor) + 1000)}`
+        : '';
+      // One more than needed tells whether a next page exists. Graph caps $top.
+      const top = Math.min(size + shown.length + 1, GRAPH_MAX_TOP);
       const page = await this.client.request<GraphPageOf<GraphSummary>>(
         'GET',
-        `/me/mailFolders/${folder}/messages?$top=${top}&$orderby=receivedDateTime desc${filter}&${SUMMARY_QUERY}`,
+        `/me/mailFolders/${seg(folder)}/messages?$top=${top}&$orderby=receivedDateTime desc${filter}&${SUMMARY_QUERY}`,
         undefined,
         IMMUTABLE,
       );
@@ -303,12 +341,12 @@ export default class GraphReader {
       const items = fresh.slice(0, size).map(toSummary);
       const last = fresh[size - 1];
       if (fresh.length <= size || !last?.receivedDateTime) return { items };
-      const instant = last.receivedDateTime;
-      const sameInstant = fresh
+      const instant = toSecond(Date.parse(last.receivedDateTime));
+      const sameSecond = fresh
         .slice(0, size)
-        .filter((m) => m.receivedDateTime === instant)
+        .filter((m) => m.receivedDateTime && toSecond(Date.parse(m.receivedDateTime)) === instant)
         .map((m) => m.id);
-      const carried = instant === anchor ? [...shown, ...sameInstant] : sameInstant;
+      const carried = instant === anchor ? [...shown, ...sameSecond] : sameSecond;
       return { items, next: encodeId('page', GRAPH_ENGINE, ['list', folder, instant, ...carried]) };
     });
   }
@@ -317,7 +355,7 @@ export default class GraphReader {
     return guard(async () =>
       this.client.request<GraphSummary>(
         'GET',
-        `/me/messages/${graphMessageId(id)}?${SUMMARY_QUERY}`,
+        `/me/messages/${seg(graphMessageId(id))}?${SUMMARY_QUERY}`,
         undefined,
         IMMUTABLE,
       ),
@@ -374,7 +412,8 @@ export default class GraphReader {
   async getThread(id: MessageId): Promise<MessageSummary[]> {
     const meta = await this.summary(id);
     if (!meta.conversationId) return [toSummary(meta)];
-    const conversation = meta.conversationId.replace(/'/g, "''");
+    // OData string literal: quotes doubled, then URL-encoded.
+    const conversation = encodeURIComponent(meta.conversationId.replace(/'/g, "''"));
     const messages = await guard(async () =>
       this.all<GraphSummary>(
         `/me/messages?$filter=conversationId eq '${conversation}'&$top=50&${SUMMARY_QUERY}`,

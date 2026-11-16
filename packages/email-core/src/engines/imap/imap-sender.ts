@@ -70,6 +70,19 @@ function toSendError(err: unknown): unknown {
   if (/too large/i.test(message)) return new MailError('too-large', message, { cause: err });
   if (/rate limit/i.test(message)) return new MailError('transient', message, { cause: err });
   if (/no recipients/i.test(message)) return new MailError('invalid', message, { cause: err });
+  // A connection lost after it was opened may have delivered the message
+  // (nodemailer: command other than CONN): uncertain, never retried blindly.
+  const smtp = err as { code?: string; command?: string };
+  if (
+    ['ETIMEDOUT', 'ECONNRESET', 'ESOCKET', 'EPROTOCOL'].includes(smtp.code ?? '') &&
+    smtp.command !== 'CONN'
+  ) {
+    return new MailError(
+      'uncertain',
+      `${message} — the message may have been sent: check the sent folder before sending again`,
+      { cause: err },
+    );
+  }
   return err;
 }
 

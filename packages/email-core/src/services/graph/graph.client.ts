@@ -52,6 +52,24 @@ export class GraphError extends Error {
   }
 }
 
+/**
+ * The URL to call: a path under GRAPH_ROOT, or an absolute URL that is
+ * already one (Graph's own nextLink / deltaLink). Anything else is refused:
+ * the bearer token goes with every request, and links travel through page
+ * tokens and sync cursors a host stores and hands back — a forged one must
+ * not send the token to another site (found in review).
+ */
+export function graphUrl(pathOrUrl: string): string {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(pathOrUrl)) {
+    if (!pathOrUrl.startsWith(`${GRAPH_ROOT}/`)) {
+      throw new Error(`Refused to call a URL outside Microsoft Graph: ${pathOrUrl.slice(0, 80)}`);
+    }
+    return pathOrUrl;
+  }
+  if (!pathOrUrl.startsWith('/')) throw new Error(`Not a Graph path: ${pathOrUrl.slice(0, 80)}`);
+  return `${GRAPH_ROOT}${pathOrUrl}`;
+}
+
 export default class GraphClient {
   constructor(
     private readonly account: AccountConfig,
@@ -86,7 +104,7 @@ export default class GraphClient {
     body?: unknown,
     headers: Record<string, string> = {},
   ): Promise<T> {
-    const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${GRAPH_ROOT}${pathOrUrl}`;
+    const url = graphUrl(pathOrUrl);
 
     const send = async (): Promise<Response> => {
       const accessToken = await this.token();
@@ -210,10 +228,19 @@ export default class GraphClient {
 
   /** GET raw bytes (attachment content, MIME source). */
   async getBinary(path: string, headers: Record<string, string> = {}): Promise<Buffer> {
-    const accessToken = await this.token();
-    const response = await fetch(`${GRAPH_ROOT}${path}`, {
-      headers: { Authorization: `Bearer ${accessToken}`, ...headers },
-    });
+    const url = graphUrl(path);
+    const fetchOnce = async (): Promise<Response> =>
+      fetch(url, { headers: { Authorization: `Bearer ${await this.token()}`, ...headers } });
+    let response = await fetchOnce();
+    // Same policy as request(): a GET throttled (429) or unavailable (503) is
+    // safe to replay once; the sync downloads one source per message.
+    if (shouldRetry('GET', response.status)) {
+      const retryAfter = Number.parseInt(response.headers.get('retry-after') ?? '2', 10);
+      await new Promise((resolve) => {
+        setTimeout(resolve, Math.min(Number.isNaN(retryAfter) ? 2 : retryAfter, 30) * 1000);
+      });
+      response = await fetchOnce();
+    }
     if (!response.ok) {
       throw new GraphError(
         `Graph GET ${path} failed (${response.status})`,

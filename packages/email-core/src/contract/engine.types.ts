@@ -265,7 +265,11 @@ export interface OutgoingMessage {
 }
 
 export interface SendOutcome {
-  /** `Message-ID` header of the sent message, without angle brackets. */
+  /**
+   * `Message-ID` header of the sent message, without angle brackets. Empty
+   * when the provider does not report it (Graph sendMail): find the message
+   * in the sent folder by the next listChanges instead.
+   */
   messageIdHeader: string;
   /**
    * Copy in the sent folder:
@@ -289,7 +293,11 @@ export interface AddedMessage {
   flags: Flags;
   receivedAt: string;
   size: number;
-  /** Full RFC 822 source, unless `includeRaw: false` was asked. */
+  /**
+   * Full RFC 822 source, unless `includeRaw: false` was asked. Also absent
+   * when the provider refused that one source (Graph, rare): the folder is not
+   * blocked for it; fetch it later with `getRaw`.
+   */
   raw?: Buffer;
 }
 

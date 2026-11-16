@@ -20,8 +20,10 @@ import type {
 } from '../../contract/engine.types.js';
 import { MailError } from '../../contract/errors.js';
 import type GraphClient from '../../services/graph/graph.client.js';
+import { GraphError } from '../../services/graph/graph.client.js';
 import type GraphService from '../../services/graph/graph.service.js';
 import type GraphSendService from '../../services/graph/graph-send.service.js';
+import UncertainSendError from '../../services/graph/uncertain-send-error.js';
 import type { AccountConfig, SendResult } from '../../types/index.js';
 import { forwardedParts, prepareForwardFrom, prepareReplyFrom } from '../shared/compose.js';
 import type GraphMutator from './graph-mutator.js';
@@ -40,6 +42,29 @@ const bodyOf = (message: OutgoingMessage): { body: string; html: boolean } =>
   message.html !== undefined
     ? { body: message.html, html: true }
     : { body: message.text ?? '', html: false };
+
+/**
+ * A failed send in the contract's terms. GraphClient does not replay a POST
+ * on 503, since Graph may have sent before failing: such a failure — any 5xx,
+ * a cut connection, GraphSendService's UncertainSendError — is `uncertain`,
+ * never `transient`, which would invite a second send (found in review).
+ */
+function toSendError(err: unknown): unknown {
+  if (err instanceof MailError) return err;
+  const message = err instanceof Error ? err.message : String(err);
+  if (
+    err instanceof UncertainSendError ||
+    (err instanceof GraphError && err.status >= 500) ||
+    err instanceof TypeError
+  ) {
+    return new MailError(
+      'uncertain',
+      `${message} — the message may have been sent: check Sent Items before sending again`,
+      { cause: err },
+    );
+  }
+  return toMailError(err);
+}
 
 const outcome = (result: SendResult, warnings: string[] = []): SendOutcome => ({
   messageIdHeader: stripAngles(result.messageId) ?? '',
@@ -90,8 +115,10 @@ export default class GraphSender {
     if ([...message.to, ...(message.cc ?? []), ...(message.bcc ?? [])].length === 0) {
       throw new MailError('invalid', 'A message needs at least one recipient (To, Cc or Bcc)');
     }
-    const result = await guard(async () =>
-      this.transport.sendEmail(this.account, {
+    const threading = await this.threading(message.replyTo);
+    let result: SendResult;
+    try {
+      result = await this.transport.sendEmail(this.account, {
         to: message.to,
         cc: message.cc,
         bcc: message.bcc,
@@ -99,9 +126,11 @@ export default class GraphSender {
         ...bodyOf(message),
         attachments: toResolved(message.attachments),
         appendSignature: message.signature,
-        ...(await this.threading(message.replyTo)),
-      }),
-    );
+        ...threading,
+      });
+    } catch (err) {
+      throw toSendError(err);
+    }
     return outcome(result, await this.markOriginal(message));
   }
 
@@ -115,10 +144,9 @@ export default class GraphSender {
       targetIdType: 'restImmutableEntryId',
     });
     const target = translated.value[0]?.targetId;
-    if (!target) {
-      throw new MailError('transient', 'Draft saved, but its id could not be translated');
-    }
-    return target;
+    // GraphService handed back a regular id: Graph accepts it anywhere, only
+    // the host's id consistency suffers. Better than failing a saved draft.
+    return target ?? regularId;
   }
 
   async saveDraft(draft: OutgoingMessage, replaces?: MessageId): Promise<MessageId> {
@@ -133,9 +161,12 @@ export default class GraphSender {
         ...(threading.inReplyTo ? { inReplyTo: threading.inReplyTo } : {}),
         attachments: toResolved(draft.attachments),
       });
-      const id = messageIdOf(await this.immutable(String(saved.id)));
-      // The new version is safe on the server before the old one goes.
-      if (replaces) await this.deleteDraft(replaces);
+      const regular = String(saved.id);
+      const id = messageIdOf(await this.immutable(regular).catch(() => regular));
+      // The new version is safe on the server before the old one goes. If the
+      // old one cannot be removed, the save still succeeded: an error would
+      // make the host save again and pile up copies.
+      if (replaces) await this.deleteDraft(replaces).catch(() => undefined);
       return id;
     });
   }
@@ -145,9 +176,12 @@ export default class GraphSender {
   }
 
   async sendDraft(id: MessageId): Promise<SendOutcome> {
-    return outcome(
-      await guard(async () => this.transport.sendDraft(this.account, graphMessageId(id))),
-    );
+    const graphId = graphMessageId(id);
+    try {
+      return outcome(await this.transport.sendDraft(this.account, graphId));
+    } catch (err) {
+      throw toSendError(err);
+    }
   }
 
   async prepareReply(id: MessageId, options: { all?: boolean } = {}): Promise<OutgoingMessage> {

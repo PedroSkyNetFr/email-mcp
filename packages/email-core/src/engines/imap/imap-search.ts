@@ -60,7 +60,9 @@ function toCriteria(query: SearchQuery): SearchObject {
 /** Binds a page token to its query: a token reused with another query is refused. */
 function queryKey(query: SearchQuery): string {
   // The folder is in the token already; the key binds the filters.
-  const rest = Object.fromEntries(Object.entries(query).filter(([k]) => k !== 'folderId'));
+  const rest = Object.fromEntries(
+    Object.entries(query).filter(([k, v]) => k !== 'folderId' && v !== undefined),
+  );
   const sorted = Object.fromEntries(Object.entries(rest).sort(([a], [b]) => a.localeCompare(b)));
   return createHash('sha256').update(JSON.stringify(sorted)).digest('base64url').slice(0, 16);
 }

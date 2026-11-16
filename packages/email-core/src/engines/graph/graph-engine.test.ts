@@ -1,7 +1,8 @@
-import type GraphClient from '../../services/graph/graph.client.js';
-import { GraphError } from '../../services/graph/graph.client.js';
+import GraphClient, { GraphError, graphUrl } from '../../services/graph/graph.client.js';
 import type GraphService from '../../services/graph/graph.service.js';
 import type GraphSendService from '../../services/graph/graph-send.service.js';
+import UncertainSendError from '../../services/graph/uncertain-send-error.js';
+import type OAuthService from '../../services/oauth.service.js';
 import type { AccountConfig } from '../../types/index.js';
 import createGraphEngine from './graph-engine.js';
 import { folderIdOf, messageIdOf } from './graph-reader.js';
@@ -56,7 +57,7 @@ describe('Graph engine: listMessages', () => {
     const same = '2026-11-16T10:00:00Z';
     const { engine, calls } = fakeGraph((_m, url) => {
       // The page query always carries a $filter (in $expand): tell pages by the anchor.
-      if (!url.includes('receivedDateTime le')) {
+      if (!url.includes('receivedDateTime lt')) {
         return {
           value: [message('a', '2026-11-16T11:00:00Z'), message('b', same), message('c', same)],
         };
@@ -73,7 +74,8 @@ describe('Graph engine: listMessages', () => {
 
     expect(first.items.map((m) => m.subject)).toEqual(['Subject a', 'Subject b']);
     expect(second.items.map((m) => m.subject)).toEqual(['Subject c', 'Subject d']);
-    expect(calls[1]?.url).toContain(`receivedDateTime le ${same}`);
+    // Graph shows seconds, Exchange keeps more: the page runs to the next second.
+    expect(calls[1]?.url).toContain('receivedDateTime lt 2026-11-16T10:00:01Z');
     expect(calls[0]?.headers).toMatchObject({ Prefer: 'IdType="ImmutableId"' });
   });
 });
@@ -155,7 +157,11 @@ describe('Graph engine: changes', () => {
     expect(patch?.body).toEqual({
       isRead: true,
       flag: { flagStatus: 'flagged' },
-      singleValueExtendedProperties: [{ id: 'Integer 0x1081', value: '102' }],
+      // Last verb (what was done) and icon (the arrow Outlook draws).
+      singleValueExtendedProperties: [
+        { id: 'Integer 0x1081', value: '102' },
+        { id: 'Integer 0x1080', value: '261' },
+      ],
       categories: ['Keep', 'Chantier'],
     });
   });
@@ -237,7 +243,11 @@ describe('Graph engine: sending', () => {
       warnings: [],
     });
     expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({
-      singleValueExtendedProperties: [{ id: 'Integer 0x1081', value: '102' }],
+      // Last verb (what was done) and icon (the arrow Outlook draws).
+      singleValueExtendedProperties: [
+        { id: 'Integer 0x1081', value: '102' },
+        { id: 'Integer 0x1080', value: '261' },
+      ],
     });
   });
 
@@ -258,5 +268,124 @@ describe('Graph engine: sending', () => {
     const { engine } = fakeGraph(() => undefined);
 
     await expect(engine.waitForChange({ folderIds: [], maxMs: 10 })).resolves.toBe('unsupported');
+  });
+});
+
+// Regression tests for the review of the Graph engine.
+describe('Graph engine: review fixes', () => {
+  it('never sends the access token outside Microsoft Graph, whatever a token says', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const client = new GraphClient(
+      { name: 'perso', oauth2: {} } as AccountConfig,
+      { getAccessToken: async () => 'SECRET' } as unknown as OAuthService,
+    );
+
+    expect(() => graphUrl('https://attacker.example/steal')).toThrow(/outside Microsoft Graph/);
+    expect(graphUrl('https://graph.microsoft.com/v1.0/me/messages?$skiptoken=x')).toContain(
+      'graph.microsoft.com',
+    );
+    await expect(
+      client.request('GET', 'https://graph.microsoft.com.evil.example/x'),
+    ).rejects.toThrow();
+    await expect(client.getBinary('https://attacker.example/x')).rejects.toThrow();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('refuses a forged id that would turn a message deletion into a folder deletion', async () => {
+    const { engine, calls } = fakeGraph((_m, url) =>
+      url.includes('deleteditems') ? { id: 'TRASH' } : {},
+    );
+
+    const result = await engine.delete([messageIdOf('../mailFolders/FOLDER-XYZ')], {
+      permanent: true,
+    });
+
+    expect(result.succeeded).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(calls.some((c) => c.url.includes('FOLDER-XYZ'))).toBe(false);
+  });
+
+  it('reports a Graph outage on a delta page as transient, not as an auth failure', async () => {
+    const { engine } = fakeGraph(
+      () => new GraphError('Graph GET /me/x/delta?$skiptoken=abc failed (500)', 500, ''),
+    );
+
+    await expect(engine.listChanges(folderIdOf('F'), null)).rejects.toMatchObject({
+      code: 'transient',
+    });
+  });
+
+  it('reports a send that failed after reaching Graph as uncertain, never transient', async () => {
+    const { engine, send } = fakeGraph(() => undefined);
+    send.sendEmail.mockRejectedValueOnce(new GraphError('Service unavailable', 503, ''));
+    send.sendEmail.mockRejectedValueOnce(new UncertainSendError('draft sent, state unknown'));
+    const outgoing = { to: ['bob@example.test'], subject: 's', text: 't' };
+
+    await expect(engine.send(outgoing)).rejects.toMatchObject({ code: 'uncertain' });
+    await expect(engine.send(outgoing)).rejects.toMatchObject({ code: 'uncertain' });
+  });
+
+  it('reports a message read between two replays of a capped delta page', async () => {
+    let read = false;
+    const { engine } = fakeGraph(() => ({
+      value: [
+        message('A', '2026-11-16T10:00:00Z', { isRead: read }),
+        message('B', '2026-11-16T10:00:00Z'),
+      ],
+      '@odata.deltaLink': 'DELTA',
+    }));
+    const folder = folderIdOf('F');
+
+    const first = await engine.listChanges(folder, null, { maxBytes: 50 }); // A only
+    read = true; // the user reads A on their phone
+    const second = await engine.listChanges(folder, first.nextCursor, { maxBytes: 50 });
+
+    expect(first.added.map((m) => m.id)).toEqual([messageIdOf('A')]);
+    expect(second.added.map((m) => m.id)).toEqual([messageIdOf('B')]);
+    expect(second.flagsChanged).toMatchObject([{ id: messageIdOf('A'), flags: { seen: true } }]);
+  });
+
+  it('reports a message gone before its source was downloaded as removed, without blocking', async () => {
+    const { engine, client } = fakeGraph(() => ({
+      value: [message('gone', '2026-11-16T10:00:00Z'), message('ok', '2026-11-16T10:00:00Z')],
+      '@odata.deltaLink': 'DELTA',
+    }));
+    client.getBinary.mockRejectedValueOnce(new GraphError('Not found', 404, ''));
+
+    const batch = await engine.listChanges(folderIdOf('F'), null);
+
+    expect(batch.removed).toEqual([messageIdOf('gone')]);
+    expect(batch.added.map((m) => m.id)).toEqual([messageIdOf('ok')]);
+    expect(batch.complete).toBe(true);
+  });
+
+  it('searches unread mail with the date first in $filter, as Graph requires with $orderby', async () => {
+    const { engine, calls } = fakeGraph(() => ({ value: [] }));
+
+    await engine.search({ seen: false });
+    const filter = decodeURIComponent(/\$filter=([^&]*)/.exec(calls[0]?.url ?? '')?.[1] ?? '');
+
+    expect(filter).toBe('receivedDateTime ge 1900-01-01T00:00:00Z and isRead eq false');
+  });
+
+  it('builds KQL in one pair of quotes, values without quotes of their own', async () => {
+    const { engine, calls } = fakeGraph(() => ({ value: [] }));
+
+    await engine.search({ text: 'devis "toiture"', from: 'Jean Dupont' });
+    const kql = decodeURIComponent(/\$search=([^&]*)/.exec(calls[0]?.url ?? '')?.[1] ?? '');
+
+    expect(kql).toBe('"devis toiture AND (from:Jean AND from:Dupont)"');
+  });
+
+  it('accepts the next page when a field was left undefined', async () => {
+    const { engine } = fakeGraph(() => ({
+      value: [],
+      '@odata.nextLink': 'https://graph.microsoft.com/v1.0/me/messages?$skiptoken=1',
+    }));
+
+    const first = await engine.search({ subject: 'x', seen: undefined });
+    await expect(engine.search({ subject: 'x' }, { page: first.next })).resolves.toBeDefined();
   });
 });

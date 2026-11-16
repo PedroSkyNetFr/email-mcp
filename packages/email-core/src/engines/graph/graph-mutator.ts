@@ -25,10 +25,31 @@ import {
   guard,
   IMMUTABLE,
   messageIdOf,
+  seg,
   toMailError,
   VERB_FORWARDED,
   VERB_REPLIED,
 } from './graph-reader.js';
+
+/**
+ * Outlook draws the reply / forward arrow from the icon index (PidTagIconIndex
+ * 0x1080: 261 replied, 262 forwarded), the last verb (0x1081) says what was
+ * done: both are set.
+ */
+const LAST_VERB = 'Integer 0x1081';
+const ICON = 'Integer 0x1080';
+const REPLIED = [
+  { id: LAST_VERB, value: VERB_REPLIED },
+  { id: ICON, value: '261' },
+];
+const FORWARDED = [
+  { id: LAST_VERB, value: VERB_FORWARDED },
+  { id: ICON, value: '262' },
+];
+const CLEARED = [
+  { id: LAST_VERB, value: '0' },
+  { id: ICON, value: '256' },
+];
 
 const errorText = (err: unknown): string => {
   const mapped = toMailError(err);
@@ -68,15 +89,22 @@ export default class GraphMutator {
       if (change.flagged !== undefined) {
         patch.flag = { flagStatus: change.flagged ? 'flagged' : 'notFlagged' };
       }
-      if (change.answered !== undefined) {
-        patch.singleValueExtendedProperties = [
-          { id: 'Integer 0x1081', value: change.answered ? VERB_REPLIED : '0' },
-        ];
+      if (change.answered === true) patch.singleValueExtendedProperties = REPLIED;
+      if (change.answered === false) {
+        // Clear "answered" only: a forwarded mark stays (found in review).
+        const { singleValueExtendedProperties: props } = await this.client.request<{
+          singleValueExtendedProperties?: { id: string; value: string }[];
+        }>(
+          'GET',
+          `/me/messages/${seg(graphId)}?$select=id&$expand=singleValueExtendedProperties($filter=id eq '${LAST_VERB}')`,
+        );
+        const verb = props?.[0]?.value;
+        if (verb === VERB_REPLIED || verb === '103') patch.singleValueExtendedProperties = CLEARED;
       }
       if (touchesKeywords) {
         const current = await this.client.request<{ categories?: string[] }>(
           'GET',
-          `/me/messages/${graphId}?$select=categories`,
+          `/me/messages/${seg(graphId)}?$select=categories`,
         );
         const next = new Set(current.categories ?? []);
         change.addKeywords?.forEach((k) => {
@@ -88,7 +116,7 @@ export default class GraphMutator {
         patch.categories = [...next];
       }
       if (Object.keys(patch).length > 0) {
-        await this.client.request('PATCH', `/me/messages/${graphId}`, patch);
+        await this.client.request('PATCH', `/me/messages/${seg(graphId)}`, patch);
       }
     });
   }
@@ -96,8 +124,8 @@ export default class GraphMutator {
   /** Marks a message forwarded (Outlook's forward arrow). */
   async markForwarded(id: MessageId): Promise<void> {
     await guard(async () =>
-      this.client.request('PATCH', `/me/messages/${graphMessageId(id)}`, {
-        singleValueExtendedProperties: [{ id: 'Integer 0x1081', value: VERB_FORWARDED }],
+      this.client.request('PATCH', `/me/messages/${seg(graphMessageId(id))}`, {
+        singleValueExtendedProperties: FORWARDED,
       }),
     );
   }
@@ -112,7 +140,7 @@ export default class GraphMutator {
     return GraphMutator.each(ids, result, async (graphId, id) => {
       const moved = await this.client.request<{ id: string }>(
         'POST',
-        `/me/messages/${graphId}/${kind}`,
+        `/me/messages/${seg(graphId)}/${kind}`,
         { destinationId },
         IMMUTABLE,
       );
@@ -134,12 +162,12 @@ export default class GraphMutator {
     return GraphMutator.each(ids, { succeeded: [], failed: [] }, async (graphId) => {
       const { parentFolderId } = await this.client.request<{ parentFolderId?: string }>(
         'GET',
-        `/me/messages/${graphId}?$select=parentFolderId`,
+        `/me/messages/${seg(graphId)}?$select=parentFolderId`,
       );
       if (options.permanent || parentFolderId === trash) {
-        await this.client.request('POST', `/me/messages/${graphId}/permanentDelete`);
+        await this.client.request('POST', `/me/messages/${seg(graphId)}/permanentDelete`);
       } else {
-        await this.client.request('POST', `/me/messages/${graphId}/move`, {
+        await this.client.request('POST', `/me/messages/${seg(graphId)}/move`, {
           destinationId: 'deleteditems',
         });
       }
@@ -156,7 +184,7 @@ export default class GraphMutator {
     const displayName = name.trim();
     if (displayName === '') throw new MailError('invalid', 'A folder name cannot be empty');
     const path = parentId
-      ? `/me/mailFolders/${graphFolderId(parentId)}/childFolders`
+      ? `/me/mailFolders/${seg(graphFolderId(parentId))}/childFolders`
       : '/me/mailFolders';
     const created = await guard(async () =>
       this.client.request<{ id: string }>('POST', path, { displayName }),
@@ -169,12 +197,14 @@ export default class GraphMutator {
     if (displayName === '') throw new MailError('invalid', 'A folder name cannot be empty');
     const graphId = graphFolderId(id);
     await guard(async () =>
-      this.client.request('PATCH', `/me/mailFolders/${graphId}`, { displayName }),
+      this.client.request('PATCH', `/me/mailFolders/${seg(graphId)}`, { displayName }),
     );
     return this.folder(graphId);
   }
 
   async deleteFolder(id: FolderId): Promise<void> {
-    await guard(async () => this.client.request('DELETE', `/me/mailFolders/${graphFolderId(id)}`));
+    await guard(async () =>
+      this.client.request('DELETE', `/me/mailFolders/${seg(graphFolderId(id))}`),
+    );
   }
 }

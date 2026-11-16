@@ -20,7 +20,13 @@ export type MailErrorCode =
   /** The request itself is wrong (empty folder name, no recipient): fix it, do not retry. */
   | 'invalid'
   /** Transient (network, throttling): retrying later may work. */
-  | 'transient';
+  | 'transient'
+  /**
+   * A send whose outcome is unknown: the server may have sent it before
+   * failing (a 5xx after the request, a cut connection). Check the sent
+   * folder before sending again — never retry blindly.
+   */
+  | 'uncertain';
 
 export class MailError extends Error {
   readonly code: MailErrorCode;
