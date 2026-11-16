@@ -316,11 +316,18 @@ export interface ChangeBatch {
 }
 
 export interface ListChangesOptions {
-  /** Cap of `added` per batch (default 50): bounds memory, raw sources included. */
+  /** Cap of `added` per batch (default 50). */
   maxMessages?: number;
   /**
-   * Default true: the host's ingestion needs the source, and `maxMessages`
-   * bounds the memory. False: ids and flags only, fetch sources with `getRaw`.
+   * Cap of the raw sources of one batch, in bytes (default 50 MB). A count
+   * alone does not bound memory: on a mailbox measured on OVH, 20 sent
+   * messages weighed 25 MB. A batch always holds at least one message, even
+   * a larger one, so synchronisation never stalls.
+   */
+  maxBytes?: number;
+  /**
+   * Default true: the host's ingestion needs the source; `maxBytes` bounds the
+   * memory. False: ids and flags only, fetch sources with `getRaw`.
    */
   includeRaw?: boolean;
 }

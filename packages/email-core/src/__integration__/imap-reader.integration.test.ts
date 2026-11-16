@@ -167,6 +167,7 @@ describe('ImapReader against Dovecot', () => {
       const seed = await seedClient(engine.account);
       const status = await seed.status('INBOX', { uidValidity: true });
       await seed.logout();
+      if (!status) throw new Error('STATUS refused');
       return { uidValidity: String(status.uidValidity) };
     })();
 

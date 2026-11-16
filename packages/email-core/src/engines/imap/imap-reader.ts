@@ -92,7 +92,7 @@ export function toFlags(flags: Set<string> | undefined): Flags {
   };
 }
 
-function stripAngles(value: string | undefined): string | undefined {
+export function stripAngles(value: string | undefined): string | undefined {
   const bare = value?.replace(/^<|>$/g, '');
   return bare === '' ? undefined : bare;
 }
