@@ -4180,11 +4180,13 @@ export default class ImapService {
   async getCapabilities(accountName: string): Promise<string[]> {
     const client = await this.connections.getImapClient(accountName);
     try {
-      // ImapFlow exposes capabilities as a Set on the client
+      // ImapFlow exposes capabilities as a Map (name -> true, or the value of
+      // a NAME=VALUE capability). Array.from(map) would yield [name, value]
+      // pairs, which check_health then printed as `["IMAP4rev1",true]`.
       const caps = (client as unknown as Record<string, unknown>).capabilities as
-        | Set<string>
+        | Map<string, unknown>
         | undefined;
-      return caps ? Array.from(caps) : [];
+      return caps ? Array.from(caps.keys()) : [];
     } catch {
       return [];
     }
