@@ -19,6 +19,7 @@ import type {
 import type { RawAccountConfig, RawAppConfig, RawSearchPreset } from './schema.js';
 import { AppConfigFileSchema } from './schema.js';
 import { resolveSecretCommands } from './secret-command.js';
+import { safeExcerpt } from './validate.js';
 import { CONFIG_FILE, xdg } from './xdg.js';
 
 // ---------------------------------------------------------------------------
@@ -163,15 +164,23 @@ async function loadFromFile(filePath: string = CONFIG_FILE): Promise<RawAppConfi
   try {
     return parseTOML(content) as unknown as RawAppConfig;
   } catch (err) {
-    // smol-toml fournit la ligne et la colonne (propriétés de TomlError) et un
-    // extrait du fichier avec un repère sous le caractère fautif.
-    const detail = err instanceof Error ? err.message : String(err);
+    // smol-toml fournit la ligne et la colonne (propriétés de TomlError). Son
+    // message recopie AUSSI les lignes voisines du fichier — mot de passe
+    // compris si l'erreur tombe à côté — et ce texte finit dans les journaux
+    // du client MCP. On ne garde donc que la cause (premier paragraphe) et la
+    // ligne fautive passée par `safeExcerpt`, qui masque la valeur des clés
+    // sensibles (même règle que `config validate`).
+    const message = err instanceof Error ? err.message : String(err);
+    const cause = message.split(/\n\s*\n/)[0]?.trim() ?? message;
     const { line, column } = err as { line?: unknown; column?: unknown };
     const where =
       typeof line === 'number'
         ? ` (line ${line}${typeof column === 'number' ? `, column ${column}` : ''})`
         : '';
-    throw new Error(`TOML syntax error in ${filePath}${where}:\n${detail}`);
+    const faulty = typeof line === 'number' ? content.split(/\r?\n/)[line - 1] : undefined;
+    const excerpt = faulty === undefined ? undefined : safeExcerpt(faulty);
+    const shown = excerpt === undefined ? '' : `\n  ${line}: ${excerpt}`;
+    throw new Error(`TOML syntax error in ${filePath}${where}: ${cause}${shown}`);
   }
 }
 

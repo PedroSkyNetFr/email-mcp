@@ -1,11 +1,42 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { mcpLog } from '../logging.js';
 import type { AccountConfig, WatcherConfig } from '../types/index.js';
 import eventBus from './event-bus.js';
 import WatcherService from './watcher.service.js';
+import { readWatermark, writeWatermark } from './watcher-state.js';
+
+// Le watcher persiste sa position sous XDG_STATE_HOME, résolu au chargement de
+// xdg.ts : le rediriger AVANT tout import (vi.hoisted passe devant les
+// imports), sinon une exécution des tests réécrirait les vrais repères et le
+// prochain démarrage réel reprendrait d'un UID inventé ici.
+const { stateHome } = vi.hoisted(() => {
+  const base = process.env.TEMP ?? process.env.TMPDIR ?? '/tmp';
+  const dir = `${base}/email-mcp-watcher-test-${process.pid}-${Date.now()}`;
+  process.env.XDG_STATE_HOME = dir;
+  return { stateHome: dir };
+});
+const stateDir = path.join(stateHome, 'email-mcp', 'watcher');
+
+beforeEach(async () => {
+  await fs.rm(stateDir, { recursive: true, force: true });
+  vi.mocked(eventBus.emit).mockClear();
+});
+
+afterAll(async () => {
+  await fs.rm(stateHome, { recursive: true, force: true });
+});
 
 // Instances créées par le mock, pour piloter les événements IMAP d'un test.
 const { imapInstances, mockControl } = vi.hoisted(() => ({
   /** `failNextLock` : la prochaine instance refuse le SELECT (getMailboxLock). */
-  mockControl: { failNextLock: false },
+  mockControl: {
+    failNextLock: false,
+    uidNext: 100,
+    uidValidity: 7n,
+    /** UID « arrivés pendant l'arrêt » : réponse du SEARCH et du FETCH du rattrapage. */
+    missed: [] as number[],
+  },
   imapInstances: [] as {
     options: Record<string, unknown>;
     on: ReturnType<typeof vi.fn>;
@@ -13,6 +44,7 @@ const { imapInstances, mockControl } = vi.hoisted(() => ({
     connect: ReturnType<typeof vi.fn>;
     close: ReturnType<typeof vi.fn>;
     getMailboxLock: ReturnType<typeof vi.fn>;
+    search: ReturnType<typeof vi.fn>;
   }[],
 }));
 
@@ -20,12 +52,22 @@ const { imapInstances, mockControl } = vi.hoisted(() => ({
 vi.mock('imapflow', () => {
   class MockImapFlow {
     usable = true;
-    mailbox = { uidNext: 100 };
+    mailbox = { uidNext: mockControl.uidNext, uidValidity: mockControl.uidValidity };
+    search = vi.fn().mockResolvedValue([...mockControl.missed]);
     connect = vi.fn().mockResolvedValue(undefined);
     logout = vi.fn().mockResolvedValue(undefined);
     getMailboxLock = vi.fn().mockResolvedValue({ release: vi.fn() });
     on = vi.fn();
-    fetch = vi.fn();
+    fetch = vi.fn().mockImplementation((range: string) => {
+      const wanted = new Set(String(range).split(',').map(Number));
+      const uids = mockControl.missed.filter((uid) => wanted.has(uid));
+      // eslint-disable-next-line @stylistic/wrap-iife -- même motif que les autres mocks de fetch
+      return (async function* gen() {
+        for (const uid of uids) {
+          yield { uid, flags: new Set<string>(), envelope: { subject: `m${uid}` } };
+        }
+      })();
+    });
     close = vi.fn();
     options: Record<string, unknown>;
 
@@ -218,5 +260,95 @@ describe('WatcherService', () => {
     expect(events).toEqual(expect.arrayContaining(['error', 'close', 'exists']));
     // stop() annule la reconnexion programmée.
     await watcher.stop();
+  });
+
+  // -------------------------------------------------------------------------
+  // Reprise après coupure (repère persistant)
+  // -------------------------------------------------------------------------
+
+  describe('resume after a restart', () => {
+    const config: WatcherConfig = { enabled: true, folders: ['INBOX'], idleTimeout: 1740 };
+
+    afterEach(() => {
+      mockControl.uidNext = 100;
+      mockControl.uidValidity = 7n;
+      mockControl.missed = [];
+    });
+
+    it('persists the starting position on a first watch', async () => {
+      const watcher = new WatcherService(config, [testAccount]);
+      await watcher.start();
+      expect(await readWatermark('test', 'INBOX', stateDir)).toMatchObject({
+        uidValidity: '7',
+        lastSeenUid: 99,
+      });
+      expect(watcher.getStatus()[0].lastSeenUid).toBe(99);
+      await watcher.stop();
+    });
+
+    it('reports mail that arrived while stopped (same UIDVALIDITY)', async () => {
+      // Avant : la connexion repartait de UIDNEXT-1 = 104, ces 3 messages
+      // n'étaient jamais notifiés.
+      await writeWatermark('test', 'INBOX', '7', 101, stateDir);
+      mockControl.uidNext = 105;
+      mockControl.missed = [102, 103, 104];
+      const watcher = new WatcherService(config, [testAccount]);
+      await watcher.start();
+      const client = imapInstances[imapInstances.length - 1];
+
+      await vi.waitFor(() => {
+        expect(eventBus.emit).toHaveBeenCalled();
+      });
+      expect(client.search).toHaveBeenCalledWith({ uid: '102:*' }, { uid: true });
+      const [range, , options] = client.fetch.mock.calls[0] as [string, unknown, unknown];
+      expect(range).toBe('102,103,104');
+      expect(options).toEqual({ uid: true });
+      const [, payload] = vi.mocked(eventBus.emit).mock.calls[0] as [
+        string,
+        { emails: { id: string }[] },
+      ];
+      expect(payload.emails.map((e) => e.id)).toEqual(['102', '103', '104']);
+      await vi.waitFor(async () => {
+        expect((await readWatermark('test', 'INBOX', stateDir))?.lastSeenUid).toBe(104);
+      });
+      await watcher.stop();
+    });
+
+    it('caps the catch-up to the most recent messages and logs the rest', async () => {
+      await writeWatermark('test', 'INBOX', '7', 1, stateDir);
+      mockControl.uidNext = 62;
+      mockControl.missed = Array.from({ length: 60 }, (_, i) => i + 2); // 2..61
+      const watcher = new WatcherService(config, [testAccount]);
+      await watcher.start();
+      const client = imapInstances[imapInstances.length - 1];
+
+      await vi.waitFor(() => {
+        expect(eventBus.emit).toHaveBeenCalled();
+      });
+      const [range] = client.fetch.mock.calls[0] as [string];
+      expect(range.split(',')).toHaveLength(50);
+      expect(range.startsWith('12,')).toBe(true);
+      expect(vi.mocked(mcpLog)).toHaveBeenCalledWith(
+        'warning',
+        'watcher',
+        expect.stringContaining('10 older one(s) not notified'),
+      );
+      // Les messages sautés ne seront pas rattrapés au prochain démarrage.
+      await vi.waitFor(async () => {
+        expect((await readWatermark('test', 'INBOX', stateDir))?.lastSeenUid).toBe(61);
+      });
+      await watcher.stop();
+    });
+
+    it('ignores a position saved under another UIDVALIDITY', async () => {
+      await writeWatermark('test', 'INBOX', '6', 50, stateDir);
+      const watcher = new WatcherService(config, [testAccount]);
+      await watcher.start();
+      expect(watcher.getStatus()[0].lastSeenUid).toBe(99);
+      expect((await readWatermark('test', 'INBOX', stateDir))?.uidValidity).toBe('7');
+      const client = imapInstances[imapInstances.length - 1];
+      expect(client.search).not.toHaveBeenCalled();
+      await watcher.stop();
+    });
   });
 });

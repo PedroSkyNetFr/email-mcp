@@ -430,10 +430,14 @@ export interface SearchStatus {
   /** Human-readable explanation of what failed (never implies "zero matches"). */
   message: string;
   /**
-   * Set by the R6 windowed fallback (PR-3) when a narrowed retry was applied.
-   * Reserved here so the contract is stable across the PR sequence.
+   * Posé par le repli fenêtré (wgs4 0c2c2b4, R6) quand une relance restreinte
+   * aux `sinceDays` derniers jours a été tentée après l'échec d'une recherche
+   * IMAP sans date. Présent AVEC `searchFailed` si la relance n'a rien donné,
+   * SANS `searchFailed` (résultats partiels, `totalApprox`) si elle a trouvé.
+   * `since` : premier jour couvert (AAAA-MM-JJ) — l'appelant élargit avec un
+   * `before` antérieur ou égal. Jamais posé par le backend Graph.
    */
-  windowed?: { applied: true; sinceDays: number };
+  windowed?: { applied: true; sinceDays: number; since?: string };
   /** Actionable next step for the caller (narrow the query, retry, etc.). */
   suggestion: string;
 }
@@ -495,7 +499,11 @@ export interface PaginatedResult<T> {
    * authoritative. Always accompanied by `searchStatus` + `warning`.
    */
   searchFailed?: true;
-  /** Structured failure detail when `searchFailed` is set. */
+  /**
+   * Structured failure detail when `searchFailed` is set. Also present WITHOUT
+   * `searchFailed` when the windowed fallback served partial results
+   * (`searchStatus.windowed`): then it describes the original failure.
+   */
   searchStatus?: SearchStatus;
   /**
    * Message count of the opened mailbox (R8). Free under the search lock —

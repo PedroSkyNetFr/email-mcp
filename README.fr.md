@@ -512,6 +512,7 @@ commande est `node <chemin>/dist/main.js stdio`.
 | `config edit` | Modifie les réglages globaux (limite d'envoi, lecture seule). |
 | `config path` | Affiche le chemin du fichier de configuration. |
 | `config init` | Écrit un modèle commenté. |
+| `config validate` | Contrôle `config.toml` sans se connecter : syntaxe TOML (ligne/colonne), erreurs de schéma (chemin du champ, compte), clés inconnues avec suggestion de faute de frappe, et cohérence (noms de comptes en double, `backend = "graph"` sans `oauth2`, `tls` et `starttls` tous deux actifs, port qui contredit `tls`, `signature_default` sans `signature_path`, `MCP_EMAIL_ACCOUNTS` qui cite un compte absent…). N'affiche jamais la valeur d'un secret. Code de sortie 1 s'il y a une erreur, 0 sinon (avertissements permis). Alias : `config check`. |
 | `scheduler check` | Envoie les messages programmés arrivés à échéance. |
 | `scheduler list` | Affiche les envois programmés en attente, envoyés et en échec. |
 | `scheduler install` / `uninstall` / `status` | Gère la vérification périodique du système. |
@@ -814,6 +815,21 @@ Une recherche que le serveur refuse ou laisse expirer est signalée comme un
 échec (`searchFailed` et un avertissement), jamais comme zéro résultat. Sur un
 très gros dossier sans index plein texte, une recherche dans le corps passe par
 une connexion bornée et s'accompagne d'un avertissement de coût.
+
+**Repli sur 90 jours (IMAP).** Quand une recherche **sans filtre de date** échoue
+ainsi (`search_failed` ou `timeout`), elle est relancée une fois, sur une
+connexion isolée bornée, restreinte aux 90 derniers jours. Si la fenêtre contient
+des correspondances, elles sont rendues comme **résultats partiels** :
+`searchStatus.windowed = { applied, sinceDays: 90, since }`, `totalApprox: true`
+et un avertissement `PARTIAL RESULTS` qui donne le premier jour couvert. Pour
+remonter plus loin, relancer avec une plage explicite — par exemple
+`before: "<since>"` et un `since` borné — : une recherche datée n'est jamais
+refenêtrée (la même règle préserve les reprises par `before`). Si la fenêtre est
+vide, ou si la relance échoue aussi, c'est **l'échec d'origine** qui est rendu,
+marqué fenêtré : une tranche de 90 jours vide ne dit rien du courrier plus
+ancien. Pas de relance pour une erreur de connexion, une recherche par UID ou une
+recherche Gmail `gmail_raw`. Les comptes Graph n'en ont pas besoin : leur
+recherche s'appuie sur l'index serveur de Microsoft.
 
 ### Sur les comptes Microsoft Graph
 
@@ -1266,7 +1282,19 @@ webhook_events = ["urgent", "high"]
 
 Quand un nouveau message est traité, le serveur envoie
 `notifications/resources/updated` pour les ressources `unread` et `mailboxes` du
-compte aux clients abonnés. La surveillance ne fonctionne qu'en IMAP.
+compte aux clients abonnés. La surveillance ne fonctionne qu'en IMAP : les
+comptes servis par Graph en sont écartés (avec une ligne de journal au
+démarrage) — Microsoft Graph n'offre pas de session IDLE.
+
+**Reprise après un arrêt.** Le dernier UID signalé par compte et dossier est
+enregistré, avec l'UIDVALIDITY du dossier, dans
+`$XDG_STATE_HOME/email-mcp/watcher/` (un petit fichier JSON par compte/dossier,
+écrit de façon atomique). À la connexion suivante — redémarrage ou reconnexion —
+le courrier arrivé entre-temps est signalé, plafonné aux **50 plus récents** (une
+ligne de journal dit combien de plus anciens ont été sautés). Si l'UIDVALIDITY a
+changé (le serveur a renuméroté le dossier), la position enregistrée ne veut plus
+rien dire : la surveillance repart de la fin actuelle du dossier et le journalise.
+Au premier passage sur un dossier, le courrier existant n'est pas rejoué.
 
 ## Envoi programmé
 

@@ -143,6 +143,27 @@ rate_limit = 5
       expect(err.message).not.toContain('No configuration found');
     });
 
+    // Régression : le message brut de smol-toml recopie les lignes voisines du
+    // fichier ; une erreur près d'un mot de passe le faisait apparaître en clair
+    // dans les journaux du client MCP.
+    it('never echoes a secret value next to a TOML syntax error', async () => {
+      const configPath = path.join(tmpDir, 'config.toml');
+      await fs.writeFile(
+        configPath,
+        '[[accounts]]\nname = "x"\npassword = "S3CRET-VALUE\nport = 1\n',
+      );
+
+      const err = await loadConfig(configPath).then(
+        () => new Error('expected a rejection'),
+        (e: unknown) => e as Error,
+      );
+
+      expect(err.message).toContain(`TOML syntax error in ${configPath}`);
+      expect(err.message).toMatch(/line 3/);
+      expect(err.message).toContain('password = ***');
+      expect(err.message).not.toContain('S3CRET-VALUE');
+    });
+
     it('reports schema errors by field path and account name', async () => {
       const configPath = path.join(tmpDir, 'config.toml');
       await fs.writeFile(

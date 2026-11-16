@@ -131,7 +131,12 @@ export function formatSearchFailure(result: {
   ];
   if (s?.suggestion) lines.push(`Suggestion: ${s.suggestion}`);
   if (s?.windowed?.applied) {
-    lines.push(`(A ${s.windowed.sinceDays}-day windowed retry was applied.)`);
+    // La relance fenêtrée a été tentée et n'a rien donné d'exploitable : le
+    // dire, sinon l'appelant la relancerait à la main pour rien.
+    const since = s.windowed.since ? ` (since ${s.windowed.since})` : '';
+    lines.push(
+      `(An automatic ${s.windowed.sinceDays}-day windowed retry${since} was also tried and gave no usable result.)`,
+    );
   }
   return lines.join('\n');
 }
@@ -690,6 +695,9 @@ export default function registerEmailsTools(
         `faster native Gmail search. Results are paginated. ${COVERAGE_NOTE} ` +
         `A failed or timed-out SEARCH is reported explicitly (searchFailed + a warning) and is NEVER returned as a ` +
         `silent zero-result — if you see it, narrow the query and retry; the messages may still exist. ` +
+        `On IMAP, an UNDATED search that fails this way is retried once on the last 90 days: matches from that ` +
+        `window come back as PARTIAL RESULTS (warning + searchStatus.windowed, total approximate); to go further ` +
+        `back, re-run with an explicit before:/since: range (dated searches are never re-windowed). ` +
         `Archive folders and other high-volume mailboxes (shared or ticketing inboxes can accumulate tens of ` +
         `thousands of messages) are very large — always include a date filter (since/before/on or relative ` +
         `tokens like "30d") or narrow by subject:/from:, otherwise the search may be slow or truncated. ` +

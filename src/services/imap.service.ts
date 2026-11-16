@@ -74,7 +74,14 @@ import type { MailboxRef } from './mailbox-resolver.js';
 import { resolveMailboxForAccount } from './mailbox-resolver.js';
 import { buildCoverage, MAX_SCANNED_MESSAGES, SEARCH_SCAN_BUDGET_MS } from './search-coverage.js';
 import type { BuildResult, SearchParams } from './search-criteria.js';
-import { applyLiteralFilters, buildSearchCriteria, chunkUids } from './search-criteria.js';
+import {
+  applyLiteralFilters,
+  buildSearchCriteria,
+  chunkUids,
+  hasDateNarrowing,
+  RECENCY_WINDOW_DAYS,
+  withRecencyWindow,
+} from './search-criteria.js';
 import {
   connectionErrorStatus,
   SearchFailedError,
@@ -1261,6 +1268,22 @@ export default class ImapService {
   }
 
   /**
+   * Cet échec mérite-t-il une relance automatique fenêtrée ?
+   *
+   * `search_failed` (le `false` avalé par imapflow : NO du serveur sur une
+   * requête coûteuse, ou délai de socket) et `timeout` (notre propre attente
+   * bornée) signifient tous deux « trop de travail pour ce dossier » — ce
+   * qu'une fenêtre de dates corrige.
+   *
+   * `connection_error` n'est PAS relancé : la socket est déjà cassée, une
+   * relance brûlerait une connexion pour réapprendre la même chose ; il faut
+   * se reconnecter, pas chercher moins de courrier.
+   */
+  private static isWindowRetryable(status: SearchStatus): boolean {
+    return status.kind === 'search_failed' || status.kind === 'timeout';
+  }
+
+  /**
    * R5/R8: the opened mailbox's message count. FREE under the search lock —
    * imapflow sets `client.mailbox` to the selected folder (with `.exists`)
    * after `getMailboxLock`; no STATUS round-trip, no cache.
@@ -1838,9 +1861,10 @@ export default class ImapService {
     };
     try {
       const params: SearchParams = { ...(options as SearchParams), query };
-      const { criteria, postFilters, warnings, bodyScan } = buildSearchCriteria(params, {
-        isGmail,
-      });
+      const { criteria, postFilters, warnings, bodyScan, gmailRawUsed } = buildSearchCriteria(
+        params,
+        { isGmail },
+      );
 
       // R5/R8: folder size is FREE under the lock (no STATUS round-trip). A
       // body scan over a large folder on a server with no full-text index is
@@ -1874,6 +1898,76 @@ export default class ImapService {
         searchOutcome = await ImapService.runSearch(client, criteria);
       }
 
+      // -----------------------------------------------------------------
+      // Repli sur les RECENCY_WINDOW_DAYS derniers jours (wgs4 0c2c2b4, R6)
+      // -----------------------------------------------------------------
+      // Une recherche qui n'a pas abouti signale « trop de courrier », ce
+      // n'est pas une réponse. Plutôt que de rendre un échec nu, relancer UNE
+      // fois restreinte aux 90 derniers jours, et le dire. Chaque condition
+      // compte :
+      //   - échec de volume seulement (`isWindowRetryable`) ;
+      //   - aucune date fournie par l'appelant (`hasDateNarrowing`) — sinon
+      //     on réduirait en silence SA plage (et une reprise par `before`
+      //     n'est jamais refenêtrée) ;
+      //   - pas de recherche par UID (déjà minimale ; un ET de date ferait
+      //     disparaître des UID nommés) ;
+      //   - pas le raccourci Gmail `X-GM-RAW` (syntaxe native, déjà rapide).
+      // La relance passe toujours par une connexion éphémère bornée : cette
+      // recherche vient de mal se comporter, la connexion partagée ne doit
+      // pas y être remise.
+      let windowedStatus: SearchStatus | undefined;
+      if (
+        !searchOutcome.ok &&
+        !gmailRawUsed &&
+        ImapService.isWindowRetryable(searchOutcome.status) &&
+        !hasDateNarrowing(params) &&
+        params.uids === undefined
+      ) {
+        const originalStatus = searchOutcome.status;
+        const windowCriteria = withRecencyWindow(criteria, RECENCY_WINDOW_DAYS);
+        const windowStart = (windowCriteria.since as Date).toISOString().slice(0, 10);
+        const windowed = {
+          applied: true,
+          sinceDays: RECENCY_WINDOW_DAYS,
+          since: windowStart,
+        } as const;
+        // Ne jamais garder le verrou partagé pendant la relance.
+        releaseLock();
+        const retry = await ImapService.runSearchEphemeral(
+          this.connections,
+          accountName,
+          mailbox,
+          windowCriteria,
+          EPHEMERAL_SEARCH_TIMEOUT_MS,
+        );
+        if (retry.ok && retry.uids.length > 0) {
+          // Succès partiel : bruyant, explicite, impossible à prendre pour une
+          // réponse complète — l'appelant apprend la plage RÉELLEMENT couverte
+          // et comment aller plus loin.
+          warnings.push(
+            `PARTIAL RESULTS — the full-range search did not complete (${originalStatus.kind}); ` +
+              `it was retried automatically on the last ${RECENCY_WINDOW_DAYS} days only ` +
+              `(since ${windowStart}). Matches received before ${windowStart} are NOT included. ` +
+              `To search further back, re-run with an explicit date range, e.g. ` +
+              `before: "${windowStart}" with since: a bounded earlier date ` +
+              '(an explicitly dated search is never re-windowed), or narrow with subject:/from:.',
+          );
+          searchOutcome = retry;
+          windowedStatus = { ...originalStatus, windowed };
+        } else {
+          // La relance n'a rien donné d'exploitable : rendre l'échec D'ORIGINE.
+          // Zéro résultat sur 90 jours ne dit rien du reste du dossier ;
+          // l'afficher comme `total: 0` recréerait le zéro silencieux que ce
+          // mécanisme supprime.
+          warnings.push(
+            `A ${RECENCY_WINDOW_DAYS}-day windowed retry (since ${windowStart}) was attempted ` +
+              `automatically and ${retry.ok ? 'found no match in that window' : `did not complete either (${retry.status.kind})`} — ` +
+              'treat this as "search did not complete", NOT as "no such mail".',
+          );
+          searchOutcome = { ok: false, status: { ...originalStatus, windowed } };
+        }
+      }
+
       if (!searchOutcome.ok) {
         // R1/R4: a failed SEARCH must never read as a clean zero. Surface the
         // structured status AND fold it into `warning` so it always reaches
@@ -1896,15 +1990,20 @@ export default class ImapService {
         };
       }
 
-      // The at-risk path released the shared lock for the slow SEARCH;
-      // re-acquire it for the cheap page FETCH / facet scan below (identical
-      // to the non-at-risk path from here on).
+      // The at-risk path — and the windowed retry — released the shared lock
+      // for the slow SEARCH; re-acquire it for the cheap page FETCH / facet
+      // scan below (identical to the non-at-risk path from here on).
       if (!activeLock) {
         activeLock = await client.getMailboxLock(mailbox);
       }
 
       let uids: number[] = searchOutcome.uids;
-      let totalApprox = false;
+      // Un résultat fenêtré ne couvre qu'une tranche du dossier : `total`
+      // compte cette tranche — approximatif par construction.
+      let totalApprox = windowedStatus !== undefined;
+      // Porté par chaque retour réussi ci-dessous : l'étiquette « fenêtré »
+      // voyage avec les résultats, pas seulement avec les échecs.
+      const windowedFields = windowedStatus ? { searchStatus: windowedStatus } : {};
 
       // Aucun plafond ici : sans filtre côté client, seule la page demandée est
       // lue, quel que soit le nombre de correspondances — total exact, toutes
@@ -1923,6 +2022,7 @@ export default class ImapService {
           ...(warning ? { warning } : {}),
           ...(totalApprox ? { totalApprox } : {}),
           ...(folderSize !== undefined ? { folderSize } : {}),
+          ...windowedFields,
         };
       }
 
@@ -1983,6 +2083,7 @@ export default class ImapService {
           ...(coverage ? { coverage } : {}),
           ...(facets ? { facets } : {}),
           ...(folderSize !== undefined ? { folderSize } : {}),
+          ...windowedFields,
         };
       }
 
@@ -2003,6 +2104,7 @@ export default class ImapService {
         ...(coverage ? { coverage } : {}),
         ...(facets ? { facets } : {}),
         ...(folderSize !== undefined ? { folderSize } : {}),
+        ...windowedFields,
       };
     } finally {
       releaseLock();

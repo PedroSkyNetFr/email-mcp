@@ -6,7 +6,7 @@
  *   stdio     Run as MCP server over stdio (default)
  *   setup     Interactive account setup wizard
  *   test      Test IMAP/SMTP connections
- *   config    Config management (show, path, init)
+ *   config    Config management (show, path, init, validate)
  *   scheduler Email scheduling management
  */
 
@@ -45,7 +45,7 @@ Commands:
   setup       Alias for 'account add'
   test        Test connections for all or a specific account
   install     Register/unregister with MCP clients (Claude, Cursor, …)
-  config      Config management (show, edit, path, init)
+  config      Config management (show, edit, path, init, validate)
   scheduler   Email scheduling management (check, list, install, uninstall, status)
   notify      Test and diagnose desktop notifications
   help        Show this help message
@@ -66,6 +66,7 @@ Examples:
   email-mcp config edit              # Edit global settings
   email-mcp config path              # Print config file path
   email-mcp config init              # Create template config
+  email-mcp config validate          # Check syntax, schema, typos, consistency (no connection)
   email-mcp scheduler check          # Send overdue scheduled emails
   email-mcp scheduler install        # Install OS periodic check
   email-mcp notify test              # Send a test notification

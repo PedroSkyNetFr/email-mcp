@@ -500,6 +500,7 @@ Any other MCP client works the same way: a stdio server whose command is
 | `config edit` | Edit global settings (rate limit, read-only). |
 | `config path` | Print the configuration file path. |
 | `config init` | Write a commented template. |
+| `config validate` | Check `config.toml` without connecting: TOML syntax (line/column), schema errors (field path, account), unknown keys with a did-you-mean suggestion, and consistency (duplicate account names, `backend = "graph"` without `oauth2`, `tls` and `starttls` both on, a port that contradicts `tls`, `signature_default` without `signature_path`, `MCP_EMAIL_ACCOUNTS` naming an absent account…). Never prints a secret value. Exit code 1 on errors, 0 otherwise (warnings allowed). `config check` is an alias. |
 | `scheduler check` | Send the scheduled emails that are due. |
 | `scheduler list` | Show pending, sent and failed scheduled emails. |
 | `scheduler install` / `uninstall` / `status` | Manage the OS-level periodic check. |
@@ -792,6 +793,19 @@ A search the server rejects or times out is reported as a failure
 (`searchFailed` and a warning), never as zero results. On a very large folder
 without a full-text index, a body search runs on a bounded connection and comes
 with a cost warning.
+
+**90-day fallback (IMAP).** When a search with **no date filter** fails that way
+(`search_failed` or `timeout`), it is retried once, on a bounded isolated
+connection, restricted to the last 90 days. If that window has matches, they are
+returned as **partial results**: `searchStatus.windowed = { applied, sinceDays:
+90, since }`, `totalApprox: true`, and a `PARTIAL RESULTS` warning naming the
+first day covered. To search further back, re-run with an explicit range — for
+example `before: "<since>"` plus a bounded `since` — since a dated search is
+never re-windowed (the same rule keeps `before` continuations intact). If the
+window is empty, or the retry fails too, the **original failure** is returned,
+marked as windowed: an empty 90-day slice says nothing about older mail. No
+retry for a connection error, a UID search or a Gmail `gmail_raw` search. Graph
+accounts do not need it: their search runs on Microsoft's server-side index.
 
 ### On Microsoft Graph accounts
 
@@ -1223,7 +1237,18 @@ webhook_events = ["urgent", "high"]
 
 When new mail is processed, the server pushes `notifications/resources/updated`
 for the account's `unread` and `mailboxes` resources to subscribed clients. The
-watcher works over IMAP only.
+watcher works over IMAP only: Graph-backed accounts are skipped (logged at
+start-up) — there is no IDLE session on Microsoft Graph.
+
+**Resuming after a stop.** The last UID reported per account and folder is
+saved, with the folder's UIDVALIDITY, in
+`$XDG_STATE_HOME/email-mcp/watcher/` (one small JSON file per account/folder,
+written atomically). On the next connection — restart or reconnect — mail that
+arrived meanwhile is reported, capped to the **50 most recent** messages (a log
+line says how many older ones were skipped). If the UIDVALIDITY changed (the
+server renumbered the folder), the saved position is meaningless: the watcher
+restarts from the current end of the folder and logs it. The first time a
+folder is watched, existing mail is not replayed.
 
 ## Scheduled sending
 

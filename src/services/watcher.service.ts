@@ -8,6 +8,10 @@
  * - Separate ImapFlow connections from ConnectionManager (IDLE holds lock)
  * - Auto-reconnect with exponential backoff on connection failures
  * - Tracks last-seen UID per folder to detect genuinely new messages
+ * - Persists that UID (with UIDVALIDITY) per account+folder, so a restart or a
+ *   reconnect catches up on mail that arrived meanwhile (bounded, see
+ *   watcher-state.ts) instead of re-baselining to UIDNEXT-1
+ * - IMAP-only: Graph-backed accounts are skipped (no IDLE session there)
  */
 
 import { ImapFlow } from 'imapflow';
@@ -17,6 +21,13 @@ import type { AccountConfig, EmailMeta, WatcherConfig } from '../types/index.js'
 import eventBus from './event-bus.js';
 import { hasAttachments as hasAttachmentsLenient, safeIsoDate } from './imap.service.js';
 import type OAuthService from './oauth.service.js';
+import {
+  CATCH_UP_LIMIT,
+  readWatermark,
+  resolveBaselineUid,
+  selectCatchUp,
+  writeWatermark,
+} from './watcher-state.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,6 +38,14 @@ interface IdleState {
   account: AccountConfig;
   folder: string;
   lastSeenUid: number;
+  /** UIDVALIDITY à laquelle appartient `lastSeenUid` ; '' avant la 1re connexion. */
+  uidValidity: string;
+  /**
+   * File des traitements : rattrapage et événements `exists` passent l'un
+   * après l'autre, sinon deux lectures concurrentes du même repère
+   * signaleraient deux fois les mêmes messages.
+   */
+  queue: Promise<void>;
   lock: { release: () => void } | null;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   backoffMs: number;
@@ -158,6 +177,8 @@ export default class WatcherService {
       account,
       folder,
       lastSeenUid: 0,
+      uidValidity: '',
+      queue: Promise.resolve(),
       lock: null,
       reconnectTimer: null,
       backoffMs: INITIAL_BACKOFF_MS,
@@ -217,7 +238,7 @@ export default class WatcherService {
       // Listen for new messages
       created.on('exists', (data: { path: string; count: number; prevCount: number }) => {
         if (data.count > data.prevCount) {
-          this.handleNewEmails(key).catch(() => {});
+          this.enqueue(key, async () => this.handleNewEmails(key));
         }
       });
 
@@ -233,23 +254,60 @@ export default class WatcherService {
       }
 
       const { mailbox } = created;
-      const uidNext =
+      const box =
         mailbox && typeof mailbox === 'object'
-          ? ((mailbox as { uidNext?: number }).uidNext ?? 1)
-          : 1;
+          ? (mailbox as { uidNext?: number; uidValidity?: bigint | number })
+          : {};
+      const uidNext = box.uidNext ?? 1;
+      const uidValidity = box.uidValidity?.toString() ?? '';
+
+      // Reprendre, pas repartir de zéro : UIDNEXT-1 sauterait en silence tout
+      // ce qui est arrivé pendant l'arrêt du processus ou la reconnexion.
+      const stored = await readWatermark(state.account.name, state.folder);
+      const previousValidity = stored?.uidValidity ?? state.uidValidity;
+      const { uid: lastSeenUid, reason } = resolveBaselineUid({
+        inMemory: { lastSeenUid: state.lastSeenUid, uidValidity: state.uidValidity },
+        stored,
+        uidValidity,
+        uidNext,
+      });
 
       this.updateState(key, {
         client: created,
         lock,
-        lastSeenUid: uidNext - 1,
+        lastSeenUid,
+        uidValidity,
         backoffMs: INITIAL_BACKOFF_MS,
       });
 
-      await mcpLog(
-        'info',
-        'watcher',
-        `IDLE started: ${state.account.name}/${state.folder} (uid > ${uidNext - 1})`,
-      );
+      const label = `${state.account.name}/${state.folder}`;
+      if (reason === 'uidvalidity-changed') {
+        await mcpLog(
+          'warning',
+          'watcher',
+          `UIDVALIDITY changed for ${label} (stored ${previousValidity}, now ${uidValidity}): the saved position is meaningless, restarting from uid > ${lastSeenUid}; mail that arrived while stopped is not replayed.`,
+        );
+      } else if (reason === 'ahead-of-uidnext') {
+        await mcpLog(
+          'warning',
+          'watcher',
+          `Saved position for ${label} is past UIDNEXT ${uidNext}: discarded, restarting from uid > ${lastSeenUid}.`,
+        );
+      }
+      await mcpLog('info', 'watcher', `IDLE started: ${label} (uid > ${lastSeenUid}, ${reason})`);
+
+      // Toujours enregistrer la position de départ : sans cela, un premier
+      // passage sans aucun nouveau message ne laissait rien sur disque, et le
+      // redémarrage suivant repartait encore de UIDNEXT-1.
+      if (reason !== 'resumed') {
+        await this.persistWatermark(key);
+      }
+
+      // Trou entre le repère et UIDNEXT : du courrier est arrivé pendant
+      // l'arrêt. Le rattraper (borné aux plus récents).
+      if (reason === 'resumed' && lastSeenUid < uidNext - 1) {
+        this.enqueue(key, async () => this.handleNewEmails(key, { catchUp: true }));
+      }
     } catch (err) {
       // Connexion établie mais SELECT refusé (dossier absent, droits) : fermer
       // le client, sinon chaque tentative de reconnexion laissait une session
@@ -294,12 +352,56 @@ export default class WatcherService {
   // New email detection
   // -------------------------------------------------------------------------
 
-  private async handleNewEmails(key: string): Promise<void> {
+  /** Chaîne un traitement derrière les précédents du même dossier. */
+  private enqueue(key: string, task: () => Promise<void>): void {
+    const state = this.idleStates.get(key);
+    if (!state) return;
+    state.queue = state.queue.then(task).catch(() => {});
+  }
+
+  /** Enregistre le repère courant ; un échec d'écriture est journalisé, jamais fatal. */
+  private async persistWatermark(key: string): Promise<void> {
+    const state = this.idleStates.get(key);
+    if (!state || state.uidValidity === '') return;
+    await writeWatermark(
+      state.account.name,
+      state.folder,
+      state.uidValidity,
+      state.lastSeenUid,
+    ).catch((err: unknown) => {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      mcpLog('warning', 'watcher', `Could not persist watcher position: ${errMsg}`).catch(() => {});
+    });
+  }
+
+  /**
+   * Signale les messages d'UID > repère. En mode `catchUp` (reprise après un
+   * arrêt), les UID manqués sont d'abord listés par SEARCH, et seuls les
+   * CATCH_UP_LIMIT plus récents sont signalés ; le reste est journalisé.
+   */
+  private async handleNewEmails(key: string, opts: { catchUp?: boolean } = {}): Promise<void> {
     const state = this.idleStates.get(key);
     if (!state?.client) return;
 
     try {
-      const searchRange = `${state.lastSeenUid + 1}:*`;
+      let searchRange = `${state.lastSeenUid + 1}:*`;
+      let skippedMaxUid = state.lastSeenUid;
+      if (opts.catchUp) {
+        const found = await state.client.search({ uid: searchRange }, { uid: true });
+        // « N:* » renvoie le dernier message même si son UID est < N : filtrer.
+        const missed = (Array.isArray(found) ? found : []).filter((uid) => uid > state.lastSeenUid);
+        if (missed.length === 0) return;
+        const { report, skipped } = selectCatchUp(missed, CATCH_UP_LIMIT);
+        if (skipped > 0) {
+          skippedMaxUid = Math.max(...missed);
+          await mcpLog(
+            'warning',
+            'watcher',
+            `${missed.length} message(s) arrived in ${state.account.name}/${state.folder} while the watcher was stopped: reporting the ${report.length} most recent, ${skipped} older one(s) not notified.`,
+          );
+        }
+        searchRange = report.join(',');
+      }
       const emails: EmailMeta[] = [];
       let maxUid = state.lastSeenUid;
 
@@ -325,8 +427,11 @@ export default class WatcherService {
         }
       }
 
+      maxUid = Math.max(maxUid, skippedMaxUid);
       if (maxUid > state.lastSeenUid) {
         this.updateState(key, { lastSeenUid: maxUid });
+        // Persisté pour que le prochain processus reprenne ici.
+        await this.persistWatermark(key);
       }
 
       if (emails.length > 0) {
