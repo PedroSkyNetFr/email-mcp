@@ -42,7 +42,7 @@
     "version:bump:minor": "cog bump --minor",
     "version:bump:patch": "cog bump --patch",
     "version:log": "cog log",
-    "prepare": "lefthook install || true",
+    "prepare": "lefthook install || exit 0",
     "hooks:install": "lefthook install --force",
     "hooks:uninstall": "lefthook uninstall",
     "docker:build": "docker build -t codefuturist/email-mcp .",
